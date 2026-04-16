@@ -1,0 +1,293 @@
+# mizuya — MCP stdio server
+# Registers 6 tools so AI agents (Claude Desktop, etc.) can interact
+# with the knowledge graph over the Model Context Protocol.
+
+petiole main
+
+import "stdlib/cast"
+import "stdlib/db"
+import "stdlib/json" as jsonpkg
+import "stdlib/mcp"
+
+# mcpDBPath is the database path used by the MCP server, set from the
+# --db flag before starting the server.
+var mcpDBPath = ".mizuya/mizuya.db"
+
+# startMCP creates the MCP server, registers all tools, and runs the
+# stdio transport (blocking).
+func startMCP(dbPath string) error
+    mcpDBPath = dbPath
+    server := mcp.New("mizuya", "0.1.0")
+    registerTools(server)
+    return mcp.Serve(server)
+
+# registerTools adds all 6 knowledge graph tools to the MCP server.
+func registerTools(server reference mcp.Server)
+    registerUpsertEntity(server)
+    registerAddObservation(server)
+    registerRelate(server)
+    registerSearchTool(server)
+    registerGetContext(server)
+    registerSimilarTool(server)
+
+# --- Tool: upsert_entity ---
+
+func registerUpsertEntity(server reference mcp.Server)
+    schema := mcp.Schema(list of mcp.SchemaProperty{
+        mcp.Prop("id", "string", "Unique slug, e.g. 'kukicha' or 'vllm-h100-deploy'"),
+        mcp.Prop("type", "string", "Entity type: project, tool, person, concept, config, org"),
+        mcp.Prop("name", "string", "Human-readable name"),
+        mcp.Prop("summary", "string", "One-line description"),
+        mcp.Prop("tags", "array", "List of string tags"),
+    }) |> mcp.Required(list of string{"id", "type", "name"})
+
+    server |> mcp.Tool("upsert_entity", "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.", schema, func(args map of string to any) (any, error)
+        return handleUpsertEntity(args)
+    )
+
+func handleUpsertEntity(args map of string to any) (any, error)
+    id := argString(args, "id")
+    etype := argString(args, "type")
+    name := argString(args, "name")
+    if id equals "" or name equals ""
+        return mcp.ErrorResult("id and name are required"), empty
+
+    if etype equals ""
+        etype = "concept"
+
+    summary := argString(args, "summary")
+    tags := argStringList(args, "tags")
+
+    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
+    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+
+    upsertEntity(pool, id, etype, name, summary, tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
+
+    # Re-embed after upsert.
+    text, err := entityText(pool, id)
+    if err equals empty
+        vec, verr := embedText(text)
+        if verr equals empty
+            upsertEmbedding(pool, id, vec) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+
+    e := getEntity(pool, id) onerr return mcp.ErrorResult("fetch failed: {error}"), empty
+    return entityJSON(e), empty
+
+# --- Tool: add_observation ---
+
+func registerAddObservation(server reference mcp.Server)
+    schema := mcp.Schema(list of mcp.SchemaProperty{
+        mcp.Prop("entity_id", "string", "Entity to observe"),
+        mcp.Prop("text", "string", "The observation text"),
+        mcp.Prop("source", "string", "Source label (default: conversation)"),
+    }) |> mcp.Required(list of string{"entity_id", "text"})
+
+    server |> mcp.Tool("add_observation", "Record a fact or note about an entity. Appended to the entity's observation history.", schema, func(args map of string to any) (any, error)
+        return handleAddObservation(args)
+    )
+
+func handleAddObservation(args map of string to any) (any, error)
+    id := argString(args, "entity_id")
+    text := argString(args, "text")
+    if id equals "" or text equals ""
+        return mcp.ErrorResult("entity_id and text are required"), empty
+
+    source := argString(args, "source")
+    if source equals ""
+        source = "conversation"
+
+    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
+    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+
+    addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}"), empty
+
+    # Re-embed after observation.
+    corpus, err := entityText(pool, id)
+    if err equals empty
+        vec, verr := embedText(corpus)
+        if verr equals empty
+            upsertEmbedding(pool, id, vec) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+
+    return mcp.TextResult("observed: {text}"), empty
+
+# --- Tool: relate ---
+
+func registerRelate(server reference mcp.Server)
+    schema := mcp.Schema(list of mcp.SchemaProperty{
+        mcp.Prop("src", "string", "Source entity id"),
+        mcp.Prop("rel", "string", "Relation label: uses, depends_on, part_of, related_to, authored_by"),
+        mcp.Prop("dst", "string", "Destination entity id"),
+    }) |> mcp.Required(list of string{"src", "rel", "dst"})
+
+    server |> mcp.Tool("relate", "Create a typed edge between two entities in the knowledge graph.", schema, func(args map of string to any) (any, error)
+        return handleRelate(args)
+    )
+
+func handleRelate(args map of string to any) (any, error)
+    src := argString(args, "src")
+    rel := argString(args, "rel")
+    dst := argString(args, "dst")
+    if src equals "" or rel equals "" or dst equals ""
+        return mcp.ErrorResult("src, rel, and dst are required"), empty
+
+    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
+
+    relate(pool, src, rel, dst) onerr return mcp.ErrorResult("relate failed: {error}"), empty
+
+    return mcp.TextResult("related: {src} --{rel}--> {dst}"), empty
+
+# --- Tool: search ---
+
+func registerSearchTool(server reference mcp.Server)
+    schema := mcp.Schema(list of mcp.SchemaProperty{
+        mcp.Prop("query", "string", "Search query (keywords for BM25, also used for semantic similarity in hybrid mode)"),
+        mcp.Prop("limit", "integer", "Maximum results (default: 10)"),
+    }) |> mcp.Required(list of string{"query"})
+
+    server |> mcp.Tool("search", "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).", schema, func(args map of string to any) (any, error)
+        return handleSearch(args)
+    )
+
+func handleSearch(args map of string to any) (any, error)
+    query := argString(args, "query")
+    if query equals ""
+        return mcp.ErrorResult("query is required"), empty
+
+    limit := argInt(args, "limit", 10)
+
+    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
+    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+
+    hits := hybridSearch(pool, query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
+
+    data := jsonpkg.MarshalPretty(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: get_context ---
+
+func registerGetContext(server reference mcp.Server)
+    schema := mcp.Schema(list of mcp.SchemaProperty{
+        mcp.Prop("id", "string", "Entity id to get context for"),
+    }) |> mcp.Required(list of string{"id"})
+
+    server |> mcp.Tool("get_context", "Get full context for an entity: its data, observations, and all related entities (1 hop).", schema, func(args map of string to any) (any, error)
+        return handleGetContext(args)
+    )
+
+func handleGetContext(args map of string to any) (any, error)
+    id := argString(args, "id")
+    if id equals ""
+        return mcp.ErrorResult("id is required"), empty
+
+    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
+
+    e := getEntity(pool, id) onerr return mcp.ErrorResult("entity not found: {error}"), empty
+    outgoing := outgoingContext(pool, id) onerr return mcp.ErrorResult("cannot read outgoing: {error}"), empty
+    incoming := incomingContext(pool, id) onerr return mcp.ErrorResult("cannot read incoming: {error}"), empty
+    obs := listObservations(pool, id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+
+    payload := map of string to any{
+        "entity": e,
+        "outgoing": outgoing,
+        "incoming": incoming,
+        "observations": obs,
+    }
+
+    data := jsonpkg.MarshalPretty(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: similar ---
+
+func registerSimilarTool(server reference mcp.Server)
+    schema := mcp.Schema(list of mcp.SchemaProperty{
+        mcp.Prop("id", "string", "Use this entity's embedding as the query vector"),
+        mcp.Prop("text", "string", "Embed this text and use it as the query vector"),
+        mcp.Prop("limit", "integer", "Maximum results (default: 5)"),
+    })
+
+    server |> mcp.Tool("similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly).", schema, func(args map of string to any) (any, error)
+        return handleSimilar(args)
+    )
+
+func handleSimilar(args map of string to any) (any, error)
+    id := argString(args, "id")
+    text := argString(args, "text")
+    if id equals "" and text equals ""
+        return mcp.ErrorResult("either id or text is required"), empty
+
+    limit := argInt(args, "limit", 5)
+
+    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
+    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+
+    vec := make(list of float64, 0)
+    if id isnt ""
+        v, err := getEmbedding(pool, id)
+        if err isnt empty
+            return mcp.ErrorResult("no embedding for {id}: {err}"), empty
+        vec = v
+    else
+        v, err := embedText(text)
+        if err isnt empty
+            return mcp.ErrorResult("embed failed: {err}"), empty
+        vec = v
+
+    hits := similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+
+    data := jsonpkg.MarshalPretty(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Argument helpers ---
+
+# argString extracts a string from the MCP args map.
+func argString(args map of string to any, key string) string
+    v, ok := args[key]
+    if not ok
+        return ""
+    s, err := cast.SmartString(v)
+    if err isnt empty
+        return ""
+    return s
+
+# argInt extracts an int from the MCP args map with a default.
+func argInt(args map of string to any, key string, defaultVal int) int
+    v, ok := args[key]
+    if not ok
+        return defaultVal
+    n, err := cast.SmartInt(v)
+    if err isnt empty
+        return defaultVal
+    return n
+
+# argStringList extracts a list of strings from the MCP args map.
+func argStringList(args map of string to any, key string) list of string
+    v, ok := args[key]
+    if not ok
+        return make(list of string, 0)
+    v |> switch as arr
+        when list of any
+            result := make(list of string, 0, len(arr))
+            for _, item in arr
+                s, err := cast.SmartString(item)
+                if err equals empty
+                    result = append(result, s)
+            return result
+
+    return make(list of string, 0)
+
+# entityJSON marshals an entity for MCP tool results.
+func entityJSON(e Entity) any
+    data := jsonpkg.MarshalPretty(e) onerr return mcp.ErrorResult("json error: {error}")
+    return mcp.TextResult(data as string)

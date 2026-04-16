@@ -1,0 +1,151 @@
+# mizuya — embedding provider abstraction.
+#
+# Supports three modes:
+#   1. Ollama   — POST /api/embed  (MIZUYA_EMBED_PROVIDER=ollama)
+#   2. OpenAI   — POST /v1/embeddings (MIZUYA_EMBED_PROVIDER=openai)
+#   3. Fallback — deterministic hash embedding (no config needed)
+#
+# Environment variables:
+#   MIZUYA_EMBED_PROVIDER  — "ollama" or "openai" (default: "" = hash fallback)
+#   MIZUYA_EMBED_URL       — base URL (default: http://localhost:11434 for ollama)
+#   MIZUYA_EMBED_MODEL     — model name (default: nomic-embed-text for ollama)
+#   MIZUYA_EMBED_API_KEY   — API key for openai provider (optional for ollama)
+
+petiole main
+
+import "fmt"
+import "net/http"
+import "stdlib/env"
+import "stdlib/fetch"
+import "stdlib/json" as jsonpkg
+
+# --- Embedding configuration ---
+
+# embedConfig holds the resolved embedding provider settings.
+type embedConfig
+    Provider string
+    URL string
+    Model string
+    APIKey string
+
+# loadEmbedConfig reads embedding settings from environment variables
+# and applies provider-specific defaults.
+func loadEmbedConfig() embedConfig
+    provider := env.GetOr("MIZUYA_EMBED_PROVIDER", "")
+    url := env.GetOr("MIZUYA_EMBED_URL", "")
+    model := env.GetOr("MIZUYA_EMBED_MODEL", "")
+    apiKey := env.GetOr("MIZUYA_EMBED_API_KEY", "")
+
+    if provider equals "ollama"
+        if url equals ""
+            url = "http://localhost:11434"
+        if model equals ""
+            model = "nomic-embed-text"
+    else if provider equals "openai"
+        if url equals ""
+            url = "https://api.openai.com"
+        if model equals ""
+            model = "text-embedding-3-small"
+
+    return embedConfig{
+        Provider: provider,
+        URL: url,
+        Model: model,
+        APIKey: apiKey,
+    }
+
+# --- Public API ---
+
+# embedText converts text into a vector using the configured provider.
+# Falls back to hashEmbed when no provider is set.
+func embedText(text string) (list of float64, error)
+    cfg := loadEmbedConfig()
+    if cfg.Provider equals "ollama"
+        return ollamaEmbed(cfg, text)
+    else if cfg.Provider equals "openai"
+        return openaiEmbed(cfg, text)
+    # Fallback: deterministic hash embedding.
+    return hashEmbed(text, EmbedDim), empty
+
+# embedModel returns the model identifier for the current provider,
+# used when storing the model tag alongside the embedding.
+func embedModel() string
+    cfg := loadEmbedConfig()
+    if cfg.Provider equals ""
+        return EmbedModel
+    return cfg.Model
+
+# --- Ollama provider ---
+# POST {url}/api/embed
+# Request:  {"model": "...", "input": "..."}
+# Response: {"embeddings": [[0.1, 0.2, ...]]}
+
+type ollamaEmbedRequest
+    Model string as "model"
+    Input string as "input"
+
+type ollamaEmbedResponse
+    Embeddings list of list of float64 as "embeddings"
+
+func ollamaEmbed(cfg embedConfig, text string) (list of float64, error)
+    url := cfg.URL + "/api/embed"
+    body := ollamaEmbedRequest{Model: cfg.Model, Input: text}
+
+    resp := fetch.New(url)
+        |> fetch.Method("POST")
+        |> fetch.Body(body)
+        |> fetch.Header("Content-Type", "application/json")
+        |> fetch.Timeout(30000000000)
+        |> fetch.Do() onerr return
+
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK
+        msg := fetch.Text(resp) onerr return empty, fmt.Errorf("ollama embed: HTTP %d", resp.StatusCode)
+        return empty, fmt.Errorf("ollama embed: HTTP %d: %s", resp.StatusCode, msg)
+
+    result := empty ollamaEmbedResponse
+    fetch.Decode(resp, reference of result) onerr return
+    if len(result.Embeddings) == 0
+        return empty, fmt.Errorf("ollama returned no embeddings")
+    return result.Embeddings[0], empty
+
+# --- OpenAI-compatible provider ---
+# POST {url}/v1/embeddings
+# Request:  {"model": "...", "input": "..."}
+# Response: {"data": [{"embedding": [0.1, 0.2, ...]}]}
+
+type openaiEmbedRequest
+    Model string as "model"
+    Input string as "input"
+
+type openaiEmbedDataItem
+    Embedding list of float64 as "embedding"
+
+type openaiEmbedResponse
+    Data list of openaiEmbedDataItem as "data"
+
+func openaiEmbed(cfg embedConfig, text string) (list of float64, error)
+    url := cfg.URL + "/v1/embeddings"
+    body := openaiEmbedRequest{Model: cfg.Model, Input: text}
+
+    req := fetch.New(url)
+        |> fetch.Method("POST")
+        |> fetch.Body(body)
+        |> fetch.Header("Content-Type", "application/json")
+        |> fetch.Timeout(30000000000)
+    if cfg.APIKey isnt ""
+        req = req |> fetch.Header("Authorization", "Bearer " + cfg.APIKey)
+    resp := req |> fetch.Do() onerr return
+
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK
+        msg := fetch.Text(resp) onerr return empty, fmt.Errorf("openai embed: HTTP %d", resp.StatusCode)
+        return empty, fmt.Errorf("openai embed: HTTP %d: %s", resp.StatusCode, msg)
+
+    result := empty openaiEmbedResponse
+    fetch.Decode(resp, reference of result) onerr return
+    if len(result.Data) == 0
+        return empty, fmt.Errorf("openai returned no embeddings")
+    return result.Data[0].Embedding, empty

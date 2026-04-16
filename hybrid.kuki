@@ -1,0 +1,76 @@
+# mizuya — hybrid search (FTS5 + vector via Reciprocal Rank Fusion)
+# Combines BM25 keyword matches with cosine-similarity vector results
+# for better recall than either method alone.
+
+petiole main
+
+import "stdlib/db"
+import "stdlib/slice"
+import "stdlib/sort"
+
+# rrfK is the Reciprocal Rank Fusion constant. The standard value of 60
+# balances contributions so that a #1 hit from either ranker scores ~0.016
+# while a #10 hit scores ~0.014 — keeping both rankers competitive.
+const rrfK = 60
+
+# hybridSearch runs FTS5 keyword search and vector similarity search in
+# parallel, then merges results using Reciprocal Rank Fusion. If vector
+# search fails (e.g. no embeddings exist), falls back to FTS5 only.
+func hybridSearch(pool db.Pool, query string, limit int) (list of SearchHit, error)
+    if limit <= 0
+        limit = 10
+
+    # Fetch more candidates than needed from each ranker so RRF has
+    # enough signal to re-rank effectively.
+    fetchLimit := limit * 3
+
+    # 1. FTS5 keyword search
+    ftsHits := ftsSearch(pool, query, fetchLimit) onerr return empty, error "FTS search failed: {error}"
+
+    # 2. Vector similarity search — embed the query text and compare.
+    vec, embedErr := embedText(query)
+    vecHits := make(list of SimilarHit, 0)
+    vecErr := embedErr
+    if embedErr equals empty
+        vecHits, vecErr = similar(pool, vec, fetchLimit)
+
+    # If vector search fails (no embeddings, etc.), just return FTS results.
+    if vecErr isnt empty or len(vecHits) equals 0
+        if len(ftsHits) > limit
+            return ftsHits[:limit], empty
+        return ftsHits, empty
+
+    # 3. Build per-entity RRF scores from both ranked lists.
+    scores := make(map of string to float64)
+    hitMap := make(map of string to SearchHit)
+
+    for i, h in ftsHits
+        rank := i + 1
+        scores[h.Id] = scores[h.Id] + 1.0 / (rrfK as float64 + rank as float64)
+        hitMap[h.Id] = h
+
+    for i, sh in vecHits
+        rank := i + 1
+        scores[sh.Id] = scores[sh.Id] + 1.0 / (rrfK as float64 + rank as float64)
+        # Only add to hitMap if not already present from FTS.
+        _, exists := hitMap[sh.Id]
+        if not exists
+            hitMap[sh.Id] = SearchHit{Id: sh.Id, Type: sh.Type, Name: sh.Name, Summary: sh.Summary}
+
+    # 4. Collect all candidate IDs and sort by RRF score descending.
+    ids := make(list of string, 0, len(scores))
+    for id, _ in scores
+        ids = append(ids, id)
+
+    sort.By(ids, (a string, b string) =>
+        return scores[b] < scores[a]
+    )
+
+    # 5. Build the final result list, capped at limit.
+    result := make(list of SearchHit, 0, limit)
+    for _, id in ids
+        if len(result) >= limit
+            break
+        result = append(result, hitMap[id])
+
+    return result, empty
