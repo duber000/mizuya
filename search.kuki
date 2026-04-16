@@ -36,7 +36,7 @@ func serializeVec(v list of float64) list of byte
 # deserializeVec unpacks a little-endian BLOB into a float64 slice.
 # Returns nil if the BLOB length is not a multiple of 8.
 func deserializeVec(b list of byte) list of float64
-    if len(b) % 8 != 0
+    if len(b) % 8 isnt 0
         return empty
     v := make(list of float64, len(b) / 8)
     for i from 0 to len(v)
@@ -93,7 +93,7 @@ func registerVecFunction(pool db.Pool) error
 func cosineVecBlob(aBlob list of byte, bBlob list of byte) float64
     a := deserializeVec(aBlob)
     b := deserializeVec(bBlob)
-    if a equals empty or b equals empty or len(a) != len(b)
+    if a equals empty or b equals empty or len(a) isnt len(b)
         return 1.0
 
     dot := 0.0
@@ -103,7 +103,7 @@ func cosineVecBlob(aBlob list of byte, bBlob list of byte) float64
         dot = dot + a[i] * b[i]
         normA = normA + a[i] * a[i]
         normB = normB + b[i] * b[i]
-    if normA == 0.0 or normB == 0.0
+    if normA equals 0.0 or normB equals 0.0
         return 1.0
     denom := math.Sqrt(normA) * math.Sqrt(normB)
     return 1.0 - dot / denom
@@ -127,7 +127,7 @@ func hashEmbed(text string, dim int) list of float64
     sum := 0.0
     for i from 0 to len(v)
         sum = sum + v[i] * v[i]
-    if sum == 0.0
+    if sum equals 0.0
         return v
     norm := math.Sqrt(sum)
     for i from 0 to len(v)

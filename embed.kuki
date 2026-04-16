@@ -100,13 +100,13 @@ func ollamaEmbed(cfg embedConfig, text string) (list of float64, error)
 
     defer resp.Body.Close()
 
-    if resp.StatusCode != http.StatusOK
+    if resp.StatusCode isnt http.StatusOK
         msg := fetch.Text(resp) onerr return empty, fmt.Errorf("ollama embed: HTTP %d", resp.StatusCode)
         return empty, fmt.Errorf("ollama embed: HTTP %d: %s", resp.StatusCode, msg)
 
     result := empty ollamaEmbedResponse
     fetch.Decode(resp, reference of result) onerr return
-    if len(result.Embeddings) == 0
+    if len(result.Embeddings) equals 0
         return empty, fmt.Errorf("ollama returned no embeddings")
     return result.Embeddings[0], empty
 
@@ -140,12 +140,12 @@ func openaiEmbed(cfg embedConfig, text string) (list of float64, error)
 
     defer resp.Body.Close()
 
-    if resp.StatusCode != http.StatusOK
+    if resp.StatusCode isnt http.StatusOK
         msg := fetch.Text(resp) onerr return empty, fmt.Errorf("openai embed: HTTP %d", resp.StatusCode)
         return empty, fmt.Errorf("openai embed: HTTP %d: %s", resp.StatusCode, msg)
 
     result := empty openaiEmbedResponse
     fetch.Decode(resp, reference of result) onerr return
-    if len(result.Data) == 0
+    if len(result.Data) equals 0
         return empty, fmt.Errorf("openai returned no embeddings")
     return result.Data[0].Embedding, empty
