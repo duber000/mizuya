@@ -21,7 +21,7 @@ func ftsSearch(pool db.Pool, query string, limit int) (list of SearchHit, error)
         limit = 10
     q := "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? ORDER BY bm25(entities_fts, 10.0, 5.0, 2.0, 1.0) LIMIT ?"
     result := db.Query(pool, q, query, limit) |> db.ScanAll(empty list of SearchHit) onerr return
-    return result.(list of SearchHit), empty
+    return result, empty
 
 # --- Binary vector serialization ---
 
@@ -62,14 +62,13 @@ func similar(pool db.Pool, vec list of float64, k int) (list of SimilarHit, erro
     blob := serializeVec(vec)
     q := "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, vec_cosine_distance(emb.vec, ?) AS distance FROM embeddings emb JOIN entities e ON e.id = emb.entity_id ORDER BY distance ASC LIMIT ?"
     result := db.Query(pool, q, blob, k) |> db.ScanAll(empty list of SimilarHit) onerr return
-    return result.(list of SimilarHit), empty
+    return result, empty
 
 # getEmbedding fetches the stored embedding for an entity (for the
 # "similar --id ..." path where we use an entity's own vector as the query).
 func getEmbedding(pool db.Pool, id string) (list of float64, error)
     result := db.Query(pool, "SELECT vec FROM embeddings WHERE entity_id = ?", id) |> db.ScanOne(empty vecRow) onerr return
-    row := result.(vecRow)
-    vec := deserializeVec(row.Vec)
+    vec := deserializeVec(result.Vec)
     if vec equals empty
         return empty, error "invalid embedding blob for entity {id}"
     return vec, empty
