@@ -18,6 +18,10 @@
 
 petiole main
 
+skill Mizuya
+    description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, mcp."
+    version: "0.1.0"
+
 import "stdlib/cli"
 import "stdlib/db"
 
@@ -139,7 +143,7 @@ func doUpsert(args cli.Args)
     if cli.IsJSON(args)
         printJSON(e)
     else
-        print("{color.Green("upserted")} {color.Bold(id)}  {color.Dim("(" + etype + ")")} {name}")
+        print("{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {name}")
 
 func doObserve(args cli.Args)
     id := cli.GetString(args, "id")
@@ -200,7 +204,7 @@ func doRelate(args cli.Args)
     if cli.IsJSON(args)
         printJSON(map of string to string{"status": "related", "src": src, "rel": rel, "dst": dst})
     else
-        print("{color.Green("related")} {color.Bold(src)} {color.Dim("--" + rel + "->")} {color.Bold(dst)}")
+        print("{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}")
 
 func doSearch(args cli.Args)
     query := cli.GetString(args, "query")
@@ -224,7 +228,7 @@ func doSearch(args cli.Args)
     if cli.IsJSON(args)
         printJSON(hits)
     else
-        print(color.Bold("search:") + " {query}")
+        print("{color.Bold("search:")} {query}")
         printSearchHits(hits)
 
 func doContext(args cli.Args)
@@ -302,9 +306,9 @@ func doSimilar(args cli.Args)
         printJSON(hits)
     else
         if id isnt ""
-            print(color.Bold("similar to:") + " {id}")
+            print("{color.Bold("similar to:")} {id}")
         else
-            print(color.Bold("similar to text:") + " {text}")
+            print("{color.Bold("similar to text:")} {text}")
         printSimilarHits(hits)
 
 func doList(args cli.Args)
