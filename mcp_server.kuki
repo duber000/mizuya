@@ -41,9 +41,7 @@ func registerUpsertEntity(server reference mcp.Server)
         mcp.Prop("tags", "array", "List of string tags"),
     }) |> mcp.Required(list of string{"id", "type", "name"})
 
-    server |> mcp.Tool("upsert_entity", "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.", schema, func(args map of string to any) (any, error)
-        return handleUpsertEntity(args)
-    )
+    server |> mcp.Tool("upsert_entity", "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.", schema, handleUpsertEntity)
 
 func handleUpsertEntity(args map of string to any) (any, error)
     id := argString(args, "id")
@@ -65,12 +63,7 @@ func handleUpsertEntity(args map of string to any) (any, error)
 
     upsertEntity(pool, id, etype, name, summary, tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
 
-    # Re-embed after upsert.
-    text, err := entityText(pool, id)
-    if err equals empty
-        vec, verr := embedText(text)
-        if verr equals empty
-            upsertEmbedding(pool, id, vec) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+    reEmbed(pool, id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
     e := getEntity(pool, id) onerr return mcp.ErrorResult("fetch failed: {error}"), empty
     return entityJSON(e), empty
@@ -84,9 +77,7 @@ func registerAddObservation(server reference mcp.Server)
         mcp.Prop("source", "string", "Source label (default: conversation)"),
     }) |> mcp.Required(list of string{"entity_id", "text"})
 
-    server |> mcp.Tool("add_observation", "Record a fact or note about an entity. Appended to the entity's observation history.", schema, func(args map of string to any) (any, error)
-        return handleAddObservation(args)
-    )
+    server |> mcp.Tool("add_observation", "Record a fact or note about an entity. Appended to the entity's observation history.", schema, handleAddObservation)
 
 func handleAddObservation(args map of string to any) (any, error)
     id := argString(args, "entity_id")
@@ -105,12 +96,7 @@ func handleAddObservation(args map of string to any) (any, error)
 
     addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}"), empty
 
-    # Re-embed after observation.
-    corpus, err := entityText(pool, id)
-    if err equals empty
-        vec, verr := embedText(corpus)
-        if verr equals empty
-            upsertEmbedding(pool, id, vec) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+    reEmbed(pool, id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
     return mcp.TextResult("observed: {text}"), empty
 
@@ -123,9 +109,7 @@ func registerRelate(server reference mcp.Server)
         mcp.Prop("dst", "string", "Destination entity id"),
     }) |> mcp.Required(list of string{"src", "rel", "dst"})
 
-    server |> mcp.Tool("relate", "Create a typed edge between two entities in the knowledge graph.", schema, func(args map of string to any) (any, error)
-        return handleRelate(args)
-    )
+    server |> mcp.Tool("relate", "Create a typed edge between two entities in the knowledge graph.", schema, handleRelate)
 
 func handleRelate(args map of string to any) (any, error)
     src := argString(args, "src")
@@ -150,9 +134,7 @@ func registerSearchTool(server reference mcp.Server)
         mcp.Prop("limit", "integer", "Maximum results (default: 10)"),
     }) |> mcp.Required(list of string{"query"})
 
-    server |> mcp.Tool("search", "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).", schema, func(args map of string to any) (any, error)
-        return handleSearch(args)
-    )
+    server |> mcp.Tool("search", "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).", schema, handleSearch)
 
 func handleSearch(args map of string to any) (any, error)
     query := argString(args, "query")
@@ -178,9 +160,7 @@ func registerGetContext(server reference mcp.Server)
         mcp.Prop("id", "string", "Entity id to get context for"),
     }) |> mcp.Required(list of string{"id"})
 
-    server |> mcp.Tool("get_context", "Get full context for an entity: its data, observations, and all related entities (1 hop).", schema, func(args map of string to any) (any, error)
-        return handleGetContext(args)
-    )
+    server |> mcp.Tool("get_context", "Get full context for an entity: its data, observations, and all related entities (1 hop).", schema, handleGetContext)
 
 func handleGetContext(args map of string to any) (any, error)
     id := argString(args, "id")
@@ -215,9 +195,7 @@ func registerSimilarTool(server reference mcp.Server)
         mcp.Prop("limit", "integer", "Maximum results (default: 5)"),
     })
 
-    server |> mcp.Tool("similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly).", schema, func(args map of string to any) (any, error)
-        return handleSimilar(args)
-    )
+    server |> mcp.Tool("similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly).", schema, handleSimilar)
 
 func handleSimilar(args map of string to any) (any, error)
     id := argString(args, "id")
@@ -234,20 +212,23 @@ func handleSimilar(args map of string to any) (any, error)
 
     vec := make(list of float64, 0)
     if id isnt ""
-        v, err := getEmbedding(pool, id)
-        if err isnt empty
-            return mcp.ErrorResult("no embedding for {id}: {err}"), empty
-        vec = v
+        vec = getEmbedding(pool, id) onerr return mcp.ErrorResult("no embedding for {id}: {error}"), empty
     else
-        v, err := embedText(text)
-        if err isnt empty
-            return mcp.ErrorResult("embed failed: {err}"), empty
-        vec = v
+        vec = embedText(text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
     hits := similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
 
     data := jsonpkg.MarshalPretty(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
+
+# --- Helpers ---
+
+# reEmbed recomputes and stores the embedding for an entity from its
+# current text corpus. Used after upsert/observe to keep vectors fresh.
+func reEmbed(pool db.Pool, id string) error
+    text := entityText(pool, id) onerr return
+    vec := embedText(text) onerr return
+    return upsertEmbedding(pool, id, vec)
 
 # --- Argument helpers ---
 
