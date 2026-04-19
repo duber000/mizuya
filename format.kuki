@@ -46,8 +46,10 @@ func printSimilarHits(hits list of SimilarHit)
             |> table.AddRow(list of string{h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)})
     t |> table.Print()
 
-# truncate shortens s to n runes with a trailing ellipsis when needed.
+# truncate shortens s to n chars with a trailing ellipsis when needed,
+# collapsing newlines to spaces so the result is safe for single-line display.
 func truncate(s string, n int) string
+    s = strpkg.ReplaceAll(s, "\n", " ")
     if len(s) <= n
         return s
     return s[:n - 3] + "..."
