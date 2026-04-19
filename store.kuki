@@ -3,7 +3,6 @@
 
 petiole main
 
-import "path/filepath"
 import "stdlib/db"
 import "stdlib/files"
 import "stdlib/json" as jsonpkg
@@ -13,8 +12,7 @@ import "stdlib/string" as strpkg
 
 # openDB opens (or creates) the SQLite database at the given path.
 func openDB(dbPath string) (db.Pool, error)
-    dir := filepath.Dir(dbPath)
-    files.MkDirAll(dir) onerr return
+    files.MkDirAll(files.Dirname(dbPath)) onerr return
     pool := sqlite.Open(dbPath) onerr return
     return pool, empty
 
