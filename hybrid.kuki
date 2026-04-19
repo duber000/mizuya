@@ -5,6 +5,7 @@
 petiole main
 
 import "stdlib/db"
+import "stdlib/maps"
 import "stdlib/slice"
 import "stdlib/sort"
 
@@ -58,9 +59,7 @@ func hybridSearch(pool db.Pool, query string, limit int) (list of SearchHit, err
             hitMap[sh.Id] = SearchHit{Id: sh.Id, Type: sh.Type, Name: sh.Name, Summary: sh.Summary}
 
     # 4. Collect all candidate IDs and sort by RRF score descending.
-    ids := make(list of string, 0, len(scores))
-    for id, _ in scores
-        ids = append(ids, id)
+    ids := maps.Keys(scores)
 
     sort.By(ids, (a string, b string) =>
         return scores[b] < scores[a]
