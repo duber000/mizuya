@@ -8,6 +8,7 @@ import "stdlib/db"
 import "stdlib/files"
 import "stdlib/json" as jsonpkg
 import "stdlib/sqlite"
+import "stdlib/slice"
 import "stdlib/string" as strpkg
 
 # openDB opens (or creates) the SQLite database at the given path.
@@ -101,9 +102,8 @@ func entityText(pool db.Pool, id string) (string, error)
         parts = append(parts, ed.Summary)
 
     obs := listObservations(pool, id) onerr return "", error "{error}"
-    for _, o in obs
-        if o.Text isnt ""
-            parts = append(parts, o.Text)
+    texts := obs |> slice.Filter(o => o.Text isnt "") |> slice.Map((o ObsRow) => o.Text)
+    parts = append(parts, many texts)
 
     return strpkg.Join(parts, " "), empty
 
