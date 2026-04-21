@@ -364,7 +364,6 @@ import "stdlib/json"      as jsonpkg    # clashes with 'encoding/json'
 import "stdlib/string"    as strpkg     # clashes with 'string' type
 import "stdlib/container" as docker     # clashes with 'container' vars
 import "stdlib/http"      as httphelper # clashes with 'net/http'
-import "stdlib/net"       as netutil    # clashes with 'net' package
 
 import "github.com/jackc/pgx/v5" as pgx  # external package
 ```
@@ -398,10 +397,11 @@ Browse `.kukicha/stdlib/` for full API details. Key functions listed below.
 
 #### Collections & Strings
 
-**slice** — `Filter`, `Map`, `GroupBy`, `Sort`, `SortBy`, `First`, `Last`, `Contains`, `Unique`, `Chunk`, `Find`, `FindOr`, `Get`, `GetOr`, `FirstOr`, `LastOr`, `Pop`, `Shift`, `Reverse`, `Concat`, `IndexOf`, `IsEmpty`
+**slice** — `Filter`, `Partition`, `Map`, `GroupBy`, `Sort`, `SortBy`, `First`, `Last`, `Contains`, `Unique`, `Chunk`, `Find`, `FindOr`, `Get`, `GetOr`, `FirstOr`, `LastOr`, `Pop`, `Shift`, `Reverse`, `Concat`, `IndexOf`, `IsEmpty`
 
 ```kukicha
 active := slice.Filter(items, x => x.active)
+healthy, unhealthy := slice.Partition(items, x => x.ok)  # single pass, both halves
 names  := slice.Map(items, x => x.name)
 first  := slice.FirstOr(items, defaultVal)
 ```
@@ -435,7 +435,7 @@ names := repos
 
 #### Data & Encoding
 
-**json** (as `jsonpkg`) — `Marshal`, `MarshalPretty`, `Unmarshal`, `MarshalWrite`, `UnmarshalRead`
+**json** (as `jsonpkg`) — `Marshal`, `MarshalPretty`, `Unmarshal`, `MarshalWrite`, `UnmarshalRead`, `PrettyString`
 
 **parse** — `Json`, `JsonLines`, `Csv`, `CsvWithHeader`, `Yaml`, `YamlPretty`
 
@@ -485,7 +485,7 @@ resp := fetch.New(url)
     |> fetch.Do() onerr panic "{error}"
 ```
 
-Key: `Get`, `SafeGet` (SSRF-safe), `Post`, `Json`, `Text`, `Bytes`, `CheckStatus`, `URLTemplate`, `URLWithQuery`, `New`/`BearerAuth`/`Timeout`/`Retry`/`MaxBodySize`/`Do`, `DownloadTo`
+Key: `Get`, `SafeGet` (SSRF-safe), `Post`, `Json`, `Text`, `Bytes`, `CheckStatus`, `URLTemplate`, `URLWithQuery`, `New`/`NewExternal` (SSRF-safe builder)/`BearerAuth`/`Timeout`/`Retry`/`MaxBodySize`/`Do`, `DownloadTo`
 
 **http** (as `httphelper`) — Response helpers + security
 
@@ -506,30 +506,37 @@ page := html.Render("<h1>{html.Escape(title)}</h1>")
 html.WriteTo(w, page) onerr discard
 ```
 
-**net** (as `netutil`) — `ParseIP`, `ParseCIDR`, `Contains`, `IsPrivate`, `IsLoopback`
-
-**netguard** — SSRF protection: `NewSSRFGuard`, `NewAllow`, `NewBlock`, `Check`, `HTTPClient`, `HTTPTransport`
+**netguard** — SSRF protection: `NewSSRFGuard`, `NewAllow`, `NewBlock`, `Check`, `HTTPClient`, `HTTPTransport`. For IP/CIDR parsing, use Go's `net` package directly.
 
 #### CLI & System
 
-**cli** — Argument parsing: `New`, `AddFlag`, `Action`, `RunApp`, `Command`, `GetString`, `GetInt`, `Fatal`, `Error`, `Warn`
+**cli** — Argument parsing: `New`, `AddFlag`, `Action`, `Run`, `NewCommand`, `WithCommands`, `GlobalFlag`, `GetString`, `GetInt`, `Fatal`, `Error`. Build each subcommand with `cli.NewCommand(name, desc) |> .Flag(...) |> .Action(...)`, then attach via `cli.WithCommands(cmd1, cmd2, ...)`.
 
 ```kukicha
+# Flat app (no subcommands)
 app := cli.New("myapp") |> cli.AddFlag("port", "Port", "8080") |> cli.Action(run)
-cli.RunApp(app) onerr panic "{error}"
-data := loadConfig() onerr cli.Fatal("config error: {error}")
+cli.Run(app) onerr panic "{error}"
+
+# Subcommands — build each command, then attach with WithCommands
+listCmd := cli.NewCommand("list", "List items")
+    |> .Flag("csv", "CSV output", "false")
+    |> .Action(doList)
+
+cli.New("myapp")
+    |> cli.WithCommands(listCmd)
+    |> cli.Run() onerr cli.Fatal("{error}")
 ```
 
 **input** — `ReadLine`, `Prompt`, `Confirm`, `Choose`
 
 **table** — Terminal tables: `New`, `AddRow`, `Print`, `PrintWithStyle` (`"plain"`, `"box"`, `"markdown"`)
 
-**color** — ANSI terminal colors: `Bold`, `Dim`, `Red`, `Green`, `Yellow`, `Blue`, `Cyan`, `Gray`, `BrightRed`, `Error`, `Warn`, `Success`, `Info`, `Muted`, `Enabled`, `SetEnabled`
+**color** — ANSI terminal colors: `Bold`, `Dim`, `Italic`, `Underline`, `Red`, `Green`, `Yellow`, `Blue`, `Magenta`, `Cyan`, `Gray`, `BrightRed`, `Error` (bold bright red), `Enabled`, `SetEnabled`
 
 ```kukicha
 print(color.Bold("Title"))
-print(color.Red("error: something went wrong"))
-print(color.Success("All tests passed"))
+print(color.Error("fatal: disk full"))
+print(color.Green("All tests passed"))
 color.SetEnabled(false)  # disable in tests
 ```
 
@@ -643,7 +650,7 @@ The compiler **rejects** these patterns in HTTP handlers (functions with `http.R
 | Pattern | Fix |
 |---------|-----|
 | `httphelper.HTML(w, nonLiteral)` | `httphelper.SafeHTML(w, content)` |
-| `fetch.Get(url)` in handler | `fetch.SafeGet(url)` |
+| `fetch.Get(url)` in handler | `fetch.SafeGet(url)` (or `fetch.NewExternal(url) \|> ... \|> Do()` for builder) |
 | `files.Read(path)` in handler | `sandbox.New(root)` + `sandbox.Read(box, path)` |
 | `shell.Run("cmd {var}")` | `shell.Output("cmd", arg)` |
 | `httphelper.Redirect(w, r, nonLiteral)` | `httphelper.SafeRedirect(w, r, url, "host")` |
@@ -730,14 +737,14 @@ Assertions: `AssertEqual`, `AssertNotEqual`, `AssertTrue`, `AssertFalse`, `Asser
 # WRONG — cancel fires when buildCmd returns, context is dead before use
 func buildCmd() reference exec.Cmd
     h := ctxpkg.WithTimeout(ctxpkg.Background(), 30)
-    defer ctxpkg.Cancel(h)
-    return exec.CommandContext(ctxpkg.Value(h), name, many args)
+    defer h.Cancel()
+    return exec.CommandContext(h.Ctx, name, many args)
 
 # CORRECT — defer in Execute, which owns the resource's lifetime
 func Execute() Result
     h := ctxpkg.WithTimeout(ctxpkg.Background(), 30)
-    defer ctxpkg.Cancel(h)     # fires after Run()
-    execCmd := exec.CommandContext(ctxpkg.Value(h), name, many args)
+    defer h.Cancel()     # fires after Run()
+    execCmd := exec.CommandContext(h.Ctx, name, many args)
     ...
 ```
 
