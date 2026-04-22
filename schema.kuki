@@ -38,7 +38,7 @@ const idxEntityUpdated = "CREATE INDEX IF NOT EXISTS idx_entities_updated ON ent
 # initDB creates all tables, the FTS5 virtual table, triggers, and indexes
 # inside a single transaction. Safe to call repeatedly.
 func initDB(pool db.Pool) error
-    db.Transaction(pool, (tx db.Tx) =>
+    db.Transaction(pool, (tx) =>
         db.TxExec(tx, entitiesSQL) onerr return
         db.TxExec(tx, relationsSQL) onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
