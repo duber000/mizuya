@@ -277,6 +277,19 @@ repos |> slice.Filter(r =>
     name := r.name |> strpkg.ToLower()
     return name |> strpkg.Contains("go")
 )
+
+# Block lambdas may contain pipe chains and onerr:
+db.Transaction(pool, (tx) =>
+    db.TxExec(tx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", amt, from) onerr return
+    db.TxExec(tx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", amt, to)   onerr return
+    return empty
+) onerr panic "transfer failed: {error}"
+
+# Cross-package named types infer from the callback signature — no helper func needed:
+retry.DoCtx(ctx, cfg, (h) =>            # h is ctxpkg.Handle, inferred
+    _, err := fetch.GetCtx(h, url)
+    return err
+)
 ```
 
 ### Collections and Literals
@@ -596,7 +609,7 @@ defer db.Close(pool)
 
 #### DevOps & Infrastructure
 
-**container** (as `docker`) — Docker/Podman: `Connect`, `ListContainers`, `ListImages`, `Pull`, `Run`, `Stop`, `Remove`, `Build`, `Logs`, `Wait`, `Exec`
+**container** (as `docker`) — Docker/Podman: `Connect`/`ConnectRemote`, `Run`, `Exec`, `Logs`, `Build`, `Pull`/`PullAuth`, `LoginFromConfig`, `Wait`/`WaitCtx`, `Events`/`EventsCtx`, `CopyTo`/`CopyFrom`. For anything not wrapped here, use `engine.Cli` directly.
 
 **git** — Git/GitHub via `gh`: `ListTags`, `TagExists`, `DefaultBranch`, `CreateRelease`, `PreviewRelease`
 
