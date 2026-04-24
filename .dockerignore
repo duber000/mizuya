@@ -1,4 +1,4 @@
-*.kuki
 .git
+main.go
 README.md
 AGENTS.md
