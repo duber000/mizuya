@@ -89,7 +89,7 @@ func openPool(args cli.Args) (db.Pool, error)
     registerVecFunction(pool) onerr return
     return pool, empty
 
-func doInit(args cli.Args)
+func doInit(_ cli.Context, args cli.Args)
     dbPath := cli.GetString(args, "db")
     pool := openDB(dbPath) onerr
         errPrint("cannot open database: {error}")
@@ -110,7 +110,7 @@ func doInit(args cli.Args)
     else
         print(color.Green("Initialized mizuya database at {dbPath}"))
 
-func doUpsert(args cli.Args)
+func doUpsert(_ cli.Context, args cli.Args)
     id := cli.GetString(args, "id")
     if id equals ""
         errPrint("--id is required")
@@ -155,7 +155,7 @@ func doUpsert(args cli.Args)
     else
         print("{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {name}")
 
-func doObserve(args cli.Args)
+func doObserve(_ cli.Context, args cli.Args)
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if id equals "" or text equals ""
@@ -193,7 +193,7 @@ func doObserve(args cli.Args)
     else
         print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}")
 
-func doRelate(args cli.Args)
+func doRelate(_ cli.Context, args cli.Args)
     src := cli.GetString(args, "src")
     rel := cli.GetString(args, "rel")
     dst := cli.GetString(args, "dst")
@@ -216,7 +216,7 @@ func doRelate(args cli.Args)
     else
         print("{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}")
 
-func doSearch(args cli.Args)
+func doSearch(_ cli.Context, args cli.Args)
     query := cli.GetString(args, "query")
     if query equals ""
         errPrint("--query is required")
@@ -241,7 +241,7 @@ func doSearch(args cli.Args)
         print("{color.Bold("search:")} {query}")
         printSearchHits(hits)
 
-func doContext(args cli.Args)
+func doContext(_ cli.Context, args cli.Args)
     id := cli.GetString(args, "id")
     if id equals ""
         errPrint("--id is required")
@@ -280,7 +280,7 @@ func doContext(args cli.Args)
     else
         printContext(e, outgoing, incoming, obs)
 
-func doSimilar(args cli.Args)
+func doSimilar(_ cli.Context, args cli.Args)
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if id equals "" and text equals ""
@@ -321,7 +321,7 @@ func doSimilar(args cli.Args)
             print("{color.Bold("similar to text:")} {text}")
         printSimilarHits(hits)
 
-func doList(args cli.Args)
+func doList(_ cli.Context, args cli.Args)
     etype := cli.GetString(args, "type")
     limit, err := cli.GetInt(args, "limit")
     if err isnt empty
@@ -342,7 +342,7 @@ func doList(args cli.Args)
     else
         printEntityList(rows)
 
-func doMCP(args cli.Args)
+func doMCP(_ cli.Context, args cli.Args)
     dbPath := cli.GetString(args, "db")
     startMCP(dbPath) onerr
         errPrint("MCP server error: {error}")
