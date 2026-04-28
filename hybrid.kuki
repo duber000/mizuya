@@ -12,7 +12,7 @@ import "stdlib/sort"
 # rrfK is the Reciprocal Rank Fusion constant. The standard value of 60
 # balances contributions so that a #1 hit from either ranker scores ~0.016
 # while a #10 hit scores ~0.014 — keeping both rankers competitive.
-const rrfK = 60
+constant rrfK int = 60
 
 # hybridSearch runs FTS5 keyword search and vector similarity search in
 # parallel, then merges results using Reciprocal Rank Fusion. If vector
@@ -61,7 +61,7 @@ func hybridSearch(pool db.Pool, query string, limit int) (list of SearchHit, err
     # 4. Collect all candidate IDs and sort by RRF score descending.
     ids := maps.Keys(scores)
 
-    sort.By(ids, (a, b) =>
+    sort.By(ids, (a string, b string) bool =>
         scores[b] < scores[a]
     )
 

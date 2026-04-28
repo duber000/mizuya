@@ -100,7 +100,7 @@ func entityText(pool db.Pool, id string) (string, error)
         parts = append(parts, ed.Summary)
 
     obs := listObservations(pool, id) onerr return "", error "{error}"
-    texts := obs |> slice.Filter(o => o.Text isnt "") |> slice.Map((o ObsRow) => o.Text)
+    texts := obs |> slice.Filter((o ObsRow) bool => o.Text isnt "") |> slice.Map((o ObsRow) string => o.Text)
     parts = append(parts, many texts)
 
     return strpkg.Join(parts, " "), empty

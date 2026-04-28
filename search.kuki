@@ -79,7 +79,7 @@ func getEmbedding(pool db.Pool, id string) (list of float64, error)
 # connection using sqlite.CreateBlobFunctionFloat. Arguments are received as
 # raw BLOB bytes — no JSON parsing overhead.
 func registerVecFunction(pool db.Pool) error
-    sqlite.CreateBlobFunctionFloat(pool, "vec_cosine_distance", 2, (args) =>
+    sqlite.CreateBlobFunctionFloat(pool, "vec_cosine_distance", 2, (args list of list of byte) float64 =>
         cosineVecBlob(args[0], args[1])
     ) onerr return
 

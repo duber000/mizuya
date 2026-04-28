@@ -48,6 +48,28 @@ Run: `kukicha run hello.kuki` · Build: `kukicha build hello.kuki`
 
 `func`/`var`/`const` have aliases `function`/`variable`/`constant` — use the short forms in production code; reserve the long forms for beginner tutorials only.
 
+### Constants and `iota`
+
+Constants are fixed values determined at compile time. They can be declared singly or in groups. In a group, if the value is omitted, it repeats the expression from the previous line.
+
+```kukicha
+const PI = 3.14159
+const (
+    StatusActive = iota  # 0
+    StatusInactive       # 1
+    StatusArchived       # 2
+)
+
+const (
+    FormatJSON string = "json"
+    FormatXML          # also string = "json" (repetitions inherit both type and value)
+)
+```
+
+- `iota` is a special constant that resets to 0 at the start of every `const` block and increments by 1 for every `ConstSpec`.
+- Explicit types are optional but can be provided: `const Name Type = Value`.
+
+
 ### Variables and Functions
 
 ```kukicha
@@ -278,6 +300,17 @@ repos |> slice.Filter(r =>
     return name |> strpkg.Contains("go")
 )
 
+# Explicit return types (optional)
+# Single return:
+summarizer := (name string, age int) list of string =>
+    return list of string{"Name: {name}", "Age: {age}"}
+
+# Multi-return:
+divider := (a, b float64) (float64, error) =>
+    if b equals 0 then return 0, error "div zero"
+    return a/b, empty
+
+
 # Block lambdas may contain pipe chains and onerr:
 db.Transaction(pool, (tx) =>
     db.TxExec(tx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", amt, from) onerr return
@@ -390,17 +423,40 @@ kukicha init [module]          # init project (go mod init + extract stdlib)
 kukicha check file.kuki        # validate syntax
 kukicha check --json file.kuki # JSON diagnostics
 kukicha run file.kuki          # transpile + compile + run
+kukicha run --json file.kuki   # JSON compile errors (program output unchanged on success)
 kukicha build file.kuki        # compile to binary
 kukicha build myapp/           # build directory
 kukicha build --wasm file.kuki # WebAssembly output
+kukicha build --json file.kuki # JSON build result
 kukicha fmt -w file.kuki       # format in place
 kukicha fmt --check dir/       # check formatting (CI / pre-commit gate)
+kukicha fmt --check --json dir/ # JSON array of unformatted file paths
 kukicha brew file.kuki         # convert .kuki to standalone Go
 kukicha pack skill.kuki        # package skill with SKILL.md + binary
+kukicha context myapp/         # project metadata as JSON (agents, IDEs, CI)
 kukicha audit                  # vulnerability check
 ```
 
 Run `kukicha fmt -w` before committing; CI should run `kukicha fmt --check`.
+
+`kukicha context <file|dir>` emits a JSON snapshot for agents and CI — top-level decls only (methods, fields, enum cases, interface methods are excluded to keep the shape flat):
+
+```json
+{
+  "kukicha_version": "0.6.4",
+  "petiole": "myapp",
+  "is_directory": true,
+  "files": ["main.kuki", "lib.kuki"],
+  "entry_point": "main.kuki",
+  "imports": [{"path": "stdlib/slice", "alias": ""}],
+  "functions": ["Hello", "main"],
+  "types": ["User"],
+  "enums": ["Status"],
+  "commands": {"check": "...", "build": "...", "run": "..."}
+}
+```
+
+`entry_point` is omitted for library projects or when multiple `func main()` declarations are found across files. Names are deduplicated across files and sorted.
 
 ---
 
@@ -472,11 +528,13 @@ box := sandbox.New("/var/data") onerr return
 content := sandbox.Read(box, userPath) onerr return   # can't escape root
 ```
 
-**shell** — `Run` (fixed literals only), `Output` (variable args), `New`/`Dir`/`Env`/`Execute` (builder)
+**shell** — `Run` (fixed literals only), `Output` (variable args), `Lines` (stdout split into lines, trailing empty stripped), `New`/`Dir`/`Env`/`Execute` (builder), `Require` (stdout or err-wrapping-stderr; pairs with `Execute` in pipes)
 
 ```kukicha
-diff := shell.Run("git diff --staged") onerr panic "{error}"
-out  := shell.Output("git", "log", "--oneline", branch) onerr panic "{error}"
+diff  := shell.Run("git diff --staged") onerr panic "{error}"
+out   := shell.Output("git", "log", "--oneline", branch) onerr panic "{error}"
+files := shell.Lines("git", "ls-files") onerr return
+tests := shell.New("go", "test", "./...") |> shell.Execute() |> shell.Require() onerr return
 ```
 
 #### HTTP & Networking

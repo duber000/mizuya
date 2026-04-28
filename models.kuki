@@ -64,7 +64,7 @@ type vecRow
 
 # EmbedDim is the dimensionality of the fallback hash embedding.
 # Real providers (ollama, openai) determine dim from the model output.
-const EmbedDim = 64
+constant EmbedDim int = 64
 
 # EmbedModel is the fallback model tag when no provider is configured.
-const EmbedModel = "hash-demo-64"
+constant EmbedModel string = "hash-demo-64"

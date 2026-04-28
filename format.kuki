@@ -102,5 +102,5 @@ func parseTags(raw string) list of string
     if raw equals ""
         return make(list of string, 0)
     return strpkg.Split(raw, ",")
-        |> slice.Map(s => strpkg.TrimSpace(s))
-        |> slice.Filter(s => s isnt "")
+        |> slice.Map((s string) string => strpkg.TrimSpace(s))
+        |> slice.Filter((s string) bool => s isnt "")
