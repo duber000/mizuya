@@ -8,6 +8,7 @@ import "stdlib/cast"
 import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/mcp"
+import "stdlib/string" as strpkg
 
 # mcpDBPath is the database path used by the MCP server, set from the
 # --db flag before starting the server.
@@ -17,9 +18,62 @@ var mcpDBPath = ".mizuya/mizuya.db"
 # stdio transport (blocking).
 func startMCP(dbPath string) error
     mcpDBPath = dbPath
-    server := mcp.New("mizuya", "0.1.0")
+
+    router := mcp.NewRouter()
+    entityTemplate := "entity://" + "{" + "id}"
+    router.AddResource(entityTemplate, func(argName string, partial string, prevArgs map of string to string) list of string
+        pool := openDB(mcpDBPath) onerr return empty list of string
+        defer db.Close(pool)
+        entities := listEntities(pool, "", 500) onerr return empty list of string
+        ids := make(list of string, 0)
+        for _, e in entities
+            if strpkg.HasPrefix(e.Id, partial)
+                ids = append(ids, e.Id)
+        return ids
+    )
+
+    server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())
     registerTools(server)
+    registerResources(server)
     return mcp.Serve(server)
+
+# registerResources exposes knowledge graph data as MCP resources.
+# entity://list — snapshot of all entities (name, type, summary).
+# entity://{id} — full context for one entity (data + observations + relations).
+func registerResources(server reference mcp.Server)
+    mcp.TextResource(server, "entity://list", "Entity list", "All knowledge-graph entities", listEntitiesResource)
+    entityTemplate := "entity://" + "{" + "id}"
+    mcp.TextResourceTemplate(server, entityTemplate, "Entity context", "Full context: data, observations, and relations for an entity", entityContextResource)
+
+func listEntitiesResource(uri string) (string, error)
+    pool := openDB(mcpDBPath) onerr return "", error "{error}"
+    defer db.Close(pool)
+    entities := listEntities(pool, "", 500) onerr return "", error "{error}"
+    data := jsonpkg.MarshalPretty(entities) onerr return "", error "{error}"
+    return data as string, empty
+
+func entityContextResource(uri string) (string, error)
+    id := strpkg.TrimPrefix(uri, "entity://")
+    if id equals ""
+        return "", error "missing entity ID in URI: {uri}"
+
+    pool := openDB(mcpDBPath) onerr return "", error "{error}"
+    defer db.Close(pool)
+    initDB(pool) onerr return "", error "{error}"
+
+    e := getEntity(pool, id) onerr return "", error "entity not found: {id}: {error}"
+    outgoing := outgoingContext(pool, id) onerr return "", error "{error}"
+    incoming := incomingContext(pool, id) onerr return "", error "{error}"
+    obs := listObservations(pool, id) onerr return "", error "{error}"
+
+    payload := map of string to any{
+        "entity": e,
+        "outgoing": outgoing,
+        "incoming": incoming,
+        "observations": obs,
+    }
+    data := jsonpkg.MarshalPretty(payload) onerr return "", error "{error}"
+    return data as string, empty
 
 # registerTools adds all 6 knowledge graph tools to the MCP server.
 func registerTools(server reference mcp.Server)
