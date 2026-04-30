@@ -41,7 +41,7 @@ func registerUpsertEntity(server reference mcp.Server)
         mcp.Prop("tags", "array", "List of string tags"),
     }) |> mcp.Required(list of string{"id", "type", "name"})
 
-    server |> mcp.Tool("upsert_entity", "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.", schema, handleUpsertEntity)
+    mcp.ToolWithOpts(server, "upsert_entity", "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.", schema, mcp.ToolOpts{Idempotent: true}, handleUpsertEntity)
 
 func handleUpsertEntity(args map of string to any) (any, error)
     id := argString(args, "id")
@@ -77,7 +77,7 @@ func registerAddObservation(server reference mcp.Server)
         mcp.Prop("source", "string", "Source label (default: conversation)"),
     }) |> mcp.Required(list of string{"entity_id", "text"})
 
-    server |> mcp.Tool("add_observation", "Record a fact or note about an entity. Appended to the entity's observation history.", schema, handleAddObservation)
+    mcp.ToolWithOpts(server, "add_observation", "Record a fact or note about an entity. Appended to the entity's observation history.", schema, mcp.ToolOpts{Destructive: true}, handleAddObservation)
 
 func handleAddObservation(args map of string to any) (any, error)
     id := argString(args, "entity_id")
@@ -109,7 +109,7 @@ func registerRelate(server reference mcp.Server)
         mcp.Prop("dst", "string", "Destination entity id"),
     }) |> mcp.Required(list of string{"src", "rel", "dst"})
 
-    server |> mcp.Tool("relate", "Create a typed edge between two entities in the knowledge graph.", schema, handleRelate)
+    mcp.ToolWithOpts(server, "relate", "Create a typed edge between two entities in the knowledge graph.", schema, mcp.ToolOpts{Idempotent: true}, handleRelate)
 
 func handleRelate(args map of string to any) (any, error)
     src := argString(args, "src")
@@ -134,7 +134,7 @@ func registerSearchTool(server reference mcp.Server)
         mcp.Prop("limit", "integer", "Maximum results (default: 10)"),
     }) |> mcp.Required(list of string{"query"})
 
-    server |> mcp.Tool("search", "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).", schema, handleSearch)
+    mcp.ToolWithOpts(server, "search", "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).", schema, mcp.ToolOpts{ReadOnly: true}, handleSearch)
 
 func handleSearch(args map of string to any) (any, error)
     query := argString(args, "query")
@@ -160,7 +160,7 @@ func registerGetContext(server reference mcp.Server)
         mcp.Prop("id", "string", "Entity id to get context for"),
     }) |> mcp.Required(list of string{"id"})
 
-    server |> mcp.Tool("get_context", "Get full context for an entity: its data, observations, and all related entities (1 hop).", schema, handleGetContext)
+    mcp.ToolWithOpts(server, "get_context", "Get full context for an entity: its data, observations, and all related entities (1 hop).", schema, mcp.ToolOpts{ReadOnly: true}, handleGetContext)
 
 func handleGetContext(args map of string to any) (any, error)
     id := argString(args, "id")
@@ -195,7 +195,7 @@ func registerSimilarTool(server reference mcp.Server)
         mcp.Prop("limit", "integer", "Maximum results (default: 5)"),
     })
 
-    server |> mcp.Tool("similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly).", schema, handleSimilar)
+    mcp.ToolWithOpts(server, "similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly).", schema, mcp.ToolOpts{ReadOnly: true}, handleSimilar)
 
 func handleSimilar(args map of string to any) (any, error)
     id := argString(args, "id")
