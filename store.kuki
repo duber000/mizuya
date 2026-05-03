@@ -22,11 +22,11 @@ func openDB(dbPath string) (db.Pool, error)
 # and the JSON fields summary/tags are merged into the existing data object,
 # preserving any observations already recorded.
 func upsertEntity(pool db.Pool, id string, etype string, name string, summary string, tags list of string) error
-    tagsJSON := jsonpkg.Marshal(tags) onerr return
+    tagsJSON := jsonpkg.Bytes(tags) onerr return
 
-    # Initial JSON for a freshly-inserted row — build via jsonpkg.Marshal
+    # Initial JSON for a freshly-inserted row — build via jsonpkg.Bytes
     # on a map so we never string-concatenate JSON by hand.
-    initialBytes := jsonpkg.Marshal(map of string to any{
+    initialBytes := jsonpkg.Bytes(map of string to any{
         "summary": summary,
         "observations": empty list of any,
         "tags": tags,

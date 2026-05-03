@@ -87,7 +87,7 @@ func printContext(e Entity, outgoing list of ContextRow, incoming list of Contex
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
 
 func printJSON(v any)
-    data := jsonpkg.MarshalPretty(v) onerr
+    data := jsonpkg.PrettyBytes(v) onerr
         cli.Error("json error: {error}")
         return
 

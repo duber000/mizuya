@@ -49,7 +49,7 @@ func listEntitiesResource(uri string) (string, error)
     pool := openDB(mcpDBPath) onerr return "", error "{error}"
     defer db.Close(pool)
     entities := listEntities(pool, "", 500) onerr return "", error "{error}"
-    data := jsonpkg.MarshalPretty(entities) onerr return "", error "{error}"
+    data := jsonpkg.PrettyBytes(entities) onerr return "", error "{error}"
     return data as string, empty
 
 func entityContextResource(uri string) (string, error)
@@ -72,7 +72,7 @@ func entityContextResource(uri string) (string, error)
         "incoming": incoming,
         "observations": obs,
     }
-    data := jsonpkg.MarshalPretty(payload) onerr return "", error "{error}"
+    data := jsonpkg.PrettyBytes(payload) onerr return "", error "{error}"
     return data as string, empty
 
 # registerTools adds all 6 knowledge graph tools to the MCP server.
@@ -204,7 +204,7 @@ func handleSearch(args map of string to any) (any, error)
 
     hits := hybridSearch(pool, query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
 
-    data := jsonpkg.MarshalPretty(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
 
 # --- Tool: get_context ---
@@ -237,7 +237,7 @@ func handleGetContext(args map of string to any) (any, error)
         "observations": obs,
     }
 
-    data := jsonpkg.MarshalPretty(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+    data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
 
 # --- Tool: similar ---
@@ -272,7 +272,7 @@ func handleSimilar(args map of string to any) (any, error)
 
     hits := similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
 
-    data := jsonpkg.MarshalPretty(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
 
 # --- Helpers ---
@@ -324,5 +324,5 @@ func argStringList(args map of string to any, key string) list of string
 
 # entityJSON marshals an entity for MCP tool results.
 func entityJSON(e Entity) any
-    data := jsonpkg.MarshalPretty(e) onerr return mcp.ErrorResult("json error: {error}")
+    data := jsonpkg.PrettyBytes(e) onerr return mcp.ErrorResult("json error: {error}")
     return mcp.TextResult(data as string)
