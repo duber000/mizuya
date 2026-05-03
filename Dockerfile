@@ -1,7 +1,7 @@
 FROM golang:1.26 AS builder
 WORKDIR /src
 
-RUN go install github.com/kukichalang/kukicha/cmd/kukicha@v0.7.2 && kukicha version
+RUN go install github.com/kukichalang/kukicha/cmd/kukicha@v0.9.0 && kukicha version
 
 COPY . .
 
