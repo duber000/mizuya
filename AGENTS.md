@@ -207,7 +207,22 @@ users := parse() onerr
 users := parse() onerr as e
     print("failed: {e}")    # {e} and {error} both work
     return
+
+# Block form with `fallback` — run side effects AND supply a default
+setting := loadConfig(path) onerr as e
+    print("loadConfig failed: {e} — using default")
+    fallback "default-config"
+
+# Multi-value fallback: one expression per LHS slot
+x, y := loadCoords() onerr
+    print("coords lookup failed; using origin")
+    fallback 0, 0
 ```
+
+`fallback EXPR[, EXPR...]` is a terminator for the `onerr` block (like
+`return`/`panic`/`continue`/`break`). It must be the last statement in the
+handler, and the expression count must match the LHS slot count. Use it when
+you need both side effects (logging, metrics) AND a default value.
 
 ### Pipes
 
@@ -216,6 +231,9 @@ result := data |> parse() |> transform()
 
 # _ placeholder for non-first argument
 todo |> json.MarshalWrite(w, _)   # → json.MarshalWrite(w, todo)
+
+# `_` is reserved for this purpose and as the blank assignment target.
+# Reading it as a value (`fmt.Println(_)`, `x := _ + 1`) is a compile error.
 
 # Bare identifier as target
 data |> print                     # → fmt.Println(data)
@@ -506,7 +524,7 @@ names := repos
 
 **json** (as `jsonpkg`) — `Marshal`, `MarshalPretty`, `Unmarshal`, `MarshalWrite`, `UnmarshalRead`, `PrettyString`
 
-**parse** — `Json`, `JsonLines`, `Csv`, `CsvWithHeader`, `Yaml`, `YamlPretty`
+**parse** — `JSON of T from text`, `YAML of T from text`, `Form of T from values`, `Env of T from prefix` (parse + auto-Validate, return `(T, list of validate.FieldError)`); `JSONLines`, `CSV`, `CSVRecords`, `Lines`, `Duration`, `URL`, `Query`
 
 **encoding** — `Base64Encode`, `Base64Decode`, `HexEncode`, `HexDecode`
 
@@ -528,13 +546,18 @@ box := sandbox.New("/var/data") onerr return
 content := sandbox.Read(box, userPath) onerr return   # can't escape root
 ```
 
-**shell** — `Run` (fixed literals only), `Output` (variable args), `Lines` (stdout split into lines, trailing empty stripped), `New`/`Dir`/`Env`/`Execute` (builder), `Require` (stdout or err-wrapping-stderr; pairs with `Execute` in pipes)
+**shell** — `Run` (fixed literals only), `Output` (variable args), `Lines` (stdout split into lines, trailing empty stripped), `New`/`Dir`/`Env`/`Execute` (builder), `Stdin`/`StdinBytes` (feed bytes to subprocess stdin then EOF), `Require` (stdout or err-wrapping-stderr; pairs with `Execute` in pipes)
 
 ```kukicha
 diff  := shell.Run("git diff --staged") onerr panic "{error}"
 out   := shell.Output("git", "log", "--oneline", branch) onerr panic "{error}"
 files := shell.Lines("git", "ls-files") onerr return
 tests := shell.New("go", "test", "./...") |> shell.Execute() |> shell.Require() onerr return
+
+# Pipe input into a subprocess (signals EOF after writing the bytes)
+reply := shell.New("claude", "--print")
+    |> .Stdin(prompt)
+    |> .Output() onerr return
 ```
 
 #### HTTP & Networking
@@ -659,7 +682,7 @@ defer db.Close(pool)
 
 **crypto** — `SHA256`, `HMAC`, `RandomToken`, `RandomBytes`, `Equal` (constant-time)
 
-**validate** — `Email`, `URL`, `NotEmpty`, `MinLength`, `MaxLength`, `InRange`, `Matches`, `NoHTML`, `SafeFilename`
+**validate** — pipe-style: `Email`, `URL`, `NotEmpty`, `MinLength`, `MaxLength`, `InRange`, `Matches`, `NoHTML`, `SafeFilename`. Tag-driven: attach `# kuki:validate "rule[,rule…]"` above struct fields; the compiler emits `Validate()` returning `list of FieldError`. Rules: `nonempty`, `nonzero`, `min=N`, `max=N`, `len=N`, `email`, `url`, `regex=PAT`, `oneof=a|b|c`. Pair with `parse.JSON of T from body` for one-call parse-and-validate. `validate.RunTags(v)` runs the generated method even when the user defines their own `Validate`.
 
 **random** — `String`, `Alphanumeric`, `Int`, `Float`
 
@@ -679,19 +702,31 @@ defer db.Close(pool)
 
 **llm** — Shared schema utilities: `Prop`, `Schema`, `Required` (for building tool parameter schemas)
 
-**llm/chat** — Chat Completions API (OpenAI-compatible): `New`/`Ask`/`Send`/`SendRaw`/`Complete`; `System`/`User`/`Assistant`; `Temperature`/`MaxTokens`/`Stream`/`Retry`/`WithContext`; `GetText`/`GetToolCalls`
+**llm/chat** — Chat Completions API (OpenAI-compatible): `New`/`Ask`/`Send`/`SendRaw`/`Complete`/`CompleteWithSystem`; `System`/`User`/`Assistant`; `Temperature`/`MaxTokens`/`Stream`/`StreamEvents`/`Retry`/`WithContext`; `AddTool`/`JSONMode`; `FromCompletion`/`ExecuteToolCalls`; `GetText`/`GetToolCalls`/`HasToolCalls`
 
-**llm/responses** — OpenResponses API: `New`/`Ask`/`Send`/`AskRaw`/`SendRaw`/`Respond`; `Instructions`/`User`/`System`/`PreviousResponse`; `Temperature`/`MaxOutputTokens`/`Stream`/`StreamEvents`/`Retry`; `GetText`/`GetFunctionCalls`
+**llm/responses** — OpenResponses API: `New`/`Ask`/`Send`/`AskRaw`/`SendRaw`/`Respond`/`RespondWithInstructions`; `Instructions`/`User`/`System`/`Developer`/`PreviousResponse`; `Temperature`/`MaxOutputTokens`/`Stream`/`StreamEvents`/`Retry`/`WithContext`; `AddTool`/`JSONMode`/`JSONSchema`/`Store`; `FromResponse`/`ExecuteFunctionCalls`/`FunctionCallOutput`; `GetText`/`GetFunctionCalls`/`HasFunctionCalls`
 
-**llm/anthropic** — Anthropic Messages API: `New`/`Ask`/`Send`/`AskRaw`/`SendRaw`/`Complete`; `System`/`User`/`Assistant`/`ToolResult`; `Temperature`/`MaxTokens`/`AdaptiveThinking`/`Effort`/`Stream`/`StreamEvents`/`Retry`; `GetText`/`GetThinking`/`GetToolUses`
+**llm/anthropic** — Anthropic Messages API: `New`/`Ask`/`Send`/`AskRaw`/`SendRaw`/`Complete`/`CompleteWithSystem`; `System`/`User`/`Assistant`/`ToolResult`; `Temperature`/`MaxTokens`/`AdaptiveThinking`/`Effort`/`Stream`/`StreamEvents`/`Retry`/`WithContext`; `AddTool`; `FromResponse`/`ExecuteToolUses`; `GetText`/`GetThinking`/`GetToolUses`/`HasToolUses`
 
 ```kukicha
+import "stdlib/llm"
 import "stdlib/llm/chat"
 
+# one-shot
 reply := chat.New("openai:gpt-4o-mini") |> chat.Retry(3, 2000) |> chat.Ask("Hello!") onerr panic "{error}"
+
+# agentic tool loop
+schema := llm.Schema(list of llm.SchemaProperty{llm.Prop("city", "string", "City name")}) |> llm.Required(list of string{"city"})
+c := chat.New("openai:gpt-4o-mini") |> chat.AddTool("get_weather", "Get weather", schema) |> chat.User("Weather in Paris?")
+comp := c |> chat.SendRaw onerr panic "{error}"
+if chat.HasToolCalls(comp)
+    handlers := make(map of string to func(string) string)
+    handlers["get_weather"] = (args string) => "Sunny, 22°C"
+    c = chat.ExecuteToolCalls(c, comp, handlers) onerr panic "{error}"
+    reply = c |> chat.Send onerr panic "{error}"
 ```
 
-**mcp** — MCP server + client: `New`, `Tool`, `Serve`, `Connect`, `BearerConnect`, `ListTools`, `CallTool`
+**mcp** — MCP server + client: `New`, `Serve`, `ServeHTTP`, `Tool`, `ToolWithOpts`, `ToolRich`, `Resource`, `TextResource`, `ResourceTemplate`, `TextResourceTemplate`, `Prompt`, `UserPrompt`, `Prop`, `Schema`, `Required`, `TextResult`, `ErrorResult`, `Connect`, `BearerConnect`, `ConnectWithClient`, `Close`, `ListTools`, `CallTool`, `ListResources`, `ListResourceTemplates`, `ReadResource`, `ListPrompts`, `GetPrompt`, `NewWithCompletion`, `Completions`, `CompletionsPage`, `NewRouter`
 
 ```kukicha
 # Server
@@ -712,13 +747,19 @@ result := mcp.CallTool(ctx, session, "get_price", args) onerr panic "{error}"
 
 #### External Packages (separate modules)
 
-**game** (WASM-only) — 2D game lib: `Window`, `Run`, `DrawRect`, `DrawCircle`, `DrawText`, `IsKeyDown`, `MousePosition`
+These packages require adding a separate Go module to your project — they are not bundled with the Kukicha compiler.
 
-**infer** / **ort** / **webinfer** — ML inference (`github.com/kukichalang/infer`)
+**game** (WASM-only) — 2D game lib: `Window`, `Run`, `DrawRect`, `DrawCircle`, `DrawText`, `IsKeyDown`, `MousePosition`
+Module: `github.com/kukichalang/game` — add with `go get github.com/kukichalang/game`
+
+**infer** / **ort** / **webinfer** — ML inference
+Module: `github.com/kukichalang/infer` — add with `go get github.com/kukichalang/infer`
 
 ---
 
-**All packages:** `cast`, `cli`, `concurrent`, `container`, `crypto`, `ctx`, `datetime`, `db`, `encoding`, `env`, `errors`, `fetch`, `files`, `game`, `git`, `html`, `http`, `infer`, `input`, `iterator`, `json`, `llm`, `maps`, `mcp`, `must`, `net`, `netguard`, `obs`, `ort`, `parse`, `random`, `regex`, `retry`, `sandbox`, `semver`, `set`, `shell`, `skills`, `slice`, `sort`, `sqlite`, `string`, `table`, `template`, `test`, `validate`, `webinfer`
+**Built-in packages:** `cast`, `cli`, `concurrent`, `container`, `crypto`, `ctx`, `datetime`, `db`, `encoding`, `env`, `errors`, `fetch`, `files`, `git`, `html`, `http`, `input`, `iterator`, `json`, `llm`, `maps`, `mcp`, `must`, `net`, `netguard`, `obs`, `parse`, `random`, `regex`, `retry`, `sandbox`, `semver`, `set`, `shell`, `skills`, `slice`, `sort`, `sqlite`, `string`, `table`, `template`, `test`, `validate`
+
+**External packages** (separate module required): `game`, `infer`, `ort`, `webinfer`
 
 ---
 
