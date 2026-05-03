@@ -97,14 +97,11 @@ func ollamaEmbed(cfg embedConfig, text string) (list of float64, error)
         |> fetch.Timeout(30000000000)
         |> fetch.Do() onerr return
 
-    defer resp.Body.Close()
-
     if resp.StatusCode isnt http.StatusOK
         msg := fetch.Text(resp) onerr return empty, error "ollama embed: HTTP {resp.StatusCode}"
         return empty, error "ollama embed: HTTP {resp.StatusCode}: {msg}"
 
-    result := empty ollamaEmbedResponse
-    fetch.Decode(resp, reference of result) onerr return
+    result := fetch.Json of ollamaEmbedResponse from resp onerr return
     if len(result.Embeddings) equals 0
         return empty, error "ollama returned no embeddings"
     return result.Embeddings[0], empty
@@ -137,14 +134,11 @@ func openaiEmbed(cfg embedConfig, text string) (list of float64, error)
         req = req |> fetch.Header("Authorization", "Bearer " + cfg.APIKey)
     resp := req |> fetch.Do() onerr return
 
-    defer resp.Body.Close()
-
     if resp.StatusCode isnt http.StatusOK
         msg := fetch.Text(resp) onerr return empty, error "openai embed: HTTP {resp.StatusCode}"
         return empty, error "openai embed: HTTP {resp.StatusCode}: {msg}"
 
-    result := empty openaiEmbedResponse
-    fetch.Decode(resp, reference of result) onerr return
+    result := fetch.Json of openaiEmbedResponse from resp onerr return
     if len(result.Data) equals 0
         return empty, error "openai returned no embeddings"
     return result.Data[0].Embedding, empty

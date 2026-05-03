@@ -6,8 +6,8 @@ petiole main
 import "stdlib/db"
 import "stdlib/files"
 import "stdlib/json" as jsonpkg
-import "stdlib/sqlite"
 import "stdlib/slice"
+import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 
 # openDB opens (or creates) the SQLite database at the given path.
@@ -94,8 +94,7 @@ func entityText(pool db.Pool, id string) (string, error)
     parts := list of string{e.Name}
 
     # Pull summary out of the stored JSON via typed unmarshal.
-    ed := entityData{}
-    jsonpkg.UnmarshalString(e.Data, reference of ed) onerr return
+    ed := jsonpkg.ParseString of entityData from e.Data onerr return
     if ed.Summary isnt ""
         parts = append(parts, ed.Summary)
 
