@@ -72,7 +72,7 @@ func main()
     mcpCmd := cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
         |> .Action(doMCP)
 
-    _ = cli.New("mizuya")
+    cli.New("mizuya")
         |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
         |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
         |> cli.BoolGlobalFlag("json", "JSON output", false)
