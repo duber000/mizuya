@@ -382,7 +382,7 @@ func doSimilar(args cli.Args)
         else
             header = "similar to text: {text}"
         if threshold > 0
-            header = header + " (closest p{threshold})"
+            header = header + " (closest {threshold}%)"
         print(color.Bold(header))
         printSimilarHits(hits)
 
