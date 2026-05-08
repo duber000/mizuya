@@ -20,21 +20,13 @@ The candidates below are ordered by expected payoff for mizuya specifically.
   Touches: `schema.kuki` (add `DEFAULT uuid7()` on relevant columns),
   drop any Go-side UUID code if/when added.
 
-- [ ] **`closure` — N-hop graph queries for `context`.**
-  `outgoingContext` / `incomingContext` in `store.kuki` only walk one hop.
-  A closure virtual table over `relations` would give us "everything reachable
-  from id X within k hops" without a recursive CTE. Natural fit for an
-  `--depth` flag on `mizuya context` and for the MCP `get_context` tool.
-  Touches: `schema.kuki` (declare the closure vtable),
-  `store.kuki` (new `reachableContext` function), `main.kuki` + `mcp_server.kuki`
-  (expose `--depth`).
+- [x] **`closure` — N-hop graph queries for `context`.** *(implemented via
+  recursive CTE in `store.kuki`; the ncruces `closure` ext is hardcoded
+  to integer ids and doesn't fit our TEXT slug PKs. `--depth` is wired
+  on `mizuya context` and on the MCP `get_context` tool.)*
 
-- [ ] **`regexp` — regex queries alongside FTS5.**
-  FTS5 tokenization mangles code identifiers, version strings, and structured
-  IDs. `WHERE name REGEXP '^kuk'` or `WHERE data REGEXP 'v0\.[0-9]+\.[0-9]+'`
-  picks up cases the porter-stemmed FTS index misses. Pairs cleanly with
-  the existing `search` subcommand as a `--regex` mode.
-  Touches: `search.kuki` (new `regexSearch`), `main.kuki` (flag wiring).
+- [x] **`regexp` — regex queries alongside FTS5.** *(wired as `--regex`
+  on `mizuya search`; matches against id, name, and data columns.)*
 
 - [ ] **`unicode` — correct case-insensitive matching for non-ASCII names.**
   SQLite's built-in `lower()` is ASCII-only, so any entity name with
