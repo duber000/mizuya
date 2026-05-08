@@ -48,11 +48,11 @@ The candidates below are ordered by expected payoff for mizuya specifically.
   as `--threshold N` (1-100) on the CLI and the MCP `similar` tool;
   uses `percentile()` aggregate over the full distance set.)*
 
-- [ ] **`spellfix1` — fuzzy entity-id resolution.**
-  Typos in `--id sqilte` currently fail with "entity not found". A spellfix1
-  vtable over the entity ids gives a "did you mean sqlite?" path for the CLI
-  and MCP tool calls.
-  Touches: new `suggest.kuki`, `main.kuki` error path.
+- [x] **`spellfix1` — fuzzy entity-id resolution.** *(wired into the
+  CLI error paths for `context`, `observe`, and `similar --id`, plus
+  the matching MCP tools. The vtab is rebuilt from `entities.id` on
+  every pool open via `refreshFuzzyIds`; switch to incremental
+  maintenance if entity churn ever makes that hot.)*
 
 ### Low value / situational
 

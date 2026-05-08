@@ -27,6 +27,7 @@ import "stdlib/db"
 import "stdlib/sqliteext"
 
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
 import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
@@ -100,6 +101,8 @@ func openPool(args cli.Args) (db.Pool, error)
     sqliteext.Register(pool, regexpext.Register) onerr return
     sqliteext.Register(pool, uuidext.Register) onerr return
     sqliteext.Register(pool, statsext.Register) onerr return
+    sqliteext.Register(pool, spellfixext.Register) onerr return
+    refreshFuzzyIds(pool) onerr return
     return pool, empty
 
 func doInit(args cli.Args)
@@ -116,6 +119,10 @@ func doInit(args cli.Args)
 
     sqliteext.Register(pool, uuidext.Register) onerr
         errPrint("cannot register uuid extension: {error}")
+        return
+
+    sqliteext.Register(pool, spellfixext.Register) onerr
+        errPrint("cannot register spellfix1 extension: {error}")
         return
 
     initDB(pool) onerr
@@ -189,7 +196,7 @@ func doObserve(args cli.Args)
     defer db.Close(pool)
 
     addObservation(pool, id, text, source) onerr
-        errPrint("cannot add observation: {error}")
+        errPrint("cannot add observation: {error}{suggestionsFor(pool, id)}")
         return
 
     # Re-embed: observations are part of the entity's text corpus.
@@ -285,7 +292,7 @@ func doContext(args cli.Args)
         depth = 1
 
     e := getEntity(pool, id) onerr
-        errPrint("entity not found: {error}")
+        errPrint("entity not found: {error}{suggestionsFor(pool, id)}")
         return
 
     obs := listObservations(pool, id) onerr
@@ -355,7 +362,7 @@ func doSimilar(args cli.Args)
     if id isnt ""
         v, err := getEmbedding(pool, id)
         if err isnt empty
-            errPrint("no embedding for {id}: {err}")
+            errPrint("no embedding for {id}: {err}{suggestionsFor(pool, id)}")
             return
         vec = v
     else

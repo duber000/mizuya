@@ -5,6 +5,7 @@ petiole main
 import "fmt"
 import "stdlib/cli"
 import "stdlib/color"
+import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/slice"
 import "stdlib/string" as strpkg
@@ -128,6 +129,24 @@ func printJSON(v any)
 
 func errPrint(msg string)
     cli.Error("{color.BrightRed("error:")} {msg}")
+
+# didYouMean formats a fuzzy-suggestion list for tacking onto error
+# messages. Returns an empty string when there are no suggestions so
+# callers can append unconditionally without leading punctuation drift.
+func didYouMean(ids list of string) string
+    if len(ids) equals 0
+        return ""
+    return ". did you mean: " + strpkg.Join(ids, ", ") + "?"
+
+# suggestionsFor wraps suggestIds + didYouMean for use inside an outer
+# onerr block. Encapsulating the fuzzy lookup in its own function
+# avoids `error` shadow warnings when callers append the hint to an
+# error message.
+func suggestionsFor(pool db.Pool, id string) string
+    ids, err := suggestIds(pool, id, 3)
+    if err isnt empty
+        return ""
+    return didYouMean(ids)
 
 # parseTags splits a comma-separated tag string into a trimmed slice,
 # dropping empty entries.

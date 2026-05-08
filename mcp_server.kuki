@@ -11,6 +11,7 @@ import "stdlib/mcp"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
 
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
 import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
@@ -148,7 +149,7 @@ func handleAddObservation(args map of string to any) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}"), empty
+    addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}{suggestionsFor(pool, id)}"), empty
 
     reEmbed(pool, id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
@@ -226,7 +227,7 @@ func handleGetContext(args map of string to any) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    e := getEntity(pool, id) onerr return mcp.ErrorResult("entity not found: {error}"), empty
+    e := getEntity(pool, id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, id)}"), empty
     obs := listObservations(pool, id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
 
     if depth > 1
@@ -282,7 +283,7 @@ func handleSimilar(args map of string to any) (any, error)
 
     vec := make(list of float64, 0)
     if id isnt ""
-        vec = getEmbedding(pool, id) onerr return mcp.ErrorResult("no embedding for {id}: {error}"), empty
+        vec = getEmbedding(pool, id) onerr return mcp.ErrorResult("no embedding for {id}: {error}{suggestionsFor(pool, id)}"), empty
     else
         vec = embedText(text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
@@ -305,7 +306,9 @@ func openMCPPool() (db.Pool, error)
     sqliteext.Register(pool, vec1ext.Register) onerr return
     sqliteext.Register(pool, uuidext.Register) onerr return
     sqliteext.Register(pool, statsext.Register) onerr return
+    sqliteext.Register(pool, spellfixext.Register) onerr return
     initDB(pool) onerr return
+    refreshFuzzyIds(pool) onerr return
     return pool, empty
 
 # reEmbed recomputes and stores the embedding for an entity from its

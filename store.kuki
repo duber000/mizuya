@@ -144,6 +144,32 @@ func incomingContext(pool db.Pool, id string) (list of ContextRow, error)
     result := db.Query(pool, q, id) |> db.ScanAll(empty list of ContextRow) onerr return
     return result, empty
 
+# --- Fuzzy id suggestions ---
+
+# suggestIds returns up to k entity ids that are approximate matches for
+# `query`, ranked by edit distance via the spellfix1 vtab. Used to power
+# "did you mean ...?" hints when an exact id lookup fails. Returns
+# empty (and no error) if the vtab is empty or no candidates pass
+# spellfix's similarity threshold.
+func suggestIds(pool db.Pool, query string, k int) (list of string, error)
+    if query equals "" or k <= 0
+        return empty list of string, empty
+    q := "SELECT word FROM entity_ids_fuzzy WHERE word MATCH ? AND top=?"
+    rows := db.Query(pool, q, query, k) |> db.ScanAll(empty list of suggestRow) onerr return
+    out := make(list of string, 0, len(rows))
+    for _, r in rows
+        out = append(out, r.Word)
+    return out, empty
+
+# refreshFuzzyIds rebuilds the spellfix1 vtab from the current entities
+# table. Cheap on small graphs; called from openPool/openMCPPool so
+# every command sees up-to-date suggestions even though entities can
+# be inserted between sessions.
+func refreshFuzzyIds(pool db.Pool) error
+    db.Exec(pool, "DELETE FROM entity_ids_fuzzy") onerr return
+    db.Exec(pool, "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities") onerr return
+    return empty
+
 # reachableOutgoing returns every entity reachable from id by following
 # outgoing edges up to `depth` hops. Implemented via a recursive CTE
 # because the upstream `transitive_closure` virtual table is hardcoded

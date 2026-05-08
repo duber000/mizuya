@@ -65,6 +65,12 @@ type SimilarHit
     Summary string as "summary"
     Distance float64 as "distance"
 
+# suggestRow is a single fuzzy-match suggestion from the spellfix1
+# vtab. Word is the matched id; we don't currently surface rank or
+# distance.
+type suggestRow
+    Word string as "word"
+
 # entityData is the typed view of the JSON stored in the entities.data
 # column. Unknown fields (like observations) are ignored on unmarshal.
 type entityData

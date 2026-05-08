@@ -58,6 +58,18 @@ const idxEntityUpdated = "CREATE INDEX IF NOT EXISTS idx_entities_updated ON ent
 # composite index serves listObservations without a sort.
 const idxObsEntity = "CREATE INDEX IF NOT EXISTS idx_observations_entity_at ON observations(entity_id, at DESC)"
 
+# --- Spellfix1 fuzzy index over entity ids ---
+# spellfix1 is a virtual table that supports approximate-match lookups
+# against a vocabulary. We populate it from entities.id at startup so a
+# typo on the CLI ("--id sqilte") can suggest "sqlite". Rebuilt on every
+# initDB call (cheap at the scale we care about); switch to incremental
+# maintenance if entity churn ever makes this hot.
+const fuzzyIdsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS entity_ids_fuzzy USING spellfix1"
+
+const fuzzyIdsClearSQL = "DELETE FROM entity_ids_fuzzy"
+
+const fuzzyIdsPopulateSQL = "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities"
+
 # initDB creates all tables, the FTS5 virtual table, triggers, and indexes
 # inside a single transaction. Safe to call repeatedly.
 func initDB(pool db.Pool) error
@@ -76,6 +88,9 @@ func initDB(pool db.Pool) error
         db.TxExec(tx, idxEntityType) onerr return
         db.TxExec(tx, idxEntityUpdated) onerr return
         db.TxExec(tx, idxObsEntity) onerr return
+        db.TxExec(tx, fuzzyIdsSQL) onerr return
+        db.TxExec(tx, fuzzyIdsClearSQL) onerr return
+        db.TxExec(tx, fuzzyIdsPopulateSQL) onerr return
         return empty
     ) onerr return
 
