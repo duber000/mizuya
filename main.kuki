@@ -59,8 +59,9 @@ func main()
         |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
         |> .Action(doSearch)
 
-    contextCmd := cli.NewCommand("context", "Show an entity with its 1-hop neighbors and observations")
+    contextCmd := cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
         |> .StringFlag("id", "Entity id", "")
+        |> .IntFlag("depth", "Hops to traverse via the closure vtable (1 = immediate neighbors)", 1)
         |> .Action(doContext)
 
     similarCmd := cli.NewCommand("similar", "Vector similarity search (cosine distance)")
@@ -270,8 +271,37 @@ func doContext(args cli.Args)
 
     defer db.Close(pool)
 
+    depth, derr := cli.GetInt(args, "depth")
+    if derr isnt empty or depth < 1
+        depth = 1
+
     e := getEntity(pool, id) onerr
         errPrint("entity not found: {error}")
+        return
+
+    obs := listObservations(pool, id) onerr
+        errPrint("cannot read observations: {error}")
+        return
+
+    if depth > 1
+        outReach := reachableOutgoing(pool, id, depth) onerr
+            errPrint("cannot read outgoing closure: {error}")
+            return
+        inReach := reachableIncoming(pool, id, depth) onerr
+            errPrint("cannot read incoming closure: {error}")
+            return
+
+        if cli.IsJSON(args)
+            payload := map of string to any{
+                "entity": e,
+                "depth": depth,
+                "outgoing": outReach,
+                "incoming": inReach,
+                "observations": obs,
+            }
+            printJSON(payload)
+        else
+            printReachableContext(e, depth, outReach, inReach, obs)
         return
 
     outgoing := outgoingContext(pool, id) onerr
@@ -280,10 +310,6 @@ func doContext(args cli.Args)
 
     incoming := incomingContext(pool, id) onerr
         errPrint("cannot read incoming: {error}")
-        return
-
-    obs := listObservations(pool, id) onerr
-        errPrint("cannot read observations: {error}")
         return
 
     if cli.IsJSON(args)

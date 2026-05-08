@@ -86,6 +86,39 @@ func printContext(e Entity, outgoing list of ContextRow, incoming list of Contex
                 src = "conversation"
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
 
+func printReachableContext(e Entity, depth int, outgoing list of ReachableRow, incoming list of ReachableRow, obs list of ObsRow)
+    printEntityHeader(e)
+    print(color.Dim("  reachable within {depth} hops"))
+    print("")
+    print(color.Bold("data:"))
+    print("  {e.Data}")
+    print("")
+
+    if len(outgoing) > 0
+        print(color.Bold("outgoing:"))
+        for r in outgoing
+            print("  {color.Green("[+{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}")
+            if r.Summary isnt ""
+                print("     {color.Dim(r.Summary)}")
+    if len(incoming) > 0
+        if len(outgoing) > 0
+            print("")
+        print(color.Bold("incoming:"))
+        for r in incoming
+            print("  {color.Blue("[-{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}")
+            if r.Summary isnt ""
+                print("     {color.Dim(r.Summary)}")
+
+    if len(obs) > 0
+        if len(outgoing) > 0 or len(incoming) > 0
+            print("")
+        print(color.Bold("observations:"))
+        for o in obs
+            src := o.Source
+            if src equals ""
+                src = "conversation"
+            print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
+
 func printJSON(v any)
     data := jsonpkg.PrettyBytes(v) onerr
         cli.Error("json error: {error}")

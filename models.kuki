@@ -38,6 +38,17 @@ type ContextRow
     Type string as "type"
     Summary string as "summary"
 
+# ReachableRow describes an entity reached via N-hop graph traversal
+# through the closure virtual table. Depth is the minimum hop count
+# from the root; the relation label isn't carried (closure walks any
+# edge regardless of `rel`).
+type ReachableRow
+    Depth int as "depth"
+    Other string as "other"
+    Name string as "name"
+    Type string as "type"
+    Summary string as "summary"
+
 # ObsRow is a single observation extracted from an entity's JSON payload.
 type ObsRow
     Text string as "text"

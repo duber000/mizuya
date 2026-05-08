@@ -60,9 +60,8 @@ func entityContextResource(uri string) (string, error)
     if id equals ""
         return "", error "missing entity ID in URI: {uri}"
 
-    pool := openDB(mcpDBPath) onerr return "", error "{error}"
+    pool := openMCPPool() onerr return "", error "{error}"
     defer db.Close(pool)
-    initDB(pool) onerr return "", error "{error}"
 
     e := getEntity(pool, id) onerr return "", error "entity not found: {id}: {error}"
     outgoing := outgoingContext(pool, id) onerr return "", error "{error}"
@@ -113,10 +112,8 @@ func handleUpsertEntity(args map of string to any) (any, error)
     summary := argString(args, "summary")
     tags := argStringList(args, "tags")
 
-    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
-    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     upsertEntity(pool, id, etype, name, summary, tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
 
@@ -146,10 +143,8 @@ func handleAddObservation(args map of string to any) (any, error)
     if source equals ""
         source = "conversation"
 
-    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
-    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}"), empty
 
@@ -175,9 +170,8 @@ func handleRelate(args map of string to any) (any, error)
     if src equals "" or rel equals "" or dst equals ""
         return mcp.ErrorResult("src, rel, and dst are required"), empty
 
-    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
-    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
 
     relate(pool, src, rel, dst) onerr return mcp.ErrorResult("relate failed: {error}"), empty
 
@@ -200,10 +194,8 @@ func handleSearch(args map of string to any) (any, error)
 
     limit := argInt(args, "limit", 10)
 
-    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
-    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     hits := hybridSearch(pool, query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
 
@@ -215,23 +207,42 @@ func handleSearch(args map of string to any) (any, error)
 func registerGetContext(server reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("id", "string", "Entity id to get context for"),
+        mcp.Prop("depth", "integer", "Hops to traverse via the closure vtable (1 = immediate neighbors, default 1)"),
     }) |> mcp.Required(list of string{"id"})
 
-    mcp.ToolWithOpts(server, "get_context", "Get full context for an entity: its data, observations, and all related entities (1 hop).", schema, mcp.ToolOpts{ReadOnly: true}, handleGetContext)
+    mcp.ToolWithOpts(server, "get_context", "Get full context for an entity: its data, observations, and related entities up to N hops (default 1).", schema, mcp.ToolOpts{ReadOnly: true}, handleGetContext)
 
 func handleGetContext(args map of string to any) (any, error)
     id := argString(args, "id")
     if id equals ""
         return mcp.ErrorResult("id is required"), empty
 
-    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    depth := argInt(args, "depth", 1)
+    if depth < 1
+        depth = 1
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
-    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
 
     e := getEntity(pool, id) onerr return mcp.ErrorResult("entity not found: {error}"), empty
+    obs := listObservations(pool, id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+
+    if depth > 1
+        outReach := reachableOutgoing(pool, id, depth) onerr return mcp.ErrorResult("cannot read outgoing closure: {error}"), empty
+        inReach := reachableIncoming(pool, id, depth) onerr return mcp.ErrorResult("cannot read incoming closure: {error}"), empty
+
+        payload := map of string to any{
+            "entity": e,
+            "depth": depth,
+            "outgoing": outReach,
+            "incoming": inReach,
+            "observations": obs,
+        }
+        data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+        return mcp.TextResult(data as string), empty
+
     outgoing := outgoingContext(pool, id) onerr return mcp.ErrorResult("cannot read outgoing: {error}"), empty
     incoming := incomingContext(pool, id) onerr return mcp.ErrorResult("cannot read incoming: {error}"), empty
-    obs := listObservations(pool, id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
 
     payload := map of string to any{
         "entity": e,
@@ -262,10 +273,8 @@ func handleSimilar(args map of string to any) (any, error)
 
     limit := argInt(args, "limit", 5)
 
-    pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
-    initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     vec := make(list of float64, 0)
     if id isnt ""
@@ -279,6 +288,15 @@ func handleSimilar(args map of string to any) (any, error)
     return mcp.TextResult(data as string), empty
 
 # --- Helpers ---
+
+# openMCPPool opens the database, registers the vec1 extension for
+# embeddings, and runs initDB. All MCP tool handlers funnel through
+# this for consistency.
+func openMCPPool() (db.Pool, error)
+    pool := openDB(mcpDBPath) onerr return
+    sqliteext.Register(pool, vec1ext.Register) onerr return
+    initDB(pool) onerr return
+    return pool, empty
 
 # reEmbed recomputes and stores the embedding for an entity from its
 # current text corpus. Used after upsert/observe to keep vectors fresh.
