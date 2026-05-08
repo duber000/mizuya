@@ -27,6 +27,7 @@ import "stdlib/db"
 import "stdlib/sqliteext"
 
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
 func main()
@@ -95,6 +96,7 @@ func openPool(args cli.Args) (db.Pool, error)
     pool := openDB(dbPath) onerr return
     sqliteext.Register(pool, vec1ext.Register) onerr return
     sqliteext.Register(pool, regexpext.Register) onerr return
+    sqliteext.Register(pool, uuidext.Register) onerr return
     return pool, empty
 
 func doInit(args cli.Args)
@@ -107,6 +109,10 @@ func doInit(args cli.Args)
 
     sqliteext.Register(pool, vec1ext.Register) onerr
         errPrint("cannot register vec1 extension: {error}")
+        return
+
+    sqliteext.Register(pool, uuidext.Register) onerr
+        errPrint("cannot register uuid extension: {error}")
         return
 
     initDB(pool) onerr

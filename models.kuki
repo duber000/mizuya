@@ -49,8 +49,10 @@ type ReachableRow
     Type string as "type"
     Summary string as "summary"
 
-# ObsRow is a single observation extracted from an entity's JSON payload.
+# ObsRow is a single observation row from the observations table.
+# Id is a uuid7 string assigned by SQLite at INSERT time.
 type ObsRow
+    Id string as "id"
     Text string as "text"
     Source string as "source"
     At string as "at"

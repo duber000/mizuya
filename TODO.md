@@ -13,12 +13,10 @@ The candidates below are ordered by expected payoff for mizuya specifically.
 
 ### High value
 
-- [ ] **`uuid` — uuid7 primary keys for relations and observations.**
-  Replace the Go-side ID generation paths and let SQLite fill in time-ordered
-  uuid7s as column defaults. Better B-tree locality than v4; no `crypto/rand`
-  import on the Kukicha side.
-  Touches: `schema.kuki` (add `DEFAULT uuid7()` on relevant columns),
-  drop any Go-side UUID code if/when added.
+- [x] **`uuid` — uuid7 primary keys for observations.** *(observations
+  are now a real table with `id TEXT PRIMARY KEY DEFAULT (uuid(7))`.
+  Entities still use user-supplied slugs by design; relations still use
+  the composite `(src, rel, dst)` PK.)*
 
 - [x] **`closure` — N-hop graph queries for `context`.** *(implemented via
   recursive CTE in `store.kuki`; the ncruces `closure` ext is hardcoded

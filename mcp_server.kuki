@@ -11,6 +11,7 @@ import "stdlib/mcp"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
 
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
 # mcpDBPath is the database path used by the MCP server, set from the
@@ -289,12 +290,13 @@ func handleSimilar(args map of string to any) (any, error)
 
 # --- Helpers ---
 
-# openMCPPool opens the database, registers the vec1 extension for
-# embeddings, and runs initDB. All MCP tool handlers funnel through
-# this for consistency.
+# openMCPPool opens the database, registers the SQLite extensions
+# referenced at runtime (vec1 for embeddings, uuid for observation
+# id defaults), and runs initDB.
 func openMCPPool() (db.Pool, error)
     pool := openDB(mcpDBPath) onerr return
     sqliteext.Register(pool, vec1ext.Register) onerr return
+    sqliteext.Register(pool, uuidext.Register) onerr return
     initDB(pool) onerr return
     return pool, empty
 

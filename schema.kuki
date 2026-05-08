@@ -12,6 +12,12 @@ const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, t
 
 const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (src, rel, dst))"
 
+# Observations are first-class rows so they can be edited, deleted, and
+# filtered individually. The id default uses uuid(7) for time-ordered
+# UUIDs (better B-tree locality than v4) — requires the uuid extension
+# registered before any INSERT.
+const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (datetime('now')))"
+
 # Embeddings live in a vec1 virtual table. The 'flat' index does brute-force
 # scan inside vec1 (no training step) — fine for thousands of entities.
 # Bump to a trained IVFADC model later by replacing the rebuild config.
@@ -48,12 +54,17 @@ const idxEntityType = "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(
 
 const idxEntityUpdated = "CREATE INDEX IF NOT EXISTS idx_entities_updated ON entities(updated_at)"
 
+# Observations are queried by entity in newest-first order; this
+# composite index serves listObservations without a sort.
+const idxObsEntity = "CREATE INDEX IF NOT EXISTS idx_observations_entity_at ON observations(entity_id, at DESC)"
+
 # initDB creates all tables, the FTS5 virtual table, triggers, and indexes
 # inside a single transaction. Safe to call repeatedly.
 func initDB(pool db.Pool) error
     db.Transaction(pool, (tx) =>
         db.TxExec(tx, entitiesSQL) onerr return
         db.TxExec(tx, relationsSQL) onerr return
+        db.TxExec(tx, observationsSQL) onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
         db.TxExec(tx, embeddingsRebuildSQL) onerr return
         db.TxExec(tx, embeddingsCascadeSQL) onerr return
@@ -64,6 +75,7 @@ func initDB(pool db.Pool) error
         db.TxExec(tx, idxRelDst) onerr return
         db.TxExec(tx, idxEntityType) onerr return
         db.TxExec(tx, idxEntityUpdated) onerr return
+        db.TxExec(tx, idxObsEntity) onerr return
         return empty
     ) onerr return
 

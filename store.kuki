@@ -25,10 +25,10 @@ func upsertEntity(pool db.Pool, id string, etype string, name string, summary st
     tagsJSON := jsonpkg.Bytes(tags) onerr return
 
     # Initial JSON for a freshly-inserted row — build via jsonpkg.Bytes
-    # on a map so we never string-concatenate JSON by hand.
+    # on a map so we never string-concatenate JSON by hand. Observations
+    # live in their own table and are joined in at read time.
     initialBytes := jsonpkg.Bytes(map of string to any{
         "summary": summary,
-        "observations": empty list of any,
         "tags": tags,
     }) onerr return
 
@@ -64,8 +64,10 @@ func listEntities(pool db.Pool, etype string, limit int) (list of Entity, error)
 
 # --- Observations (JSON-array append) ---
 
-# addObservation appends an observation object to the entity's
-# $.observations array using json_set with the $[#] "append" path.
+# addObservation inserts a row into the observations table and bumps
+# the entity's updated_at so search ranking notices the new content.
+# The id default (uuid(7)) is filled in by SQLite — uuid extension
+# must be registered before this runs.
 func addObservation(pool db.Pool, id string, text string, source string) error
     exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
     if err isnt empty
@@ -73,16 +75,20 @@ func addObservation(pool db.Pool, id string, text string, source string) error
     if not exists
         return error "entity not found: {id}"
 
-    q := "UPDATE entities SET data = json_set(data, '$.observations[#]', json_object('text', ?, 'source', ?, 'at', datetime('now'))), updated_at = datetime('now') WHERE id = ?"
-    db.Exec(pool, q, text, source, id) onerr return
+    db.Exec(pool, "INSERT INTO observations (entity_id, text, source) VALUES (?, ?, ?)", id, text, source) onerr return
+    db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id) onerr return
     return empty
 
-# listObservations returns the observation array for an entity,
-# newest first.
+# listObservations returns the observations for an entity, newest first.
 func listObservations(pool db.Pool, id string) (list of ObsRow, error)
-    q := "SELECT obs.value ->> '$.text' AS text, obs.value ->> '$.source' AS source, obs.value ->> '$.at' AS at FROM entities e, json_each(e.data, '$.observations') obs WHERE e.id = ? ORDER BY obs.value ->> '$.at' DESC"
+    q := "SELECT id, text, source, at FROM observations WHERE entity_id = ? ORDER BY at DESC, id DESC"
     result := db.Query(pool, q, id) |> db.ScanAll(empty list of ObsRow) onerr return
     return result, empty
+
+# deleteObservation removes a single observation by its uuid7 id.
+func deleteObservation(pool db.Pool, obsID string) error
+    db.Exec(pool, "DELETE FROM observations WHERE id = ?", obsID) onerr return
+    return empty
 
 # entityText assembles the concatenated text representation of an entity
 # (name + summary + observations), used as input to the toy embedder.
