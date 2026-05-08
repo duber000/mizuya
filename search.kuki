@@ -1,14 +1,13 @@
 # mizuya — FTS5 search, embedding storage, and vector similarity.
-# Vectors are stored as binary BLOBs (little-endian float64) for compact storage
-# and zero-parse-overhead distance computation. sqlite.CreateBlobFunctionFloat
-# registers the cosine-distance UDF so SQLite receives a native REAL.
+# Vectors are stored in a vec1 virtual table as float32 LE BLOBs (vec1
+# requires 4-byte-aligned vectors). vec1 ships native KNN + cosine
+# distance so we don't host a Kukicha-side UDF.
 
 petiole main
 
 import "encoding/binary"
 import "math"
 import "stdlib/db"
-import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 
 # --- FTS5 keyword search ---
@@ -23,89 +22,76 @@ func ftsSearch(pool db.Pool, query string, limit int) (list of SearchHit, error)
     result := db.Query(pool, q, query, limit) |> db.ScanAll(empty list of SearchHit) onerr return
     return result, empty
 
+# --- Regex search ---
+
+# regexSearch matches `pattern` against entity id, name, and the JSON
+# data column using the REGEXP operator from
+# github.com/ncruces/go-sqlite3/ext/regexp. Useful for code identifiers,
+# version strings, and other tokens that FTS5's porter stemmer mangles.
+# A row matches if any of the three columns matches the pattern.
+func regexSearch(pool db.Pool, pattern string, limit int) (list of SearchHit, error)
+    if limit <= 0
+        limit = 10
+    q := "SELECT id, type, name, COALESCE(data ->> '$.summary', '') AS summary FROM entities WHERE id REGEXP ? OR name REGEXP ? OR data REGEXP ? ORDER BY updated_at DESC LIMIT ?"
+    result := db.Query(pool, q, pattern, pattern, pattern, limit) |> db.ScanAll(empty list of SearchHit) onerr return
+    return result, empty
+
 # --- Binary vector serialization ---
 
-# serializeVec packs a float64 slice into a compact BLOB (little-endian,
-# 8 bytes per element). A 768-dim vector is exactly 6,144 bytes.
+# serializeVec packs a float64 slice into a vec1-compatible BLOB
+# (little-endian float32, 4 bytes per element). A 768-dim vector is
+# exactly 3,072 bytes. The float64→float32 narrowing is fine for
+# similarity search; vec1 itself runs in float32.
 func serializeVec(v list of float64) list of byte
-    buf := make(list of byte, len(v) * 8)
+    buf := make(list of byte, len(v) * 4)
     for i from 0 to len(v)
-        binary.LittleEndian.PutUint64(buf[i * 8:], math.Float64bits(v[i]))
+        binary.LittleEndian.PutUint32(buf[i * 4:], math.Float32bits(v[i] as float32))
     return buf
 
-# deserializeVec unpacks a little-endian BLOB into a float64 slice.
-# Returns nil if the BLOB length is not a multiple of 8.
+# deserializeVec unpacks a little-endian float32 BLOB into a float64
+# slice. Returns nil if the BLOB length is not a multiple of 4.
 func deserializeVec(b list of byte) list of float64
-    if len(b) % 8 isnt 0
+    if len(b) % 4 isnt 0
         return empty
-    v := make(list of float64, len(b) / 8)
+    v := make(list of float64, len(b) / 4)
     for i from 0 to len(v)
-        v[i] = math.Float64frombits(binary.LittleEndian.Uint64(b[i * 8:]))
+        v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i * 4:])) as float64
     return v
 
 # --- Embedding storage ---
 
-# upsertEmbedding stores (or replaces) the embedding for an entity.
-# The vector is serialized to a compact binary BLOB.
+# upsertEmbedding stores (or replaces) the embedding for an entity in the
+# vec1 virtual table. vec1 has no UPSERT, so we delete + insert.
 func upsertEmbedding(pool db.Pool, id string, vec list of float64) error
     blob := serializeVec(vec)
-    q := "INSERT INTO embeddings (entity_id, vec, model, dim, updated_at) VALUES (?, ?, ?, ?, datetime('now')) ON CONFLICT(entity_id) DO UPDATE SET vec = excluded.vec, model = excluded.model, dim = excluded.dim, updated_at = datetime('now')"
-    db.Exec(pool, q, id, blob, embedModel(), len(vec)) onerr return
+    db.Exec(pool, "DELETE FROM embeddings_vec WHERE entity_id = ?", id) onerr return
+    q := "INSERT INTO embeddings_vec(vector, entity_id, model, dim, vec_raw) VALUES (?, ?, ?, ?, ?)"
+    db.Exec(pool, q, blob, id, embedModel(), len(vec), blob) onerr return
     return empty
 
 # similar returns the k entities whose embeddings are closest to the query
-# vector under cosine distance. Requires registerVecFunction to have been
-# called on this connection.
+# vector under cosine distance. Uses vec1's KNN function-call syntax —
+# `FROM embeddings_vec(BLOB, '{k:N}')` exposes a hidden `distance` column
+# computed inside the extension.
 func similar(pool db.Pool, vec list of float64, k int) (list of SimilarHit, error)
     if k <= 0
         k = 5
     blob := serializeVec(vec)
-    q := "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, vec_cosine_distance(emb.vec, ?) AS distance FROM embeddings emb JOIN entities e ON e.id = emb.entity_id ORDER BY distance ASC LIMIT ?"
-    result := db.Query(pool, q, blob, k) |> db.ScanAll(empty list of SimilarHit) onerr return
+    knnArg := "\{k: {k}\}"
+    q := "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id ORDER BY v.distance ASC"
+    result := db.Query(pool, q, blob, knnArg) |> db.ScanAll(empty list of SimilarHit) onerr return
     return result, empty
 
 # getEmbedding fetches the stored embedding for an entity (for the
-# "similar --id ..." path where we use an entity's own vector as the query).
+# "similar --id ..." path where we use an entity's own vector as the
+# query). vec1 stores vectors in an opaque native layout, so we read
+# them back via vec1_to_json and parse the JSON array.
 func getEmbedding(pool db.Pool, id string) (list of float64, error)
-    result := db.Query(pool, "SELECT vec FROM embeddings WHERE entity_id = ?", id) |> db.ScanOne(empty vecRow) onerr return
+    result := db.Query(pool, "SELECT vec_raw AS vec FROM embeddings_vec WHERE entity_id = ?", id) |> db.ScanOne(empty vecRow) onerr return
     vec := deserializeVec(result.Vec)
     if vec equals empty
         return empty, error "invalid embedding blob for entity {id}"
     return vec, empty
-
-# --- Custom SQL function: cosine distance ---
-
-# registerVecFunction installs vec_cosine_distance(a_blob, b_blob) on the
-# connection using sqlite.CreateBlobFunctionFloat. Arguments are received as
-# raw BLOB bytes — no JSON parsing overhead.
-func registerVecFunction(pool db.Pool) error
-    sqlite.CreateBlobFunctionFloat(pool, "vec_cosine_distance", 2, (args list of list of byte) float64 =>
-        cosineVecBlob(args[0], args[1])
-    ) onerr return
-
-    return empty
-
-# cosineVecBlob deserializes two binary-encoded float64 BLOBs and returns
-# the cosine distance (1 - cosine similarity).
-# Returns 1.0 on any error (invalid length, zero norms) — the maximum
-# distance, which pushes bad rows to the end of ORDER BY.
-func cosineVecBlob(aBlob list of byte, bBlob list of byte) float64
-    a := deserializeVec(aBlob)
-    b := deserializeVec(bBlob)
-    if a equals empty or b equals empty or len(a) isnt len(b)
-        return 1.0
-
-    dot := 0.0
-    normA := 0.0
-    normB := 0.0
-    for i from 0 to len(a)
-        dot = dot + a[i] * b[i]
-        normA = normA + a[i] * a[i]
-        normB = normB + b[i] * b[i]
-    if normA equals 0.0 or normB equals 0.0
-        return 1.0
-    denom := math.Sqrt(normA) * math.Sqrt(normB)
-    return 1.0 - dot / denom
 
 # --- Toy embedding ---
 

@@ -24,6 +24,10 @@ skill Mizuya
 
 import "stdlib/cli"
 import "stdlib/db"
+import "stdlib/sqliteext"
+
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
 func main()
     initCmd := cli.NewCommand("init", "Initialize a new mizuya database")
@@ -49,9 +53,10 @@ func main()
         |> .StringFlag("dst", "Destination entity id", "")
         |> .Action(doRelate)
 
-    searchCmd := cli.NewCommand("search", "BM25 full-text search across entities")
-        |> .StringFlag("query", "FTS5 query", "")
+    searchCmd := cli.NewCommand("search", "BM25 full-text search across entities (or regex with --regex)")
+        |> .StringFlag("query", "FTS5 query (or regex pattern with --regex)", "")
         |> .IntFlag("limit", "Max results", 10)
+        |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
         |> .Action(doSearch)
 
     contextCmd := cli.NewCommand("context", "Show an entity with its 1-hop neighbors and observations")
@@ -81,12 +86,14 @@ func main()
 
 # --- Command handlers ---
 
-# openPool opens the database and registers the vector cosine UDF on the
-# single connection (sqlite.CreateFunction pins MaxOpenConns=1).
+# openPool opens the database and registers the vec1 vector extension.
+# vec1 ships native vec1_cos_distance and a virtual-table KNN index, so
+# we no longer pin MaxOpenConns=1 to host a Kukicha-side UDF.
 func openPool(args cli.Args) (db.Pool, error)
     dbPath := cli.GetString(args, "db")
     pool := openDB(dbPath) onerr return
-    registerVecFunction(pool) onerr return
+    sqliteext.Register(pool, vec1ext.Register) onerr return
+    sqliteext.Register(pool, regexpext.Register) onerr return
     return pool, empty
 
 func doInit(args cli.Args)
@@ -97,12 +104,12 @@ func doInit(args cli.Args)
 
     defer db.Close(pool)
 
-    initDB(pool) onerr
-        errPrint("cannot initialize schema: {error}")
+    sqliteext.Register(pool, vec1ext.Register) onerr
+        errPrint("cannot register vec1 extension: {error}")
         return
 
-    registerVecFunction(pool) onerr
-        errPrint("cannot register cosine function: {error}")
+    initDB(pool) onerr
+        errPrint("cannot initialize schema: {error}")
         return
 
     if cli.IsJSON(args)
@@ -231,14 +238,24 @@ func doSearch(args cli.Args)
 
     defer db.Close(pool)
 
-    hits := hybridSearch(pool, query, limit) onerr
-        errPrint("search failed: {error}")
-        return
+    useRegex := cli.GetBool(args, "regex")
+    hits := make(list of SearchHit, 0)
+    if useRegex
+        hits = regexSearch(pool, query, limit) onerr
+            errPrint("regex search failed: {error}")
+            return
+    else
+        hits = hybridSearch(pool, query, limit) onerr
+            errPrint("search failed: {error}")
+            return
 
     if cli.IsJSON(args)
         printJSON(hits)
     else
-        print("{color.Bold("search:")} {query}")
+        if useRegex
+            print("{color.Bold("regex:")} {query}")
+        else
+            print("{color.Bold("search:")} {query}")
         printSearchHits(hits)
 
 func doContext(args cli.Args)

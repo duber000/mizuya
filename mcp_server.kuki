@@ -8,7 +8,10 @@ import "stdlib/cast"
 import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/mcp"
+import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
+
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
 # mcpDBPath is the database path used by the MCP server, set from the
 # --db flag before starting the server.
@@ -113,7 +116,7 @@ func handleUpsertEntity(args map of string to any) (any, error)
     pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
     initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     upsertEntity(pool, id, etype, name, summary, tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
 
@@ -146,7 +149,7 @@ func handleAddObservation(args map of string to any) (any, error)
     pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
     initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}"), empty
 
@@ -200,7 +203,7 @@ func handleSearch(args map of string to any) (any, error)
     pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
     initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     hits := hybridSearch(pool, query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
 
@@ -262,7 +265,7 @@ func handleSimilar(args map of string to any) (any, error)
     pool := openDB(mcpDBPath) onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
     initDB(pool) onerr return mcp.ErrorResult("cannot init schema: {error}"), empty
-    registerVecFunction(pool) onerr return mcp.ErrorResult("cannot register vec function: {error}"), empty
+    sqliteext.Register(pool, vec1ext.Register) onerr return mcp.ErrorResult("cannot register vec1: {error}"), empty
 
     vec := make(list of float64, 0)
     if id isnt ""

@@ -12,7 +12,20 @@ const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, t
 
 const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (src, rel, dst))"
 
-const embeddingsSQL = "CREATE TABLE IF NOT EXISTS embeddings (entity_id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE, vec BLOB NOT NULL, model TEXT NOT NULL DEFAULT '', dim INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+# Embeddings live in a vec1 virtual table. The 'flat' index does brute-force
+# scan inside vec1 (no training step) — fine for thousands of entities.
+# Bump to a trained IVFADC model later by replacing the rebuild config.
+# Vector column accepts 4-byte-aligned BLOBs (float32 LE).
+# vec_raw mirrors the float32 BLOB we inserted into `vector`. vec1's
+# `vector` column reads back in an opaque native layout outside the KNN
+# path, so we keep a side-copy as metadata for `getEmbedding`.
+const embeddingsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_vec USING vec1(vector, entity_id, model, dim, vec_raw)"
+
+const embeddingsRebuildSQL = `INSERT INTO embeddings_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
+
+# Virtual tables can't carry foreign-key cascades. A trigger keeps the
+# vector index in sync when an entity is deleted.
+const embeddingsCascadeSQL = "CREATE TRIGGER IF NOT EXISTS embeddings_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM embeddings_vec WHERE entity_id = old.id; END"
 
 # --- FTS5 index ---
 # Vectors (embeddings) are deliberately NOT indexed here — FTS5 covers text
@@ -42,6 +55,8 @@ func initDB(pool db.Pool) error
         db.TxExec(tx, entitiesSQL) onerr return
         db.TxExec(tx, relationsSQL) onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
+        db.TxExec(tx, embeddingsRebuildSQL) onerr return
+        db.TxExec(tx, embeddingsCascadeSQL) onerr return
         db.TxExec(tx, entitiesFtsSQL) onerr return
         db.TxExec(tx, triggerAI) onerr return
         db.TxExec(tx, triggerAD) onerr return

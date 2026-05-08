@@ -58,7 +58,10 @@ type entityData
     Summary string as "summary"
     Tags list of string as "tags"
 
-# vecRow is a helper struct for scanning a single embedding vector BLOB.
+# vecRow scans a stored float32 LE BLOB from the vec_raw side-copy
+# column. We carry the BLOB as metadata in the vec1 table because
+# vec1's indexed `vector` column reads back in an opaque native
+# layout outside the KNN path.
 type vecRow
     Vec list of byte as "vec"
 

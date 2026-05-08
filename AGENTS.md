@@ -1,7 +1,7 @@
 <!-- kukicha:start -->
 ## Writing Kukicha
 
-Kukicha is a strict superset of Go — all valid Go compiles as-is. **Always
+Kukicha is a near-superset of Go — most Go compiles as-is, with a few exceptions (`range`, `case`/`default`, `struct {}`, `chan T`, `goto`, parenthesized `const ( ... )`) that have Kukicha replacements. **Always
 write Kukicha syntax** (`and`/`or`/`not`, `list of T`, `onerr`, pipes, enums)
 and use Kukicha's stdlib (`stdlib/*`) over raw Go packages. Fall back to Go
 only when Kukicha has no equivalent.
@@ -76,6 +76,9 @@ const (
 count := 42           # inferred type
 count = 100           # reassignment
 
+var p reference int   # typed zero-value declaration (works locally too)
+var xs list of string
+
 func Add(a: int, b: int) int
     return a + b
 
@@ -117,6 +120,10 @@ type Repo
     name  string as "name"            # JSON field alias
     stars int    as "stargazers_count"
     tags  list of string
+
+# Defined named type (distinct from base — needs explicit conversion: UserID(42))
+type UserID int
+type Status string
 
 # Function type alias
 type Handler func(context.Context, string) (string, error)
@@ -197,7 +204,7 @@ data := fetch.Get(url) onerr return                         # propagate (raw err
 data := fetch.Get(url) onerr return empty, error "{error}"  # propagate (wrap)
 data := fetch.Get(url) onerr return {}, error "{error}"     # propagate with untyped zero struct
 port := getPort()      onerr 8080                           # default value
-_    := riskyOp()      onerr discard                        # ignore
+riskyOp()              onerr discard                        # ignore (warns; test code only)
 v    := parse(item)    onerr continue                       # skip in loop
 v    := parse(item)    onerr break                          # exit loop
 data := fetch.Get(url) onerr explain "context hint"         # wrap and propagate
@@ -405,6 +412,11 @@ select
         print("sent")
     otherwise
         print("nothing ready")
+
+# Arm bodies may be empty — omit the indented block:
+select
+    when send true to ch
+    otherwise
 ```
 
 ### Defer
@@ -428,7 +440,6 @@ import "stdlib/db"        as dbpkg      # clashes with local 'db'
 import "stdlib/errors"    as errs       # clashes with 'errors'
 import "stdlib/json"      as jsonpkg    # clashes with 'encoding/json'
 import "stdlib/string"    as strpkg     # clashes with 'string' type
-import "stdlib/container" as docker     # clashes with 'container' vars
 import "stdlib/http"      as httphelper # clashes with 'net/http'
 
 import "github.com/jackc/pgx/v5" as pgx  # external package
@@ -730,8 +741,6 @@ defer db.Close(pool)
 
 #### DevOps & Infrastructure
 
-**container** (as `docker`) — Docker/Podman: `Connect`/`ConnectRemote`, `Run`, `Exec`, `Logs`, `Build`, `Pull`/`PullAuth`, `LoginFromConfig`, `Wait`/`WaitCtx`, `Events`/`EventsCtx`, `CopyTo`/`CopyFrom`. For anything not wrapped here, use `engine.Cli` directly.
-
 **git** — Git/GitHub via `gh`: `ListTags`, `TagExists`, `DefaultBranch`, `CreateRelease`, `PreviewRelease`
 
 **semver** — `Parse`, `Bump`, `Format`, `Valid`, `Compare`, `Highest`
@@ -799,7 +808,7 @@ Module: `github.com/kukichalang/infer` — add with `go get github.com/kukichala
 
 ---
 
-**Built-in packages:** `cast`, `cli`, `concurrent`, `container`, `crypto`, `ctx`, `datetime`, `db`, `encoding`, `env`, `errors`, `fetch`, `files`, `git`, `html`, `http`, `input`, `iterator`, `json`, `llm`, `maps`, `mcp`, `must`, `net`, `netguard`, `obs`, `parse`, `random`, `regex`, `retry`, `sandbox`, `semver`, `set`, `shell`, `skills`, `slice`, `sort`, `sqlite`, `string`, `table`, `template`, `test`, `validate`
+**Built-in packages:** `cast`, `cli`, `concurrent`, `crypto`, `ctx`, `datetime`, `db`, `encoding`, `env`, `errors`, `fetch`, `files`, `git`, `html`, `http`, `input`, `iterator`, `json`, `llm`, `maps`, `mcp`, `must`, `net`, `netguard`, `obs`, `parse`, `random`, `regex`, `retry`, `sandbox`, `semver`, `set`, `shell`, `skills`, `slice`, `sort`, `sqlite`, `string`, `table`, `template`, `test`, `validate`
 
 **External packages** (separate module required): `game`, `infer`, `ort`, `webinfer`
 
@@ -927,7 +936,7 @@ func Execute() Result
 | Error | Fix |
 |-------|-----|
 | `use {error} not {err} inside onerr` | Change `{err}` to `{error}`, or use `onerr as e` |
-| `variable 'x' not used` | Use `_ := f()` to discard |
+| `variable 'x' not used` | Remove the variable, or use it; never use `_ = x` to suppress — remove the dead code instead |
 | `function must declare return type` | Add explicit return type: `func F() int` |
 | `onerr return requires return type` | Use `onerr discard`, or add return type |
 | `SSRF risk` / `path traversal` / `command injection` / `XSS risk` | See Security table above |
