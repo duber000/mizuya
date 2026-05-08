@@ -65,6 +65,10 @@ type SimilarHit
     Summary string as "summary"
     Distance float64 as "distance"
 
+# hashRow scans the content_hash column for change detection.
+type hashRow
+    Hash string as "hash"
+
 # suggestRow is a single fuzzy-match suggestion from the spellfix1
 # vtab. Word is the matched id; we don't currently surface rank or
 # distance.

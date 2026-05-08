@@ -157,17 +157,9 @@ func doUpsert(args cli.Args)
         errPrint("cannot upsert entity: {error}")
         return
 
-    # Regenerate the embedding from the entity's current text corpus.
-    text, err := entityText(pool, id)
-    if err isnt empty
-        errPrint("cannot read entity text: {err}")
-        return
-    vec := embedText(text) onerr
-        errPrint("cannot compute embedding: {error}")
-        return
-
-    upsertEmbedding(pool, id, vec) onerr
-        errPrint("cannot store embedding: {error}")
+    # Regenerate the embedding only if the corpus actually changed.
+    reEmbedIfChanged(pool, id) onerr
+        errPrint("cannot refresh embedding: {error}")
         return
 
     e := getEntity(pool, id) onerr
@@ -200,16 +192,8 @@ func doObserve(args cli.Args)
         return
 
     # Re-embed: observations are part of the entity's text corpus.
-    corpus, err := entityText(pool, id)
-    if err isnt empty
-        errPrint("cannot read entity text: {err}")
-        return
-    vec := embedText(corpus) onerr
-        errPrint("cannot compute embedding: {error}")
-        return
-
-    upsertEmbedding(pool, id, vec) onerr
-        errPrint("cannot store embedding: {error}")
+    reEmbedIfChanged(pool, id) onerr
+        errPrint("cannot refresh embedding: {error}")
         return
 
     if cli.IsJSON(args)

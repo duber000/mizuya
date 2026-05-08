@@ -8,7 +8,12 @@ import "stdlib/db"
 
 # --- Table DDL ---
 
-const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+# content_hash is a hex sha256 over the entity's text corpus
+# (name + summary + observations). Used to short-circuit embedding
+# regeneration when the corpus hasn't changed — important for the
+# ollama/openai providers where every embed is a network round-trip.
+# Nullable so pre-hash rows just re-embed once on next touch.
+const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', content_hash TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
 
 const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (src, rel, dst))"
 

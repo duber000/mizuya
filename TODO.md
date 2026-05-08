@@ -36,13 +36,13 @@ The candidates below are ordered by expected payoff for mizuya specifically.
 
 ### Medium value
 
-- [ ] **`hash` — content-addressed change detection.**
-  `sha256(data)` over the entity JSON column would let us skip re-embedding
-  when the text corpus hasn't changed. Currently `doUpsert` and `doObserve`
-  always re-run `embedText` — fine for the toy hash embedder, expensive once
-  ollama/openai are configured.
-  Touches: `models.kuki` (add `content_hash` column to `entities`),
-  `store.kuki` (compute + compare in upsert/observe paths).
+- [x] **`hash` — content-addressed change detection.** *(implemented
+  app-side via `stdlib/crypto.SHA256` rather than the SQL extension —
+  the corpus is assembled in Go anyway, so a `content_hash` column on
+  `entities` plus `reEmbedIfChanged` in `store.kuki` is enough. CLI
+  upsert/observe and the matching MCP tools skip the embed-provider
+  round-trip when the corpus is unchanged. Pre-hash rows re-embed
+  once on next touch, then settle.)*
 
 - [x] **`stats` — percentile distance thresholds for `similar`.** *(wired
   as `--threshold N` (1-100) on the CLI and the MCP `similar` tool;

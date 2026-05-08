@@ -311,12 +311,13 @@ func openMCPPool() (db.Pool, error)
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 
-# reEmbed recomputes and stores the embedding for an entity from its
-# current text corpus. Used after upsert/observe to keep vectors fresh.
+# reEmbed recomputes and stores the embedding for an entity when its
+# corpus has changed since the last pass. The hash short-circuit
+# matters most for the openai/ollama providers — repeated upserts of
+# the same entity stop turning into network calls.
 func reEmbed(pool db.Pool, id string) error
-    text := entityText(pool, id) onerr return
-    vec := embedText(text) onerr return
-    return upsertEmbedding(pool, id, vec)
+    reEmbedIfChanged(pool, id) onerr return
+    return empty
 
 # --- Argument helpers ---
 

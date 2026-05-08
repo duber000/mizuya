@@ -3,6 +3,7 @@
 
 petiole main
 
+import "stdlib/crypto"
 import "stdlib/db"
 import "stdlib/files"
 import "stdlib/json" as jsonpkg
@@ -109,6 +110,45 @@ func entityText(pool db.Pool, id string) (string, error)
     parts = append(parts, many texts)
 
     return strpkg.Join(parts, " "), empty
+
+# corpusHash returns a hex sha256 over the corpus text. Used to detect
+# whether an entity's text has changed since the last embedding pass —
+# when it hasn't, we skip the network round-trip to the embed provider.
+func corpusHash(text string) string
+    return crypto.SHA256(text)
+
+# storedHash reads the current content_hash for an entity. Returns
+# the empty string for unknown ids or NULL hashes (which forces a
+# re-embed on the next touch — the safe direction for migrations).
+func storedHash(pool db.Pool, id string) (string, error)
+    q := "SELECT COALESCE(content_hash, '') AS hash FROM entities WHERE id = ?"
+    row := db.Query(pool, q, id) |> db.ScanOne(empty hashRow) onerr return
+    return row.Hash, empty
+
+# setStoredHash records a new content_hash without bumping updated_at —
+# called after a successful re-embed. The companion update during
+# upsertEntity already moved updated_at.
+func setStoredHash(pool db.Pool, id string, hash string) error
+    db.Exec(pool, "UPDATE entities SET content_hash = ? WHERE id = ?", hash, id) onerr return
+    return empty
+
+# reEmbedIfChanged regenerates the embedding for an entity only when
+# its text corpus has changed since the last embedding pass. Returns
+# true if a new embedding was computed, false on the cached path.
+# Skipping when the hash matches saves a round-trip to the embed
+# provider (ollama/openai) on every no-op upsert/observe.
+func reEmbedIfChanged(pool db.Pool, id string) (bool, error)
+    text, err := entityText(pool, id)
+    if err isnt empty
+        return false, err
+    h := corpusHash(text)
+    prev := storedHash(pool, id) onerr return false, error "{error}"
+    if prev equals h and prev isnt ""
+        return false, empty
+    vec := embedText(text) onerr return false, error "{error}"
+    upsertEmbedding(pool, id, vec) onerr return false, error "{error}"
+    setStoredHash(pool, id, h) onerr return false, error "{error}"
+    return true, empty
 
 # --- Tags ---
 
