@@ -29,6 +29,7 @@ import "stdlib/sqliteext"
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
 import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
 import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
@@ -102,6 +103,7 @@ func openPool(args cli.Args) (db.Pool, error)
     sqliteext.Register(pool, uuidext.Register) onerr return
     sqliteext.Register(pool, statsext.Register) onerr return
     sqliteext.Register(pool, spellfixext.Register) onerr return
+    sqliteext.Register(pool, unicodeext.Register) onerr return
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 
@@ -123,6 +125,10 @@ func doInit(args cli.Args)
 
     sqliteext.Register(pool, spellfixext.Register) onerr
         errPrint("cannot register spellfix1 extension: {error}")
+        return
+
+    sqliteext.Register(pool, unicodeext.Register) onerr
+        errPrint("cannot register unicode extension: {error}")
         return
 
     initDB(pool) onerr

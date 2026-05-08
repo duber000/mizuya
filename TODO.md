@@ -26,13 +26,12 @@ The candidates below are ordered by expected payoff for mizuya specifically.
 - [x] **`regexp` — regex queries alongside FTS5.** *(wired as `--regex`
   on `mizuya search`; matches against id, name, and data columns.)*
 
-- [ ] **`unicode` — correct case-insensitive matching for non-ASCII names.**
-  SQLite's built-in `lower()` is ASCII-only, so any entity name with
-  diacritics or non-Latin scripts compares wrong. The `unicode` extension
-  ships proper Unicode upper/lower/like plus NFC/NFD normalization. Worth
-  doing before mizuya gets used outside English-only corpora.
-  Touches: `store.kuki` (swap `lower()` calls in any case-insensitive lookups),
-  `schema.kuki` if we add normalized-name indexes.
+- [x] **`unicode` — correct case-insensitive matching for non-ASCII names.**
+  *(registered as a precondition — no current SQL paths use `lower()`,
+  `LIKE`, or `COLLATE`, and FTS5 is already unicode-aware via
+  `unicode61`. With the ext loaded, any future case-insensitive query
+  path picks up Unicode-correct upper/lower/like + normalize/unaccent
+  for free.)*
 
 ### Medium value
 

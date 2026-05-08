@@ -13,6 +13,7 @@ import "stdlib/string" as strpkg
 
 import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
 import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
@@ -307,6 +308,7 @@ func openMCPPool() (db.Pool, error)
     sqliteext.Register(pool, uuidext.Register) onerr return
     sqliteext.Register(pool, statsext.Register) onerr return
     sqliteext.Register(pool, spellfixext.Register) onerr return
+    sqliteext.Register(pool, unicodeext.Register) onerr return
     initDB(pool) onerr return
     refreshFuzzyIds(pool) onerr return
     return pool, empty
