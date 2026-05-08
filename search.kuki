@@ -82,6 +82,24 @@ func similar(pool db.Pool, vec list of float64, k int) (list of SimilarHit, erro
     result := db.Query(pool, q, blob, knnArg) |> db.ScanAll(empty list of SimilarHit) onerr return
     return result, empty
 
+# similarByPercentile returns entities whose distance to `vec` falls
+# within the closest `pct` percentile of all distances. Useful when
+# the desired neighborhood size is unknown — `--threshold 10` returns
+# everything in the closest 10%, which can be one row or fifty
+# depending on the distribution. Uses the percentile() aggregate from
+# the stats extension.
+func similarByPercentile(pool db.Pool, vec list of float64, pct int) (list of SimilarHit, error)
+    if pct <= 0 or pct > 100
+        return empty, error "threshold must be in (0, 100], got {pct}"
+    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec") onerr return
+    if count equals 0
+        return make(list of SimilarHit, 0), empty
+    blob := serializeVec(vec)
+    knnArg := "\{k: {count}\}"
+    q := "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists) ORDER BY d.d ASC"
+    result := db.Query(pool, q, blob, knnArg, pct) |> db.ScanAll(empty list of SimilarHit) onerr return
+    return result, empty
+
 # getEmbedding fetches the stored embedding for an entity (for the
 # "similar --id ..." path where we use an entity's own vector as the
 # query). vec1 stores vectors in an opaque native layout, so we read

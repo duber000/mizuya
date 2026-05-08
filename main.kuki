@@ -27,6 +27,7 @@ import "stdlib/db"
 import "stdlib/sqliteext"
 
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
@@ -68,7 +69,8 @@ func main()
     similarCmd := cli.NewCommand("similar", "Vector similarity search (cosine distance)")
         |> .StringFlag("id", "Use this entity's embedding as the query", "")
         |> .StringFlag("text", "Embed this text and use it as the query", "")
-        |> .IntFlag("limit", "Max results", 5)
+        |> .IntFlag("limit", "Max results (ignored when --threshold is set)", 5)
+        |> .IntFlag("threshold", "Return everything in the closest N percentile of distances (1-100, 0 = use --limit instead)", 0)
         |> .Action(doSimilar)
 
     listCmd := cli.NewCommand("list", "List entities (optionally filtered by --type)")
@@ -97,6 +99,7 @@ func openPool(args cli.Args) (db.Pool, error)
     sqliteext.Register(pool, vec1ext.Register) onerr return
     sqliteext.Register(pool, regexpext.Register) onerr return
     sqliteext.Register(pool, uuidext.Register) onerr return
+    sqliteext.Register(pool, statsext.Register) onerr return
     return pool, empty
 
 func doInit(args cli.Args)
@@ -338,6 +341,9 @@ func doSimilar(args cli.Args)
     limit, err := cli.GetInt(args, "limit")
     if err isnt empty
         limit = 5
+    threshold, terr := cli.GetInt(args, "threshold")
+    if terr isnt empty
+        threshold = 0
 
     pool := openPool(args) onerr
         errPrint("cannot open database: {error}")
@@ -357,17 +363,27 @@ func doSimilar(args cli.Args)
             errPrint("cannot compute embedding: {error}")
             return
 
-    hits := similar(pool, vec, limit) onerr
-        errPrint("similarity query failed: {error}")
-        return
+    hits := make(list of SimilarHit, 0)
+    if threshold > 0
+        hits = similarByPercentile(pool, vec, threshold) onerr
+            errPrint("similarity query failed: {error}")
+            return
+    else
+        hits = similar(pool, vec, limit) onerr
+            errPrint("similarity query failed: {error}")
+            return
 
     if cli.IsJSON(args)
         printJSON(hits)
     else
+        header := ""
         if id isnt ""
-            print("{color.Bold("similar to:")} {id}")
+            header = "similar to: {id}"
         else
-            print("{color.Bold("similar to text:")} {text}")
+            header = "similar to text: {text}"
+        if threshold > 0
+            header = header + " (closest p{threshold})"
+        print(color.Bold(header))
         printSimilarHits(hits)
 
 func doList(args cli.Args)

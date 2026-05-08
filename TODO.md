@@ -44,11 +44,9 @@ The candidates below are ordered by expected payoff for mizuya specifically.
   Touches: `models.kuki` (add `content_hash` column to `entities`),
   `store.kuki` (compute + compare in upsert/observe paths).
 
-- [ ] **`stats` — percentile distance thresholds for `similar`.**
-  Right now `similar` returns the top-k. With `percentile(distance, 0.10)`
-  we could instead return "everything in the closest 10% of distances",
-  which is more useful when k is unknown. Cheap quality-of-life addition.
-  Touches: `search.kuki` (alternate query), `main.kuki` (`--threshold` flag).
+- [x] **`stats` — percentile distance thresholds for `similar`.** *(wired
+  as `--threshold N` (1-100) on the CLI and the MCP `similar` tool;
+  uses `percentile()` aggregate over the full distance set.)*
 
 - [ ] **`spellfix1` — fuzzy entity-id resolution.**
   Typos in `--id sqilte` currently fail with "entity not found". A spellfix1

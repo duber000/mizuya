@@ -11,6 +11,7 @@ import "stdlib/mcp"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
 
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
@@ -261,10 +262,11 @@ func registerSimilarTool(server reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("id", "string", "Use this entity's embedding as the query vector"),
         mcp.Prop("text", "string", "Embed this text and use it as the query vector"),
-        mcp.Prop("limit", "integer", "Maximum results (default: 5)"),
+        mcp.Prop("limit", "integer", "Maximum results (default: 5; ignored when threshold is set)"),
+        mcp.Prop("threshold", "integer", "Return everything in the closest N percentile of distances (1-100). When set, supersedes limit."),
     })
 
-    mcp.ToolWithOpts(server, "similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly).", schema, mcp.ToolOpts{ReadOnly: true}, handleSimilar)
+    mcp.ToolWithOpts(server, "similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly). Use threshold for percentile-based cutoff when k is unknown.", schema, mcp.ToolOpts{ReadOnly: true}, handleSimilar)
 
 func handleSimilar(args map of string to any) (any, error)
     id := argString(args, "id")
@@ -273,6 +275,7 @@ func handleSimilar(args map of string to any) (any, error)
         return mcp.ErrorResult("either id or text is required"), empty
 
     limit := argInt(args, "limit", 5)
+    threshold := argInt(args, "threshold", 0)
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
@@ -283,7 +286,11 @@ func handleSimilar(args map of string to any) (any, error)
     else
         vec = embedText(text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
-    hits := similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+    hits := make(list of SimilarHit, 0)
+    if threshold > 0
+        hits = similarByPercentile(pool, vec, threshold) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+    else
+        hits = similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
 
     data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
@@ -297,6 +304,7 @@ func openMCPPool() (db.Pool, error)
     pool := openDB(mcpDBPath) onerr return
     sqliteext.Register(pool, vec1ext.Register) onerr return
     sqliteext.Register(pool, uuidext.Register) onerr return
+    sqliteext.Register(pool, statsext.Register) onerr return
     initDB(pool) onerr return
     return pool, empty
 
