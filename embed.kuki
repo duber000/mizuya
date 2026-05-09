@@ -57,7 +57,7 @@ func loadEmbedConfig() embedConfig
 
 # embedText converts text into a vector using the configured provider.
 # Falls back to hashEmbed when no provider is set.
-func embedText(text string) (list of float64, error)
+func embedText(text: string) (list of float64, error)
     cfg := loadEmbedConfig()
     if cfg.Provider equals "ollama"
         return ollamaEmbed(cfg, text)
@@ -86,7 +86,7 @@ type ollamaEmbedRequest
 type ollamaEmbedResponse
     Embeddings list of list of float64 as "embeddings"
 
-func ollamaEmbed(cfg embedConfig, text string) (list of float64, error)
+func ollamaEmbed(cfg: embedConfig, text: string) (list of float64, error)
     url := cfg.URL + "/api/embed"
     body := ollamaEmbedRequest{Model: cfg.Model, Input: text}
 
@@ -121,7 +121,7 @@ type openaiEmbedDataItem
 type openaiEmbedResponse
     Data list of openaiEmbedDataItem as "data"
 
-func openaiEmbed(cfg embedConfig, text string) (list of float64, error)
+func openaiEmbed(cfg: embedConfig, text: string) (list of float64, error)
     url := cfg.URL + "/v1/embeddings"
     body := openaiEmbedRequest{Model: cfg.Model, Input: text}
 

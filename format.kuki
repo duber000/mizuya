@@ -13,11 +13,11 @@ import "stdlib/table"
 
 # --- Entity / search printing ---
 
-func printEntityHeader(e Entity)
+func printEntityHeader(e: Entity)
     print("{color.Bold(e.Id)}  {color.Dim("({e.Type})")} {e.Name}")
 
 # printEntityList renders a list of entities as a plain-style table.
-func printEntityList(rows list of Entity)
+func printEntityList(rows: list of Entity)
     if len(rows) equals 0
         print(color.Dim("  No entities."))
         return
@@ -26,7 +26,7 @@ func printEntityList(rows list of Entity)
         t = t |> table.AddRow(list of string{e.Id, e.Type, truncate(e.Name, 40), e.UpdatedAt})
     t |> table.Print()
 
-func printSearchHits(hits list of SearchHit)
+func printSearchHits(hits: list of SearchHit)
     if len(hits) equals 0
         print(color.Dim("  No matches."))
         return
@@ -36,26 +36,27 @@ func printSearchHits(hits list of SearchHit)
             |> table.AddRow(list of string{h.Id, h.Type, truncate(h.Name, 40), truncate(h.Summary, 60)})
     t |> table.Print()
 
-func printSimilarHits(hits list of SimilarHit)
+func printSimilarHits(hits: list of SimilarHit)
     if len(hits) equals 0
         print(color.Dim("  No embeddings available."))
         return
     t := table.New(list of string{"id", "type", "distance", "name", "summary"})
     for h in hits
         dist := fmt.Sprintf("%.4f", h.Distance)
-        t = t
-            |> table.AddRow(list of string{h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)})
+        t = t |> table.AddRow(
+            list of string{h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)},
+        )
     t |> table.Print()
 
 # truncate shortens s to n chars with a trailing ellipsis when needed,
 # collapsing newlines to spaces so the result is safe for single-line display.
-func truncate(s string, n int) string
+func truncate(s: string, n: int) string
     s = strpkg.ReplaceAll(s, "\n", " ")
     if len(s) <= n
         return s
     return s[:n - 3] + "..."
 
-func printContext(e Entity, outgoing list of ContextRow, incoming list of ContextRow, obs list of ObsRow)
+func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of ContextRow, obs: list of ObsRow)
     printEntityHeader(e)
     print("")
     print(color.Bold("data:"))
@@ -65,7 +66,9 @@ func printContext(e Entity, outgoing list of ContextRow, incoming list of Contex
     if len(outgoing) > 0
         print(color.Bold("outgoing:"))
         for r in outgoing
-            print("  {color.Green("--{r.Rel}->")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}")
+            print(
+                "  {color.Green("--{r.Rel}->")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
     if len(incoming) > 0
@@ -73,7 +76,9 @@ func printContext(e Entity, outgoing list of ContextRow, incoming list of Contex
             print("")
         print(color.Bold("incoming:"))
         for r in incoming
-            print("  {color.Blue("<-{r.Rel}--")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}")
+            print(
+                "  {color.Blue("<-{r.Rel}--")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
 
@@ -87,7 +92,7 @@ func printContext(e Entity, outgoing list of ContextRow, incoming list of Contex
                 src = "conversation"
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
 
-func printReachableContext(e Entity, depth int, outgoing list of ReachableRow, incoming list of ReachableRow, obs list of ObsRow)
+func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow, incoming: list of ReachableRow, obs: list of ObsRow)
     printEntityHeader(e)
     print(color.Dim("  reachable within {depth} hops"))
     print("")
@@ -98,7 +103,9 @@ func printReachableContext(e Entity, depth int, outgoing list of ReachableRow, i
     if len(outgoing) > 0
         print(color.Bold("outgoing:"))
         for r in outgoing
-            print("  {color.Green("[+{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}")
+            print(
+                "  {color.Green("[+{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
     if len(incoming) > 0
@@ -106,7 +113,9 @@ func printReachableContext(e Entity, depth int, outgoing list of ReachableRow, i
             print("")
         print(color.Bold("incoming:"))
         for r in incoming
-            print("  {color.Blue("[-{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}")
+            print(
+                "  {color.Blue("[-{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
 
@@ -120,20 +129,20 @@ func printReachableContext(e Entity, depth int, outgoing list of ReachableRow, i
                 src = "conversation"
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
 
-func printJSON(v any)
+func printJSON(v: any)
     data := jsonpkg.PrettyBytes(v) onerr
         cli.Error("json error: {error}")
         return
 
     fmt.Println(data as string)
 
-func errPrint(msg string)
+func errPrint(msg: string)
     cli.Error("{color.BrightRed("error:")} {msg}")
 
 # didYouMean formats a fuzzy-suggestion list for tacking onto error
 # messages. Returns an empty string when there are no suggestions so
 # callers can append unconditionally without leading punctuation drift.
-func didYouMean(ids list of string) string
+func didYouMean(ids: list of string) string
     if len(ids) equals 0
         return ""
     return ". did you mean: " + strpkg.Join(ids, ", ") + "?"
@@ -142,7 +151,7 @@ func didYouMean(ids list of string) string
 # onerr block. Encapsulating the fuzzy lookup in its own function
 # avoids `error` shadow warnings when callers append the hint to an
 # error message.
-func suggestionsFor(pool db.Pool, id string) string
+func suggestionsFor(pool: db.Pool, id: string) string
     ids, err := suggestIds(pool, id, 3)
     if err isnt empty
         return ""
@@ -150,9 +159,9 @@ func suggestionsFor(pool db.Pool, id string) string
 
 # parseTags splits a comma-separated tag string into a trimmed slice,
 # dropping empty entries.
-func parseTags(raw string) list of string
+func parseTags(raw: string) list of string
     if raw equals ""
         return make(list of string, 0)
     return strpkg.Split(raw, ",")
-        |> slice.Map((s string) string => strpkg.TrimSpace(s))
-        |> slice.Filter((s string) bool => s isnt "")
+        |> slice.Map((s: string) string => strpkg.TrimSpace(s))
+        |> slice.Filter((s: string) bool => s isnt "")

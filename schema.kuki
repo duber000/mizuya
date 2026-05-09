@@ -77,8 +77,8 @@ const fuzzyIdsPopulateSQL = "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM e
 
 # initDB creates all tables, the FTS5 virtual table, triggers, and indexes
 # inside a single transaction. Safe to call repeatedly.
-func initDB(pool db.Pool) error
-    db.Transaction(pool, (tx) =>
+func initDB(pool: db.Pool) error
+    db.Transaction(pool, tx =>
         db.TxExec(tx, entitiesSQL) onerr return
         db.TxExec(tx, relationsSQL) onerr return
         db.TxExec(tx, observationsSQL) onerr return

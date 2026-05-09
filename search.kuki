@@ -15,7 +15,7 @@ import "stdlib/string" as strpkg
 # ftsSearch runs a BM25-ranked full-text search over entities.
 # Field weights (id=10, name=5, type=2, data=1) bias toward identifier
 # and name matches while still surfacing content hits.
-func ftsSearch(pool db.Pool, query string, limit int) (list of SearchHit, error)
+func ftsSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, error)
     if limit <= 0
         limit = 10
     q := "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? ORDER BY bm25(entities_fts, 10.0, 5.0, 2.0, 1.0) LIMIT ?"
@@ -29,7 +29,7 @@ func ftsSearch(pool db.Pool, query string, limit int) (list of SearchHit, error)
 # github.com/ncruces/go-sqlite3/ext/regexp. Useful for code identifiers,
 # version strings, and other tokens that FTS5's porter stemmer mangles.
 # A row matches if any of the three columns matches the pattern.
-func regexSearch(pool db.Pool, pattern string, limit int) (list of SearchHit, error)
+func regexSearch(pool: db.Pool, pattern: string, limit: int) (list of SearchHit, error)
     if limit <= 0
         limit = 10
     q := "SELECT id, type, name, COALESCE(data ->> '$.summary', '') AS summary FROM entities WHERE id REGEXP ? OR name REGEXP ? OR data REGEXP ? ORDER BY updated_at DESC LIMIT ?"
@@ -42,7 +42,7 @@ func regexSearch(pool db.Pool, pattern string, limit int) (list of SearchHit, er
 # (little-endian float32, 4 bytes per element). A 768-dim vector is
 # exactly 3,072 bytes. The float64→float32 narrowing is fine for
 # similarity search; vec1 itself runs in float32.
-func serializeVec(v list of float64) list of byte
+func serializeVec(v: list of float64) list of byte
     buf := make(list of byte, len(v) * 4)
     for i from 0 to len(v)
         binary.LittleEndian.PutUint32(buf[i * 4:], math.Float32bits(v[i] as float32))
@@ -50,7 +50,7 @@ func serializeVec(v list of float64) list of byte
 
 # deserializeVec unpacks a little-endian float32 BLOB into a float64
 # slice. Returns nil if the BLOB length is not a multiple of 4.
-func deserializeVec(b list of byte) list of float64
+func deserializeVec(b: list of byte) list of float64
     if len(b) % 4 isnt 0
         return empty
     v := make(list of float64, len(b) / 4)
@@ -62,7 +62,7 @@ func deserializeVec(b list of byte) list of float64
 
 # upsertEmbedding stores (or replaces) the embedding for an entity in the
 # vec1 virtual table. vec1 has no UPSERT, so we delete + insert.
-func upsertEmbedding(pool db.Pool, id string, vec list of float64) error
+func upsertEmbedding(pool: db.Pool, id: string, vec: list of float64) error
     blob := serializeVec(vec)
     db.Exec(pool, "DELETE FROM embeddings_vec WHERE entity_id = ?", id) onerr return
     q := "INSERT INTO embeddings_vec(vector, entity_id, model, dim, vec_raw) VALUES (?, ?, ?, ?, ?)"
@@ -73,7 +73,7 @@ func upsertEmbedding(pool db.Pool, id string, vec list of float64) error
 # vector under cosine distance. Uses vec1's KNN function-call syntax —
 # `FROM embeddings_vec(BLOB, '{k:N}')` exposes a hidden `distance` column
 # computed inside the extension.
-func similar(pool db.Pool, vec list of float64, k int) (list of SimilarHit, error)
+func similar(pool: db.Pool, vec: list of float64, k: int) (list of SimilarHit, error)
     if k <= 0
         k = 5
     blob := serializeVec(vec)
@@ -88,7 +88,7 @@ func similar(pool db.Pool, vec list of float64, k int) (list of SimilarHit, erro
 # everything in the closest 10%, which can be one row or fifty
 # depending on the distribution. Uses the percentile() aggregate from
 # the stats extension.
-func similarByPercentile(pool db.Pool, vec list of float64, pct int) (list of SimilarHit, error)
+func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of SimilarHit, error)
     if pct <= 0 or pct > 100
         return empty, error "threshold must be in (0, 100], got {pct}"
     count := db.Count(pool, "SELECT count(*) FROM embeddings_vec") onerr return
@@ -104,8 +104,9 @@ func similarByPercentile(pool db.Pool, vec list of float64, pct int) (list of Si
 # "similar --id ..." path where we use an entity's own vector as the
 # query). vec1 stores vectors in an opaque native layout, so we read
 # them back via vec1_to_json and parse the JSON array.
-func getEmbedding(pool db.Pool, id string) (list of float64, error)
-    result := db.Query(pool, "SELECT vec_raw AS vec FROM embeddings_vec WHERE entity_id = ?", id) |> db.ScanOne(empty vecRow) onerr return
+func getEmbedding(pool: db.Pool, id: string) (list of float64, error)
+    result := db.Query(pool, "SELECT vec_raw AS vec FROM embeddings_vec WHERE entity_id = ?", id)
+        |> db.ScanOne(empty vecRow) onerr return
     vec := deserializeVec(result.Vec)
     if vec equals empty
         return empty, error "invalid embedding blob for entity {id}"
@@ -117,7 +118,7 @@ func getEmbedding(pool db.Pool, id string) (list of float64, error)
 # dimensionality. Tokens are lowercased and split on whitespace; each token
 # bumps v[fnv1a(token) % dim]. Good enough for demo similarity — fast database
 # queries cluster near the sqlite entity, Go tooling clusters near kukicha.
-func hashEmbed(text string, dim int) list of float64
+func hashEmbed(text: string, dim: int) list of float64
     v := make(list of float64, dim)
     lowered := strpkg.ToLower(text)
     tokens := strpkg.Fields(lowered)
@@ -139,7 +140,7 @@ func hashEmbed(text string, dim int) list of float64
 
 # djb2Hash is a simple DJB2 hash (h*33 + c). We don't need cryptographic
 # strength — just stable, well-distributed bucket indices per token.
-func djb2Hash(s string) uint32
+func djb2Hash(s: string) uint32
     h := 5381 as uint32
     for i from 0 to len(s)
         h = h * 33 + s[i] as uint32

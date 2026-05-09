@@ -12,7 +12,7 @@ import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 
 # openDB opens (or creates) the SQLite database at the given path.
-func openDB(dbPath string) (db.Pool, error)
+func openDB(dbPath: string) (db.Pool, error)
     files.MkDirAll(files.Dirname(dbPath)) onerr return
     pool := sqlite.Open(dbPath) onerr return
     return pool, empty
@@ -22,7 +22,7 @@ func openDB(dbPath string) (db.Pool, error)
 # upsertEntity creates or updates an entity. On update, type/name are replaced
 # and the JSON fields summary/tags are merged into the existing data object,
 # preserving any observations already recorded.
-func upsertEntity(pool db.Pool, id string, etype string, name string, summary string, tags list of string) error
+func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summary: string, tags: list of string) error
     tagsJSON := jsonpkg.Bytes(tags) onerr return
 
     # Initial JSON for a freshly-inserted row — build via jsonpkg.Bytes
@@ -38,19 +38,19 @@ func upsertEntity(pool db.Pool, id string, etype string, name string, summary st
     return empty
 
 # getEntity fetches an entity by id. Returns an error if no row matches.
-func getEntity(pool db.Pool, id string) (Entity, error)
+func getEntity(pool: db.Pool, id: string) (Entity, error)
     q := "SELECT id, type, name, json(data) AS data, created_at, updated_at FROM entities WHERE id = ?"
     result := db.Query(pool, q, id) |> db.ScanOne(empty Entity) onerr return
     return result, empty
 
 # deleteEntity removes an entity and (via ON DELETE CASCADE) its relations
 # and embedding row.
-func deleteEntity(pool db.Pool, id string) error
+func deleteEntity(pool: db.Pool, id: string) error
     db.Exec(pool, "DELETE FROM entities WHERE id = ?", id) onerr return
     return empty
 
 # listEntities returns all entities, optionally filtered by type.
-func listEntities(pool db.Pool, etype string, limit int) (list of Entity, error)
+func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, error)
     q := "SELECT id, type, name, json(data) AS data, created_at, updated_at FROM entities"
     args := make(list of any, 0)
     if etype isnt ""
@@ -69,31 +69,37 @@ func listEntities(pool db.Pool, etype string, limit int) (list of Entity, error)
 # the entity's updated_at so search ranking notices the new content.
 # The id default (uuid(7)) is filled in by SQLite — uuid extension
 # must be registered before this runs.
-func addObservation(pool db.Pool, id string, text string, source string) error
+func addObservation(pool: db.Pool, id: string, text: string, source: string) error
     exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
     if err isnt empty
         return err
     if not exists
         return error "entity not found: {id}"
 
-    db.Exec(pool, "INSERT INTO observations (entity_id, text, source) VALUES (?, ?, ?)", id, text, source) onerr return
+    db.Exec(
+        pool,
+        "INSERT INTO observations (entity_id, text, source) VALUES (?, ?, ?)",
+        id,
+        text,
+        source,
+    ) onerr return
     db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id) onerr return
     return empty
 
 # listObservations returns the observations for an entity, newest first.
-func listObservations(pool db.Pool, id string) (list of ObsRow, error)
+func listObservations(pool: db.Pool, id: string) (list of ObsRow, error)
     q := "SELECT id, text, source, at FROM observations WHERE entity_id = ? ORDER BY at DESC, id DESC"
     result := db.Query(pool, q, id) |> db.ScanAll(empty list of ObsRow) onerr return
     return result, empty
 
 # deleteObservation removes a single observation by its uuid7 id.
-func deleteObservation(pool db.Pool, obsID string) error
+func deleteObservation(pool: db.Pool, obsID: string) error
     db.Exec(pool, "DELETE FROM observations WHERE id = ?", obsID) onerr return
     return empty
 
 # entityText assembles the concatenated text representation of an entity
 # (name + summary + observations), used as input to the toy embedder.
-func entityText(pool db.Pool, id string) (string, error)
+func entityText(pool: db.Pool, id: string) (string, error)
     e, err := getEntity(pool, id)
     if err isnt empty
         return "", err
@@ -106,7 +112,9 @@ func entityText(pool db.Pool, id string) (string, error)
         parts = append(parts, ed.Summary)
 
     obs := listObservations(pool, id) onerr return "", error "{error}"
-    texts := obs |> slice.Filter((o ObsRow) bool => o.Text isnt "") |> slice.Map((o ObsRow) string => o.Text)
+    texts := obs
+        |> slice.Filter((o: ObsRow) bool => o.Text isnt "")
+        |> slice.Map((o: ObsRow) string => o.Text)
     parts = append(parts, many texts)
 
     return strpkg.Join(parts, " "), empty
@@ -114,13 +122,13 @@ func entityText(pool db.Pool, id string) (string, error)
 # corpusHash returns a hex sha256 over the corpus text. Used to detect
 # whether an entity's text has changed since the last embedding pass —
 # when it hasn't, we skip the network round-trip to the embed provider.
-func corpusHash(text string) string
+func corpusHash(text: string) string
     return crypto.SHA256(text)
 
 # storedHash reads the current content_hash for an entity. Returns
 # the empty string for unknown ids or NULL hashes (which forces a
 # re-embed on the next touch — the safe direction for migrations).
-func storedHash(pool db.Pool, id string) (string, error)
+func storedHash(pool: db.Pool, id: string) (string, error)
     q := "SELECT COALESCE(content_hash, '') AS hash FROM entities WHERE id = ?"
     row := db.Query(pool, q, id) |> db.ScanOne(empty hashRow) onerr return
     return row.Hash, empty
@@ -128,7 +136,7 @@ func storedHash(pool db.Pool, id string) (string, error)
 # setStoredHash records a new content_hash without bumping updated_at —
 # called after a successful re-embed. The companion update during
 # upsertEntity already moved updated_at.
-func setStoredHash(pool db.Pool, id string, hash string) error
+func setStoredHash(pool: db.Pool, id: string, hash: string) error
     db.Exec(pool, "UPDATE entities SET content_hash = ? WHERE id = ?", hash, id) onerr return
     return empty
 
@@ -137,7 +145,7 @@ func setStoredHash(pool db.Pool, id string, hash string) error
 # true if a new embedding was computed, false on the cached path.
 # Skipping when the hash matches saves a round-trip to the embed
 # provider (ollama/openai) on every no-op upsert/observe.
-func reEmbedIfChanged(pool db.Pool, id string) (bool, error)
+func reEmbedIfChanged(pool: db.Pool, id: string) (bool, error)
     text, err := entityText(pool, id)
     if err isnt empty
         return false, err
@@ -153,7 +161,7 @@ func reEmbedIfChanged(pool db.Pool, id string) (bool, error)
 # --- Tags ---
 
 # addTag appends a string to the entity's $.tags JSON array.
-func addTag(pool db.Pool, id string, tag string) error
+func addTag(pool: db.Pool, id: string, tag: string) error
     q := "UPDATE entities SET data = json_set(data, '$.tags[#]', ?), updated_at = datetime('now') WHERE id = ?"
     db.Exec(pool, q, tag, id) onerr return
     return empty
@@ -162,24 +170,24 @@ func addTag(pool db.Pool, id string, tag string) error
 
 # relate creates an edge src --rel--> dst. The primary key on
 # (src, rel, dst) prevents duplicates.
-func relate(pool db.Pool, src string, rel string, dst string) error
+func relate(pool: db.Pool, src: string, rel: string, dst: string) error
     db.Exec(pool, "INSERT OR IGNORE INTO relations (src, rel, dst) VALUES (?, ?, ?)", src, rel, dst) onerr return
     return empty
 
 # unrelate removes a specific edge.
-func unrelate(pool db.Pool, src string, rel string, dst string) error
+func unrelate(pool: db.Pool, src: string, rel: string, dst: string) error
     db.Exec(pool, "DELETE FROM relations WHERE src = ? AND rel = ? AND dst = ?", src, rel, dst) onerr return
     return empty
 
 # outgoingContext returns every neighbor reachable in one hop from id
 # along an outgoing edge.
-func outgoingContext(pool db.Pool, id string) (list of ContextRow, error)
+func outgoingContext(pool: db.Pool, id: string) (list of ContextRow, error)
     q := "SELECT r.rel AS rel, r.dst AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.dst WHERE r.src = ? ORDER BY r.rel, r.dst"
     result := db.Query(pool, q, id) |> db.ScanAll(empty list of ContextRow) onerr return
     return result, empty
 
 # incomingContext returns every entity that points to id in one hop.
-func incomingContext(pool db.Pool, id string) (list of ContextRow, error)
+func incomingContext(pool: db.Pool, id: string) (list of ContextRow, error)
     q := "SELECT r.rel AS rel, r.src AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.src WHERE r.dst = ? ORDER BY r.rel, r.src"
     result := db.Query(pool, q, id) |> db.ScanAll(empty list of ContextRow) onerr return
     return result, empty
@@ -191,18 +199,18 @@ func incomingContext(pool db.Pool, id string) (list of ContextRow, error)
 # "did you mean ...?" hints when an exact id lookup fails. Returns
 # empty (and no error) if the vtab is empty or no candidates pass
 # spellfix's similarity threshold.
-func suggestIds(pool db.Pool, query string, k int) (list of string, error)
+func suggestIds(pool: db.Pool, query: string, k: int) (list of string, error)
     if query equals "" or k <= 0
         return empty list of string, empty
     q := "SELECT word FROM entity_ids_fuzzy WHERE word MATCH ? AND top=?"
     rows := db.Query(pool, q, query, k) |> db.ScanAll(empty list of suggestRow) onerr return
-    return rows |> slice.Map((r suggestRow) => r.Word), empty
+    return rows |> slice.Map((r: suggestRow) => r.Word), empty
 
 # refreshFuzzyIds rebuilds the spellfix1 vtab from the current entities
 # table. Cheap on small graphs; called from openPool/openMCPPool so
 # every command sees up-to-date suggestions even though entities can
 # be inserted between sessions.
-func refreshFuzzyIds(pool db.Pool) error
+func refreshFuzzyIds(pool: db.Pool) error
     db.Exec(pool, "DELETE FROM entity_ids_fuzzy") onerr return
     db.Exec(pool, "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities") onerr return
     return empty
@@ -213,7 +221,7 @@ func refreshFuzzyIds(pool db.Pool) error
 # to integer ids (see ncruces/go-sqlite3/ext/closure), which doesn't
 # fit our TEXT slug scheme. Rel labels aren't carried because the
 # walk is type-agnostic — any edge counts as a hop.
-func reachableOutgoing(pool db.Pool, id string, depth int) (list of ReachableRow, error)
+func reachableOutgoing(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)
     if depth <= 0
         depth = 1
     q := "WITH RECURSIVE reach(id, depth) AS (SELECT dst, 1 FROM relations WHERE src = ? UNION SELECT r.dst, reach.depth + 1 FROM relations r JOIN reach ON r.src = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
@@ -223,7 +231,7 @@ func reachableOutgoing(pool db.Pool, id string, depth int) (list of ReachableRow
 # reachableIncoming returns every entity that can reach id via outgoing
 # edges within `depth` hops (i.e. the inverse direction of
 # reachableOutgoing).
-func reachableIncoming(pool db.Pool, id string, depth int) (list of ReachableRow, error)
+func reachableIncoming(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)
     if depth <= 0
         depth = 1
     q := "WITH RECURSIVE reach(id, depth) AS (SELECT src, 1 FROM relations WHERE dst = ? UNION SELECT r.src, reach.depth + 1 FROM relations r JOIN reach ON r.dst = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"

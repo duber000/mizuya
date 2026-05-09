@@ -24,18 +24,18 @@ var mcpDBPath = ".mizuya/mizuya.db"
 
 # startMCP creates the MCP server, registers all tools, and runs the
 # stdio transport (blocking).
-func startMCP(dbPath string) error
+func startMCP(dbPath: string) error
     mcpDBPath = dbPath
 
     router := mcp.NewRouter()
     entityTemplate := "entity://" + "{" + "id}"
-    router.AddResource(entityTemplate, func(argName string, partial string, prevArgs map of string to string) list of string
+    router.AddResource(entityTemplate, func(argName: string, partial: string, prevArgs: map of string to string) list of string
         pool := openDB(mcpDBPath) onerr return empty list of string
         defer db.Close(pool)
         entities := listEntities(pool, "", 500) onerr return empty list of string
         return entities
-            |> slice.Filter((e Entity) => strpkg.HasPrefix(e.Id, partial))
-            |> slice.Map((e Entity) => e.Id)
+            |> slice.Filter((e: Entity) => strpkg.HasPrefix(e.Id, partial))
+            |> slice.Map((e: Entity) => e.Id)
     )
 
     server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())
@@ -46,19 +46,31 @@ func startMCP(dbPath string) error
 # registerResources exposes knowledge graph data as MCP resources.
 # entity://list — snapshot of all entities (name, type, summary).
 # entity://{id} — full context for one entity (data + observations + relations).
-func registerResources(server reference mcp.Server)
-    mcp.TextResource(server, "entity://list", "Entity list", "All knowledge-graph entities", listEntitiesResource)
+func registerResources(server: reference mcp.Server)
+    mcp.TextResource(
+        server,
+        "entity://list",
+        "Entity list",
+        "All knowledge-graph entities",
+        listEntitiesResource,
+    )
     entityTemplate := "entity://" + "{" + "id}"
-    mcp.TextResourceTemplate(server, entityTemplate, "Entity context", "Full context: data, observations, and relations for an entity", entityContextResource)
+    mcp.TextResourceTemplate(
+        server,
+        entityTemplate,
+        "Entity context",
+        "Full context: data, observations, and relations for an entity",
+        entityContextResource,
+    )
 
-func listEntitiesResource(uri string) (string, error)
+func listEntitiesResource(uri: string) (string, error)
     pool := openDB(mcpDBPath) onerr return "", error "{error}"
     defer db.Close(pool)
     entities := listEntities(pool, "", 500) onerr return "", error "{error}"
     data := jsonpkg.PrettyBytes(entities) onerr return "", error "{error}"
     return data as string, empty
 
-func entityContextResource(uri string) (string, error)
+func entityContextResource(uri: string) (string, error)
     id := strpkg.TrimPrefix(uri, "entity://")
     if id equals ""
         return "", error "missing entity ID in URI: {uri}"
@@ -81,7 +93,7 @@ func entityContextResource(uri string) (string, error)
     return data as string, empty
 
 # registerTools adds all 6 knowledge graph tools to the MCP server.
-func registerTools(server reference mcp.Server)
+func registerTools(server: reference mcp.Server)
     registerUpsertEntity(server)
     registerAddObservation(server)
     registerRelate(server)
@@ -91,7 +103,7 @@ func registerTools(server reference mcp.Server)
 
 # --- Tool: upsert_entity ---
 
-func registerUpsertEntity(server reference mcp.Server)
+func registerUpsertEntity(server: reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("id", "string", "Unique slug, e.g. 'kukicha' or 'vllm-h100-deploy'"),
         mcp.Prop("type", "string", "Entity type: project, tool, person, concept, config, org"),
@@ -100,9 +112,16 @@ func registerUpsertEntity(server reference mcp.Server)
         mcp.Prop("tags", "array", "List of string tags"),
     }) |> mcp.Required(list of string{"id", "type", "name"})
 
-    mcp.ToolWithOpts(server, "upsert_entity", "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.", schema, mcp.ToolOpts{Idempotent: true}, handleUpsertEntity)
+    mcp.ToolWithOpts(
+        server,
+        "upsert_entity",
+        "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.",
+        schema,
+        mcp.ToolOpts{Idempotent: true},
+        handleUpsertEntity,
+    )
 
-func handleUpsertEntity(args map of string to any) (any, error)
+func handleUpsertEntity(args: map of string to any) (any, error)
     id := argString(args, "id")
     etype := argString(args, "type")
     name := argString(args, "name")
@@ -127,16 +146,23 @@ func handleUpsertEntity(args map of string to any) (any, error)
 
 # --- Tool: add_observation ---
 
-func registerAddObservation(server reference mcp.Server)
+func registerAddObservation(server: reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("entity_id", "string", "Entity to observe"),
         mcp.Prop("text", "string", "The observation text"),
         mcp.Prop("source", "string", "Source label (default: conversation)"),
     }) |> mcp.Required(list of string{"entity_id", "text"})
 
-    mcp.ToolWithOpts(server, "add_observation", "Record a fact or note about an entity. Appended to the entity's observation history.", schema, mcp.ToolOpts{Destructive: true}, handleAddObservation)
+    mcp.ToolWithOpts(
+        server,
+        "add_observation",
+        "Record a fact or note about an entity. Appended to the entity's observation history.",
+        schema,
+        mcp.ToolOpts{Destructive: true},
+        handleAddObservation,
+    )
 
-func handleAddObservation(args map of string to any) (any, error)
+func handleAddObservation(args: map of string to any) (any, error)
     id := argString(args, "entity_id")
     text := argString(args, "text")
     if id equals "" or text equals ""
@@ -157,16 +183,27 @@ func handleAddObservation(args map of string to any) (any, error)
 
 # --- Tool: relate ---
 
-func registerRelate(server reference mcp.Server)
+func registerRelate(server: reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("src", "string", "Source entity id"),
-        mcp.Prop("rel", "string", "Relation label: uses, depends_on, part_of, related_to, authored_by"),
+        mcp.Prop(
+            "rel",
+            "string",
+            "Relation label: uses, depends_on, part_of, related_to, authored_by",
+        ),
         mcp.Prop("dst", "string", "Destination entity id"),
     }) |> mcp.Required(list of string{"src", "rel", "dst"})
 
-    mcp.ToolWithOpts(server, "relate", "Create a typed edge between two entities in the knowledge graph.", schema, mcp.ToolOpts{Idempotent: true}, handleRelate)
+    mcp.ToolWithOpts(
+        server,
+        "relate",
+        "Create a typed edge between two entities in the knowledge graph.",
+        schema,
+        mcp.ToolOpts{Idempotent: true},
+        handleRelate,
+    )
 
-func handleRelate(args map of string to any) (any, error)
+func handleRelate(args: map of string to any) (any, error)
     src := argString(args, "src")
     rel := argString(args, "rel")
     dst := argString(args, "dst")
@@ -182,15 +219,26 @@ func handleRelate(args map of string to any) (any, error)
 
 # --- Tool: search ---
 
-func registerSearchTool(server reference mcp.Server)
+func registerSearchTool(server: reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
-        mcp.Prop("query", "string", "Search query (keywords for BM25, also used for semantic similarity in hybrid mode)"),
+        mcp.Prop(
+            "query",
+            "string",
+            "Search query (keywords for BM25, also used for semantic similarity in hybrid mode)",
+        ),
         mcp.Prop("limit", "integer", "Maximum results (default: 10)"),
     }) |> mcp.Required(list of string{"query"})
 
-    mcp.ToolWithOpts(server, "search", "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).", schema, mcp.ToolOpts{ReadOnly: true}, handleSearch)
+    mcp.ToolWithOpts(
+        server,
+        "search",
+        "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSearch,
+    )
 
-func handleSearch(args map of string to any) (any, error)
+func handleSearch(args: map of string to any) (any, error)
     query := argString(args, "query")
     if query equals ""
         return mcp.ErrorResult("query is required"), empty
@@ -207,15 +255,26 @@ func handleSearch(args map of string to any) (any, error)
 
 # --- Tool: get_context ---
 
-func registerGetContext(server reference mcp.Server)
+func registerGetContext(server: reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("id", "string", "Entity id to get context for"),
-        mcp.Prop("depth", "integer", "Hops to traverse via the closure vtable (1 = immediate neighbors, default 1)"),
+        mcp.Prop(
+            "depth",
+            "integer",
+            "Hops to traverse via the closure vtable (1 = immediate neighbors, default 1)",
+        ),
     }) |> mcp.Required(list of string{"id"})
 
-    mcp.ToolWithOpts(server, "get_context", "Get full context for an entity: its data, observations, and related entities up to N hops (default 1).", schema, mcp.ToolOpts{ReadOnly: true}, handleGetContext)
+    mcp.ToolWithOpts(
+        server,
+        "get_context",
+        "Get full context for an entity: its data, observations, and related entities up to N hops (default 1).",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleGetContext,
+    )
 
-func handleGetContext(args map of string to any) (any, error)
+func handleGetContext(args: map of string to any) (any, error)
     id := argString(args, "id")
     if id equals ""
         return mcp.ErrorResult("id is required"), empty
@@ -259,17 +318,28 @@ func handleGetContext(args map of string to any) (any, error)
 
 # --- Tool: similar ---
 
-func registerSimilarTool(server reference mcp.Server)
+func registerSimilarTool(server: reference mcp.Server)
     schema := mcp.Schema(list of mcp.SchemaProperty{
         mcp.Prop("id", "string", "Use this entity's embedding as the query vector"),
         mcp.Prop("text", "string", "Embed this text and use it as the query vector"),
         mcp.Prop("limit", "integer", "Maximum results (default: 5; ignored when threshold is set)"),
-        mcp.Prop("threshold", "integer", "Return everything in the closest N percentile of distances (1-100). When set, supersedes limit."),
+        mcp.Prop(
+            "threshold",
+            "integer",
+            "Return everything in the closest N percentile of distances (1-100). When set, supersedes limit.",
+        ),
     })
 
-    mcp.ToolWithOpts(server, "similar", "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly). Use threshold for percentile-based cutoff when k is unknown.", schema, mcp.ToolOpts{ReadOnly: true}, handleSimilar)
+    mcp.ToolWithOpts(
+        server,
+        "similar",
+        "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly). Use threshold for percentile-based cutoff when k is unknown.",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSimilar,
+    )
 
-func handleSimilar(args map of string to any) (any, error)
+func handleSimilar(args: map of string to any) (any, error)
     id := argString(args, "id")
     text := argString(args, "text")
     if id equals "" and text equals ""
@@ -316,14 +386,14 @@ func openMCPPool() (db.Pool, error)
 # corpus has changed since the last pass. The hash short-circuit
 # matters most for the openai/ollama providers — repeated upserts of
 # the same entity stop turning into network calls.
-func reEmbed(pool db.Pool, id string) error
+func reEmbed(pool: db.Pool, id: string) error
     reEmbedIfChanged(pool, id) onerr return
     return empty
 
 # --- Argument helpers ---
 
 # argString extracts a string from the MCP args map.
-func argString(args map of string to any, key string) string
+func argString(args: map of string to any, key: string) string
     v, ok := args[key]
     if not ok
         return ""
@@ -333,7 +403,7 @@ func argString(args map of string to any, key string) string
     return s
 
 # argInt extracts an int from the MCP args map with a default.
-func argInt(args map of string to any, key string, defaultVal int) int
+func argInt(args: map of string to any, key: string, defaultVal: int) int
     v, ok := args[key]
     if not ok
         return defaultVal
@@ -343,7 +413,7 @@ func argInt(args map of string to any, key string, defaultVal int) int
     return n
 
 # argStringList extracts a list of strings from the MCP args map.
-func argStringList(args map of string to any, key string) list of string
+func argStringList(args: map of string to any, key: string) list of string
     v, ok := args[key]
     if not ok
         return make(list of string, 0)
@@ -359,6 +429,6 @@ func argStringList(args map of string to any, key string) list of string
     return make(list of string, 0)
 
 # entityJSON marshals an entity for MCP tool results.
-func entityJSON(e Entity) any
+func entityJSON(e: Entity) any
     data := jsonpkg.PrettyBytes(e) onerr return mcp.ErrorResult("json error: {error}")
     return mcp.TextResult(data as string)
