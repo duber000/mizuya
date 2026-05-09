@@ -8,6 +8,7 @@ import "stdlib/cast"
 import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/mcp"
+import "stdlib/slice"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
 
@@ -32,11 +33,9 @@ func startMCP(dbPath string) error
         pool := openDB(mcpDBPath) onerr return empty list of string
         defer db.Close(pool)
         entities := listEntities(pool, "", 500) onerr return empty list of string
-        ids := make(list of string, 0)
-        for _, e in entities
-            if strpkg.HasPrefix(e.Id, partial)
-                ids = append(ids, e.Id)
-        return ids
+        return entities
+            |> slice.Filter((e Entity) => strpkg.HasPrefix(e.Id, partial))
+            |> slice.Map((e Entity) => e.Id)
     )
 
     server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())

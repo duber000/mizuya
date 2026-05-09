@@ -196,10 +196,7 @@ func suggestIds(pool db.Pool, query string, k int) (list of string, error)
         return empty list of string, empty
     q := "SELECT word FROM entity_ids_fuzzy WHERE word MATCH ? AND top=?"
     rows := db.Query(pool, q, query, k) |> db.ScanAll(empty list of suggestRow) onerr return
-    out := make(list of string, 0, len(rows))
-    for _, r in rows
-        out = append(out, r.Word)
-    return out, empty
+    return rows |> slice.Map((r suggestRow) => r.Word), empty
 
 # refreshFuzzyIds rebuilds the spellfix1 vtab from the current entities
 # table. Cheap on small graphs; called from openPool/openMCPPool so
