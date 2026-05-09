@@ -72,7 +72,11 @@ func main()
         |> .StringFlag("id", "Use this entity's embedding as the query", "")
         |> .StringFlag("text", "Embed this text and use it as the query", "")
         |> .IntFlag("limit", "Max results (ignored when --threshold is set)", 5)
-        |> .IntFlag("threshold", "Return everything in the closest N percentile of distances (1-100, 0 = use --limit instead)", 0)
+        |> .IntFlag(
+            "threshold",
+            "Return everything in the closest N percentile of distances (1-100, 0 = use --limit instead)",
+            0,
+        )
         |> .Action(doSimilar)
 
     listCmd := cli.NewCommand("list", "List entities (optionally filtered by --type)")
@@ -88,7 +92,17 @@ func main()
         |> cli.Version("0.1.0")
         |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
         |> cli.BoolGlobalFlag("json", "JSON output", false)
-        |> cli.WithCommands(initCmd, upsertCmd, observeCmd, relateCmd, searchCmd, contextCmd, similarCmd, listCmd, mcpCmd)
+        |> cli.WithCommands(
+            initCmd,
+            upsertCmd,
+            observeCmd,
+            relateCmd,
+            searchCmd,
+            contextCmd,
+            similarCmd,
+            listCmd,
+            mcpCmd,
+        )
         |> cli.Run() onerr cli.Fatal("{error}")
 
 # --- Command handlers ---
@@ -96,7 +110,7 @@ func main()
 # openPool opens the database and registers the vec1 vector extension.
 # vec1 ships native vec1_cos_distance and a virtual-table KNN index, so
 # we no longer pin MaxOpenConns=1 to host a Kukicha-side UDF.
-func openPool(args cli.Args) (db.Pool, error)
+func openPool(args: cli.Args) (db.Pool, error)
     dbPath := cli.GetString(args, "db")
     pool := openDB(dbPath) onerr return
     sqliteext.Register(pool, vec1ext.Register) onerr return
@@ -108,7 +122,7 @@ func openPool(args cli.Args) (db.Pool, error)
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 
-func doInit(args cli.Args)
+func doInit(args: cli.Args)
     dbPath := cli.GetString(args, "db")
     pool := openDB(dbPath) onerr
         errPrint("cannot open database: {error}")
@@ -141,7 +155,7 @@ func doInit(args cli.Args)
     else
         print(color.Green("Initialized mizuya database at {dbPath}"))
 
-func doUpsert(args cli.Args)
+func doUpsert(args: cli.Args)
     id := cli.GetString(args, "id")
     if id equals ""
         errPrint("--id is required")
@@ -178,7 +192,7 @@ func doUpsert(args cli.Args)
     else
         print("{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {name}")
 
-func doObserve(args cli.Args)
+func doObserve(args: cli.Args)
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if id equals "" or text equals ""
@@ -208,7 +222,7 @@ func doObserve(args cli.Args)
     else
         print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}")
 
-func doRelate(args cli.Args)
+func doRelate(args: cli.Args)
     src := cli.GetString(args, "src")
     rel := cli.GetString(args, "rel")
     dst := cli.GetString(args, "dst")
@@ -229,9 +243,11 @@ func doRelate(args cli.Args)
     if cli.IsJSON(args)
         printJSON(map of string to string{"status": "related", "src": src, "rel": rel, "dst": dst})
     else
-        print("{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}")
+        print(
+            "{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}",
+        )
 
-func doSearch(args cli.Args)
+func doSearch(args: cli.Args)
     query := cli.GetString(args, "query")
     if query equals ""
         errPrint("--query is required")
@@ -266,7 +282,7 @@ func doSearch(args cli.Args)
             print("{color.Bold("search:")} {query}")
         printSearchHits(hits)
 
-func doContext(args cli.Args)
+func doContext(args: cli.Args)
     id := cli.GetString(args, "id")
     if id equals ""
         errPrint("--id is required")
@@ -294,6 +310,7 @@ func doContext(args cli.Args)
         outReach := reachableOutgoing(pool, id, depth) onerr
             errPrint("cannot read outgoing closure: {error}")
             return
+
         inReach := reachableIncoming(pool, id, depth) onerr
             errPrint("cannot read incoming closure: {error}")
             return
@@ -330,7 +347,7 @@ func doContext(args cli.Args)
     else
         printContext(e, outgoing, incoming, obs)
 
-func doSimilar(args cli.Args)
+func doSimilar(args: cli.Args)
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if id equals "" and text equals ""
@@ -384,7 +401,7 @@ func doSimilar(args cli.Args)
         print(color.Bold(header))
         printSimilarHits(hits)
 
-func doList(args cli.Args)
+func doList(args: cli.Args)
     etype := cli.GetString(args, "type")
     limit, err := cli.GetInt(args, "limit")
     if err isnt empty
@@ -405,7 +422,7 @@ func doList(args cli.Args)
     else
         printEntityList(rows)
 
-func doMCP(args cli.Args)
+func doMCP(args: cli.Args)
     dbPath := cli.GetString(args, "db")
     startMCP(dbPath) onerr
         errPrint("MCP server error: {error}")
