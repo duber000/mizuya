@@ -85,6 +85,7 @@ func main()
 
     cli.New("mizuya")
         |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
+        |> cli.Version("0.1.0")
         |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
         |> cli.BoolGlobalFlag("json", "JSON output", false)
         |> cli.WithCommands(initCmd, upsertCmd, observeCmd, relateCmd, searchCmd, contextCmd, similarCmd, listCmd, mcpCmd)
