@@ -33,7 +33,9 @@ func printSearchHits(hits: list of SearchHit)
     t := table.New(list of string{"id", "type", "name", "summary"})
     for h in hits
         t = t
-            |> table.AddRow(list of string{h.Id, h.Type, truncate(h.Name, 40), truncate(h.Summary, 60)})
+            |> table.AddRow(
+                list of string{h.Id, h.Type, truncate(h.Name, 40), truncate(h.Summary, 60)},
+            )
     t |> table.Print()
 
 func printSimilarHits(hits: list of SimilarHit)
@@ -43,9 +45,10 @@ func printSimilarHits(hits: list of SimilarHit)
     t := table.New(list of string{"id", "type", "distance", "name", "summary"})
     for h in hits
         dist := fmt.Sprintf("%.4f", h.Distance)
-        t = t |> table.AddRow(
-            list of string{h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)},
-        )
+        t = t
+            |> table.AddRow(
+                list of string{h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)},
+            )
     t |> table.Print()
 
 # truncate shortens s to n chars with a trailing ellipsis when needed,
@@ -134,7 +137,7 @@ func printJSON(v: any)
         cli.Error("json error: {error}")
         return
 
-    fmt.Println(data as string)
+    print(data as string)
 
 func errPrint(msg: string)
     cli.Error("{color.BrightRed("error:")} {msg}")

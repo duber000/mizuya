@@ -110,7 +110,8 @@ func registerUpsertEntity(server: reference mcp.Server)
         mcp.Prop("name", "string", "Human-readable name"),
         mcp.Prop("summary", "string", "One-line description"),
         mcp.Prop("tags", "array", "List of string tags"),
-    }) |> mcp.Required(list of string{"id", "type", "name"})
+    })
+        |> mcp.Required(list of string{"id", "type", "name"})
 
     mcp.ToolWithOpts(
         server,
@@ -151,7 +152,8 @@ func registerAddObservation(server: reference mcp.Server)
         mcp.Prop("entity_id", "string", "Entity to observe"),
         mcp.Prop("text", "string", "The observation text"),
         mcp.Prop("source", "string", "Source label (default: conversation)"),
-    }) |> mcp.Required(list of string{"entity_id", "text"})
+    })
+        |> mcp.Required(list of string{"entity_id", "text"})
 
     mcp.ToolWithOpts(
         server,
@@ -192,7 +194,8 @@ func registerRelate(server: reference mcp.Server)
             "Relation label: uses, depends_on, part_of, related_to, authored_by",
         ),
         mcp.Prop("dst", "string", "Destination entity id"),
-    }) |> mcp.Required(list of string{"src", "rel", "dst"})
+    })
+        |> mcp.Required(list of string{"src", "rel", "dst"})
 
     mcp.ToolWithOpts(
         server,
@@ -227,7 +230,8 @@ func registerSearchTool(server: reference mcp.Server)
             "Search query (keywords for BM25, also used for semantic similarity in hybrid mode)",
         ),
         mcp.Prop("limit", "integer", "Maximum results (default: 10)"),
-    }) |> mcp.Required(list of string{"query"})
+    })
+        |> mcp.Required(list of string{"query"})
 
     mcp.ToolWithOpts(
         server,
@@ -263,7 +267,8 @@ func registerGetContext(server: reference mcp.Server)
             "integer",
             "Hops to traverse via the closure vtable (1 = immediate neighbors, default 1)",
         ),
-    }) |> mcp.Required(list of string{"id"})
+    })
+        |> mcp.Required(list of string{"id"})
 
     mcp.ToolWithOpts(
         server,
