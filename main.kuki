@@ -33,42 +33,71 @@ import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
+# validEntityTypes is the canonical entity-type list, surfaced both in
+# the CLI flag help and in the MCP tool schema so they don't drift.
+const validEntityTypes string = "project, tool, person, concept, config, org"
+
 func main()
-    initCmd := cli.NewCommand("init", "Initialize a new mizuya database")
+    cli.New("mizuya")
+        |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
+        |> cli.Version("0.1.0")
+        |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
+        |> cli.BoolGlobalFlag("json", "JSON output", false)
+        |> cli.WithCommands(
+            makeInitCmd(),
+            makeUpsertCmd(),
+            makeObserveCmd(),
+            makeRelateCmd(),
+            makeSearchCmd(),
+            makeContextCmd(),
+            makeSimilarCmd(),
+            makeListCmd(),
+            makeMCPCmd(),
+        )
+        |> cli.Run() onerr cli.Fatal("{error}")
+
+func makeInitCmd() reference cli.SubcommandDef
+    return cli.NewCommand("init", "Initialize a new mizuya database")
         |> .Action(doInit)
 
-    upsertCmd := cli.NewCommand("upsert", "Create or update an entity")
+func makeUpsertCmd() reference cli.SubcommandDef
+    return cli.NewCommand("upsert", "Create or update an entity")
         |> .StringFlag("id", "Entity id (slug)", "")
-        |> .StringFlag("type", "Entity type (project, tool, person, concept, config, org)", "concept")
+        |> .StringFlag("type", "Entity type ({validEntityTypes})", "concept")
         |> .StringFlag("name", "Human-readable name", "")
         |> .StringFlag("summary", "One-line summary", "")
         |> .StringFlag("tags", "Comma-separated tags", "")
         |> .Action(doUpsert)
 
-    observeCmd := cli.NewCommand("observe", "Append an observation to an entity")
+func makeObserveCmd() reference cli.SubcommandDef
+    return cli.NewCommand("observe", "Append an observation to an entity")
         |> .StringFlag("id", "Entity id", "")
         |> .StringFlag("text", "Observation text", "")
         |> .StringFlag("source", "Observation source", "conversation")
         |> .Action(doObserve)
 
-    relateCmd := cli.NewCommand("relate", "Create a typed edge between two entities")
+func makeRelateCmd() reference cli.SubcommandDef
+    return cli.NewCommand("relate", "Create a typed edge between two entities")
         |> .StringFlag("src", "Source entity id", "")
         |> .StringFlag("rel", "Relation label (uses, depends_on, part_of, ...)", "related_to")
         |> .StringFlag("dst", "Destination entity id", "")
         |> .Action(doRelate)
 
-    searchCmd := cli.NewCommand("search", "BM25 full-text search across entities (or regex with --regex)")
+func makeSearchCmd() reference cli.SubcommandDef
+    return cli.NewCommand("search", "BM25 full-text search across entities (or regex with --regex)")
         |> .StringFlag("query", "FTS5 query (or regex pattern with --regex)", "")
         |> .IntFlag("limit", "Max results", 10)
         |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
         |> .Action(doSearch)
 
-    contextCmd := cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
+func makeContextCmd() reference cli.SubcommandDef
+    return cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
         |> .StringFlag("id", "Entity id", "")
         |> .IntFlag("depth", "Hops to traverse via the closure vtable (1 = immediate neighbors)", 1)
         |> .Action(doContext)
 
-    similarCmd := cli.NewCommand("similar", "Vector similarity search (cosine distance)")
+func makeSimilarCmd() reference cli.SubcommandDef
+    return cli.NewCommand("similar", "Vector similarity search (cosine distance)")
         |> .StringFlag("id", "Use this entity's embedding as the query", "")
         |> .StringFlag("text", "Embed this text and use it as the query", "")
         |> .IntFlag("limit", "Max results (ignored when --threshold is set)", 5)
@@ -79,31 +108,15 @@ func main()
         )
         |> .Action(doSimilar)
 
-    listCmd := cli.NewCommand("list", "List entities (optionally filtered by --type)")
+func makeListCmd() reference cli.SubcommandDef
+    return cli.NewCommand("list", "List entities (optionally filtered by --type)")
         |> .StringFlag("type", "Filter by type", "")
         |> .IntFlag("limit", "Max results", 50)
         |> .Action(doList)
 
-    mcpCmd := cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
+func makeMCPCmd() reference cli.SubcommandDef
+    return cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
         |> .Action(doMCP)
-
-    cli.New("mizuya")
-        |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
-        |> cli.Version("0.1.0")
-        |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
-        |> cli.BoolGlobalFlag("json", "JSON output", false)
-        |> cli.WithCommands(
-            initCmd,
-            upsertCmd,
-            observeCmd,
-            relateCmd,
-            searchCmd,
-            contextCmd,
-            similarCmd,
-            listCmd,
-            mcpCmd,
-        )
-        |> cli.Run() onerr cli.Fatal("{error}")
 
 # --- Command handlers ---
 
@@ -307,27 +320,11 @@ func doContext(args: cli.Args)
         return
 
     if depth > 1
-        outReach := reachableOutgoing(pool, id, depth) onerr
-            errPrint("cannot read outgoing closure: {error}")
-            return
-
-        inReach := reachableIncoming(pool, id, depth) onerr
-            errPrint("cannot read incoming closure: {error}")
-            return
-
-        if cli.IsJSON(args)
-            payload := map of string to any{
-                "entity": e,
-                "depth": depth,
-                "outgoing": outReach,
-                "incoming": inReach,
-                "observations": obs,
-            }
-            printJSON(payload)
-        else
-            printReachableContext(e, depth, outReach, inReach, obs)
+        renderDeepContext(args, pool, e, id, depth, obs)
         return
+    renderShallowContext(args, pool, e, id, obs)
 
+func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow)
     outgoing := outgoingContext(pool, id) onerr
         errPrint("cannot read outgoing: {error}")
         return
@@ -337,15 +334,34 @@ func doContext(args: cli.Args)
         return
 
     if cli.IsJSON(args)
-        payload := map of string to any{
+        printJSON(map of string to any{
             "entity": e,
             "outgoing": outgoing,
             "incoming": incoming,
             "observations": obs,
-        }
-        printJSON(payload)
-    else
-        printContext(e, outgoing, incoming, obs)
+        })
+        return
+    printContext(e, outgoing, incoming, obs)
+
+func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow)
+    outReach := reachableOutgoing(pool, id, depth) onerr
+        errPrint("cannot read outgoing closure: {error}")
+        return
+
+    inReach := reachableIncoming(pool, id, depth) onerr
+        errPrint("cannot read incoming closure: {error}")
+        return
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{
+            "entity": e,
+            "depth": depth,
+            "outgoing": outReach,
+            "incoming": inReach,
+            "observations": obs,
+        })
+        return
+    printReachableContext(e, depth, outReach, inReach, obs)
 
 func doSimilar(args: cli.Args)
     id := cli.GetString(args, "id")

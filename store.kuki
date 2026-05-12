@@ -215,25 +215,22 @@ func refreshFuzzyIds(pool: db.Pool) error
     db.Exec(pool, "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities") onerr return
     return empty
 
-# reachableOutgoing returns every entity reachable from id by following
-# outgoing edges up to `depth` hops. Implemented via a recursive CTE
+# reachable returns every entity reachable from id within `depth` hops,
+# walking either outgoing edges (fromCol="src", toCol="dst") or incoming
+# edges (fromCol="dst", toCol="src"). Implemented via a recursive CTE
 # because the upstream `transitive_closure` virtual table is hardcoded
 # to integer ids (see ncruces/go-sqlite3/ext/closure), which doesn't
-# fit our TEXT slug scheme. Rel labels aren't carried because the
-# walk is type-agnostic — any edge counts as a hop.
-func reachableOutgoing(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)
+# fit our TEXT slug scheme. Rel labels aren't carried — the walk is
+# type-agnostic, any edge counts as a hop.
+func reachable(pool: db.Pool, id: string, depth: int, fromCol: string, toCol: string) (list of ReachableRow, error)
     if depth <= 0
         depth = 1
-    q := "WITH RECURSIVE reach(id, depth) AS (SELECT dst, 1 FROM relations WHERE src = ? UNION SELECT r.dst, reach.depth + 1 FROM relations r JOIN reach ON r.src = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
+    q := "WITH RECURSIVE reach(id, depth) AS (SELECT {toCol}, 1 FROM relations WHERE {fromCol} = ? UNION SELECT r.{toCol}, reach.depth + 1 FROM relations r JOIN reach ON r.{fromCol} = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
     result := db.Query(pool, q, id, depth) |> db.ScanAll(empty list of ReachableRow) onerr return
     return result, empty
 
-# reachableIncoming returns every entity that can reach id via outgoing
-# edges within `depth` hops (i.e. the inverse direction of
-# reachableOutgoing).
+func reachableOutgoing(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)
+    return reachable(pool, id, depth, "src", "dst")
+
 func reachableIncoming(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)
-    if depth <= 0
-        depth = 1
-    q := "WITH RECURSIVE reach(id, depth) AS (SELECT src, 1 FROM relations WHERE dst = ? UNION SELECT r.src, reach.depth + 1 FROM relations r JOIN reach ON r.dst = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
-    result := db.Query(pool, q, id, depth) |> db.ScanAll(empty list of ReachableRow) onerr return
-    return result, empty
+    return reachable(pool, id, depth, "dst", "src")

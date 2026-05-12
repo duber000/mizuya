@@ -12,13 +12,22 @@ import "stdlib/string" as strpkg
 
 # --- FTS5 keyword search ---
 
+# BM25 field weights — bias matches toward identifiers and human-readable
+# names. Lower numbers de-emphasize matches in the JSON `data` blob,
+# which is bulky and noisy compared to the structured columns.
+const ftsWeightId float64 = 10.0
+
+const ftsWeightName float64 = 5.0
+
+const ftsWeightType float64 = 2.0
+
+const ftsWeightData float64 = 1.0
+
 # ftsSearch runs a BM25-ranked full-text search over entities.
-# Field weights (id=10, name=5, type=2, data=1) bias toward identifier
-# and name matches while still surfacing content hits.
 func ftsSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, error)
     if limit <= 0
         limit = 10
-    q := "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? ORDER BY bm25(entities_fts, 10.0, 5.0, 2.0, 1.0) LIMIT ?"
+    q := "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? ORDER BY bm25(entities_fts, {ftsWeightId}, {ftsWeightName}, {ftsWeightType}, {ftsWeightData}) LIMIT ?"
     result := db.Query(pool, q, query, limit) |> db.ScanAll(empty list of SearchHit) onerr return
     return result, empty
 
