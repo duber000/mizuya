@@ -25,6 +25,7 @@ skill Mizuya
 import "stdlib/cli"
 import "stdlib/db"
 import "stdlib/sqliteext"
+import "stdlib/string" as strpkg
 
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
 import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
@@ -211,9 +212,7 @@ func doObserve(args: cli.Args)
     if id equals "" or text equals ""
         errPrint("--id and --text are required")
         return
-    source := cli.GetString(args, "source")
-    if source equals ""
-        source = "conversation"
+    source := strpkg.OrDefault(cli.GetString(args, "source"), "conversation")
 
     pool := openPool(args) onerr
         errPrint("cannot open database: {error}")
