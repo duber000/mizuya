@@ -34,8 +34,8 @@ func startMCP(dbPath: string) error
         defer db.Close(pool)
         entities := listEntities(pool, "", 500) onerr return empty list of string
         return entities
-            |> slice.Filter((e) => strpkg.HasPrefix(e.Id, partial))
-            |> slice.Map((e) => e.Id)
+            |> slice.Filter(e => strpkg.HasPrefix(e.Id, partial))
+            |> slice.Map(e => e.Id)
     )
 
     server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())

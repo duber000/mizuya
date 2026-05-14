@@ -113,8 +113,8 @@ func entityText(pool: db.Pool, id: string) (string, error)
 
     obs := listObservations(pool, id) onerr return "", error "{error}"
     texts := obs
-        |> slice.Filter((o: ObsRow) bool => o.Text isnt "")
-        |> slice.Map((o: ObsRow) string => o.Text)
+        |> slice.Filter(o => o.Text isnt "")
+        |> slice.Map(o => o.Text)
     parts = append(parts, many texts)
 
     return strpkg.Join(parts, " "), empty
@@ -204,7 +204,7 @@ func suggestIds(pool: db.Pool, query: string, k: int) (list of string, error)
         return empty list of string, empty
     q := "SELECT word FROM entity_ids_fuzzy WHERE word MATCH ? AND top=?"
     rows := db.Query(pool, q, query, k) |> db.ScanAll of suggestRow onerr return
-    return rows |> slice.Map((r) => r.Word), empty
+    return rows |> slice.Map(r => r.Word), empty
 
 # refreshFuzzyIds rebuilds the spellfix1 vtab from the current entities
 # table. Cheap on small graphs; called from openPool/openMCPPool so
