@@ -165,7 +165,7 @@ func doInit(args: cli.Args)
         return
 
     if cli.IsJSON(args)
-        printJSON(map of string to string{"status": "initialized", "db": dbPath})
+        printJSON({"status": "initialized", "db": dbPath})
     else
         print(color.Green("Initialized mizuya database at {dbPath}"))
 
@@ -230,7 +230,7 @@ func doObserve(args: cli.Args)
         return
 
     if cli.IsJSON(args)
-        printJSON(map of string to string{"status": "observed", "id": id, "text": text})
+        printJSON({"status": "observed", "id": id, "text": text})
     else
         print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}")
 
@@ -253,7 +253,7 @@ func doRelate(args: cli.Args)
         return
 
     if cli.IsJSON(args)
-        printJSON(map of string to string{"status": "related", "src": src, "rel": rel, "dst": dst})
+        printJSON({"status": "related", "src": src, "rel": rel, "dst": dst})
     else
         print(
             "{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}",
@@ -333,7 +333,7 @@ func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, 
         return
 
     if cli.IsJSON(args)
-        printJSON(map of string to any{
+        printJSON({
             "entity": e,
             "outgoing": outgoing,
             "incoming": incoming,
@@ -352,7 +352,7 @@ func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, dep
         return
 
     if cli.IsJSON(args)
-        printJSON(map of string to any{
+        printJSON({
             "entity": e,
             "depth": depth,
             "outgoing": outReach,
