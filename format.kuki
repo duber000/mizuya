@@ -21,20 +21,20 @@ func printEntityList(rows: list of Entity)
     if len(rows) equals 0
         print(color.Dim("  No entities."))
         return
-    t := table.New(list of string{"id", "type", "name", "updated_at"})
+    t := table.New({"id", "type", "name", "updated_at"})
     for e in rows
-        t = t |> table.AddRow(list of string{e.Id, e.Type, truncate(e.Name, 40), e.UpdatedAt})
+        t = t |> table.AddRow({e.Id, e.Type, truncate(e.Name, 40), e.UpdatedAt})
     t |> table.Print()
 
 func printSearchHits(hits: list of SearchHit)
     if len(hits) equals 0
         print(color.Dim("  No matches."))
         return
-    t := table.New(list of string{"id", "type", "name", "summary"})
+    t := table.New({"id", "type", "name", "summary"})
     for h in hits
         t = t
             |> table.AddRow(
-                list of string{h.Id, h.Type, truncate(h.Name, 40), truncate(h.Summary, 60)},
+                {h.Id, h.Type, truncate(h.Name, 40), truncate(h.Summary, 60)},
             )
     t |> table.Print()
 
@@ -42,12 +42,12 @@ func printSimilarHits(hits: list of SimilarHit)
     if len(hits) equals 0
         print(color.Dim("  No embeddings available."))
         return
-    t := table.New(list of string{"id", "type", "distance", "name", "summary"})
+    t := table.New({"id", "type", "distance", "name", "summary"})
     for h in hits
         dist := fmt.Sprintf("%.4f", h.Distance)
         t = t
             |> table.AddRow(
-                list of string{h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)},
+                {h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)},
             )
     t |> table.Print()
 

@@ -34,8 +34,8 @@ func startMCP(dbPath: string) error
         defer db.Close(pool)
         entities := listEntities(pool, "", 500) onerr return empty list of string
         return entities
-            |> slice.Filter((e: Entity) => strpkg.HasPrefix(e.Id, partial))
-            |> slice.Map((e: Entity) => e.Id)
+            |> slice.Filter((e) => strpkg.HasPrefix(e.Id, partial))
+            |> slice.Map((e) => e.Id)
     )
 
     server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())
@@ -104,14 +104,14 @@ func registerTools(server: reference mcp.Server)
 # --- Tool: upsert_entity ---
 
 func registerUpsertEntity(server: reference mcp.Server)
-    schema := mcp.Schema(list of mcp.SchemaProperty{
+    schema := mcp.Schema({
         mcp.Prop("id", "string", "Unique slug, e.g. 'kukicha' or 'vllm-h100-deploy'"),
         mcp.Prop("type", "string", "Entity type: {validEntityTypes}"),
         mcp.Prop("name", "string", "Human-readable name"),
         mcp.Prop("summary", "string", "One-line description"),
         mcp.Prop("tags", "array", "List of string tags"),
     })
-        |> mcp.Required(list of string{"id", "type", "name"})
+        |> mcp.Required({"id", "type", "name"})
 
     mcp.ToolWithOpts(
         server,
@@ -148,12 +148,12 @@ func handleUpsertEntity(args: map of string to any) (any, error)
 # --- Tool: add_observation ---
 
 func registerAddObservation(server: reference mcp.Server)
-    schema := mcp.Schema(list of mcp.SchemaProperty{
+    schema := mcp.Schema({
         mcp.Prop("entity_id", "string", "Entity to observe"),
         mcp.Prop("text", "string", "The observation text"),
         mcp.Prop("source", "string", "Source label (default: conversation)"),
     })
-        |> mcp.Required(list of string{"entity_id", "text"})
+        |> mcp.Required({"entity_id", "text"})
 
     mcp.ToolWithOpts(
         server,
@@ -186,7 +186,7 @@ func handleAddObservation(args: map of string to any) (any, error)
 # --- Tool: relate ---
 
 func registerRelate(server: reference mcp.Server)
-    schema := mcp.Schema(list of mcp.SchemaProperty{
+    schema := mcp.Schema({
         mcp.Prop("src", "string", "Source entity id"),
         mcp.Prop(
             "rel",
@@ -195,7 +195,7 @@ func registerRelate(server: reference mcp.Server)
         ),
         mcp.Prop("dst", "string", "Destination entity id"),
     })
-        |> mcp.Required(list of string{"src", "rel", "dst"})
+        |> mcp.Required({"src", "rel", "dst"})
 
     mcp.ToolWithOpts(
         server,
@@ -223,7 +223,7 @@ func handleRelate(args: map of string to any) (any, error)
 # --- Tool: search ---
 
 func registerSearchTool(server: reference mcp.Server)
-    schema := mcp.Schema(list of mcp.SchemaProperty{
+    schema := mcp.Schema({
         mcp.Prop(
             "query",
             "string",
@@ -231,7 +231,7 @@ func registerSearchTool(server: reference mcp.Server)
         ),
         mcp.Prop("limit", "integer", "Maximum results (default: 10)"),
     })
-        |> mcp.Required(list of string{"query"})
+        |> mcp.Required({"query"})
 
     mcp.ToolWithOpts(
         server,
@@ -260,7 +260,7 @@ func handleSearch(args: map of string to any) (any, error)
 # --- Tool: get_context ---
 
 func registerGetContext(server: reference mcp.Server)
-    schema := mcp.Schema(list of mcp.SchemaProperty{
+    schema := mcp.Schema({
         mcp.Prop("id", "string", "Entity id to get context for"),
         mcp.Prop(
             "depth",
@@ -268,7 +268,7 @@ func registerGetContext(server: reference mcp.Server)
             "Hops to traverse via the closure vtable (1 = immediate neighbors, default 1)",
         ),
     })
-        |> mcp.Required(list of string{"id"})
+        |> mcp.Required({"id"})
 
     mcp.ToolWithOpts(
         server,
@@ -324,7 +324,7 @@ func handleGetContext(args: map of string to any) (any, error)
 # --- Tool: similar ---
 
 func registerSimilarTool(server: reference mcp.Server)
-    schema := mcp.Schema(list of mcp.SchemaProperty{
+    schema := mcp.Schema({
         mcp.Prop("id", "string", "Use this entity's embedding as the query vector"),
         mcp.Prop("text", "string", "Embed this text and use it as the query vector"),
         mcp.Prop("limit", "integer", "Maximum results (default: 5; ignored when threshold is set)"),

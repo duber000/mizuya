@@ -40,7 +40,7 @@ func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summar
 # getEntity fetches an entity by id. Returns an error if no row matches.
 func getEntity(pool: db.Pool, id: string) (Entity, error)
     q := "SELECT id, type, name, json(data) AS data, created_at, updated_at FROM entities WHERE id = ?"
-    result := db.Query(pool, q, id) |> db.ScanOne(empty Entity) onerr return
+    result := db.Query(pool, q, id) |> db.ScanOne of Entity onerr return
     return result, empty
 
 # deleteEntity removes an entity and (via ON DELETE CASCADE) its relations
@@ -60,7 +60,7 @@ func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, err
     if limit > 0
         q = q + " LIMIT ?"
         args = append(args, limit)
-    result := db.Query(pool, q, many args) |> db.ScanAll(empty list of Entity) onerr return
+    result := db.Query(pool, q, many args) |> db.ScanAll of Entity onerr return
     return result, empty
 
 # --- Observations (JSON-array append) ---
@@ -89,7 +89,7 @@ func addObservation(pool: db.Pool, id: string, text: string, source: string) err
 # listObservations returns the observations for an entity, newest first.
 func listObservations(pool: db.Pool, id: string) (list of ObsRow, error)
     q := "SELECT id, text, source, at FROM observations WHERE entity_id = ? ORDER BY at DESC, id DESC"
-    result := db.Query(pool, q, id) |> db.ScanAll(empty list of ObsRow) onerr return
+    result := db.Query(pool, q, id) |> db.ScanAll of ObsRow onerr return
     return result, empty
 
 # deleteObservation removes a single observation by its uuid7 id.
@@ -130,7 +130,7 @@ func corpusHash(text: string) string
 # re-embed on the next touch — the safe direction for migrations).
 func storedHash(pool: db.Pool, id: string) (string, error)
     q := "SELECT COALESCE(content_hash, '') AS hash FROM entities WHERE id = ?"
-    row := db.Query(pool, q, id) |> db.ScanOne(empty hashRow) onerr return
+    row := db.Query(pool, q, id) |> db.ScanOne of hashRow onerr return
     return row.Hash, empty
 
 # setStoredHash records a new content_hash without bumping updated_at —
@@ -183,13 +183,13 @@ func unrelate(pool: db.Pool, src: string, rel: string, dst: string) error
 # along an outgoing edge.
 func outgoingContext(pool: db.Pool, id: string) (list of ContextRow, error)
     q := "SELECT r.rel AS rel, r.dst AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.dst WHERE r.src = ? ORDER BY r.rel, r.dst"
-    result := db.Query(pool, q, id) |> db.ScanAll(empty list of ContextRow) onerr return
+    result := db.Query(pool, q, id) |> db.ScanAll of ContextRow onerr return
     return result, empty
 
 # incomingContext returns every entity that points to id in one hop.
 func incomingContext(pool: db.Pool, id: string) (list of ContextRow, error)
     q := "SELECT r.rel AS rel, r.src AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.src WHERE r.dst = ? ORDER BY r.rel, r.src"
-    result := db.Query(pool, q, id) |> db.ScanAll(empty list of ContextRow) onerr return
+    result := db.Query(pool, q, id) |> db.ScanAll of ContextRow onerr return
     return result, empty
 
 # --- Fuzzy id suggestions ---
@@ -203,8 +203,8 @@ func suggestIds(pool: db.Pool, query: string, k: int) (list of string, error)
     if query equals "" or k <= 0
         return empty list of string, empty
     q := "SELECT word FROM entity_ids_fuzzy WHERE word MATCH ? AND top=?"
-    rows := db.Query(pool, q, query, k) |> db.ScanAll(empty list of suggestRow) onerr return
-    return rows |> slice.Map((r: suggestRow) => r.Word), empty
+    rows := db.Query(pool, q, query, k) |> db.ScanAll of suggestRow onerr return
+    return rows |> slice.Map((r) => r.Word), empty
 
 # refreshFuzzyIds rebuilds the spellfix1 vtab from the current entities
 # table. Cheap on small graphs; called from openPool/openMCPPool so
@@ -226,7 +226,7 @@ func reachable(pool: db.Pool, id: string, depth: int, fromCol: string, toCol: st
     if depth <= 0
         depth = 1
     q := "WITH RECURSIVE reach(id, depth) AS (SELECT {toCol}, 1 FROM relations WHERE {fromCol} = ? UNION SELECT r.{toCol}, reach.depth + 1 FROM relations r JOIN reach ON r.{fromCol} = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
-    result := db.Query(pool, q, id, depth) |> db.ScanAll(empty list of ReachableRow) onerr return
+    result := db.Query(pool, q, id, depth) |> db.ScanAll of ReachableRow onerr return
     return result, empty
 
 func reachableOutgoing(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)

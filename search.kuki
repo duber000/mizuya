@@ -28,7 +28,7 @@ func ftsSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, err
     if limit <= 0
         limit = 10
     q := "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? ORDER BY bm25(entities_fts, {ftsWeightId}, {ftsWeightName}, {ftsWeightType}, {ftsWeightData}) LIMIT ?"
-    result := db.Query(pool, q, query, limit) |> db.ScanAll(empty list of SearchHit) onerr return
+    result := db.Query(pool, q, query, limit) |> db.ScanAll of SearchHit onerr return
     return result, empty
 
 # --- Regex search ---
@@ -42,7 +42,7 @@ func regexSearch(pool: db.Pool, pattern: string, limit: int) (list of SearchHit,
     if limit <= 0
         limit = 10
     q := "SELECT id, type, name, COALESCE(data ->> '$.summary', '') AS summary FROM entities WHERE id REGEXP ? OR name REGEXP ? OR data REGEXP ? ORDER BY updated_at DESC LIMIT ?"
-    result := db.Query(pool, q, pattern, pattern, pattern, limit) |> db.ScanAll(empty list of SearchHit) onerr return
+    result := db.Query(pool, q, pattern, pattern, pattern, limit) |> db.ScanAll of SearchHit onerr return
     return result, empty
 
 # --- Binary vector serialization ---
@@ -88,7 +88,7 @@ func similar(pool: db.Pool, vec: list of float64, k: int) (list of SimilarHit, e
     blob := serializeVec(vec)
     knnArg := "\{k: {k}\}"
     q := "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id ORDER BY v.distance ASC"
-    result := db.Query(pool, q, blob, knnArg) |> db.ScanAll(empty list of SimilarHit) onerr return
+    result := db.Query(pool, q, blob, knnArg) |> db.ScanAll of SimilarHit onerr return
     return result, empty
 
 # similarByPercentile returns entities whose distance to `vec` falls
@@ -106,7 +106,7 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of
     blob := serializeVec(vec)
     knnArg := "\{k: {count}\}"
     q := "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists) ORDER BY d.d ASC"
-    result := db.Query(pool, q, blob, knnArg, pct) |> db.ScanAll(empty list of SimilarHit) onerr return
+    result := db.Query(pool, q, blob, knnArg, pct) |> db.ScanAll of SimilarHit onerr return
     return result, empty
 
 # getEmbedding fetches the stored embedding for an entity (for the
@@ -115,7 +115,7 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of
 # them back via vec1_to_json and parse the JSON array.
 func getEmbedding(pool: db.Pool, id: string) (list of float64, error)
     result := db.Query(pool, "SELECT vec_raw AS vec FROM embeddings_vec WHERE entity_id = ?", id)
-        |> db.ScanOne(empty vecRow) onerr return
+        |> db.ScanOne of vecRow onerr return
     vec := deserializeVec(result.Vec)
     if vec equals empty
         return empty, error "invalid embedding blob for entity {id}"
