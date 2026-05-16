@@ -18,6 +18,8 @@ import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
+type ToolArgs = map of string to any
+
 # mcpDBPath is the database path used by the MCP server, set from the
 # --db flag before starting the server.
 var mcpDBPath = ".mizuya/mizuya.db"
@@ -83,7 +85,7 @@ func entityContextResource(uri: string) (string, error)
     incoming := incomingContext(pool, id) onerr return "", error "{error}"
     obs := listObservations(pool, id) onerr return "", error "{error}"
 
-    payload := map of string to any{
+    payload := ToolArgs{
         "entity": e,
         "outgoing": outgoing,
         "incoming": incoming,
@@ -122,7 +124,7 @@ func registerUpsertEntity(server: reference mcp.Server)
         handleUpsertEntity,
     )
 
-func handleUpsertEntity(args: map of string to any) (any, error)
+func handleUpsertEntity(args: ToolArgs) (any, error)
     id := argString(args, "id")
     etype := argString(args, "type")
     name := argString(args, "name")
@@ -164,7 +166,7 @@ func registerAddObservation(server: reference mcp.Server)
         handleAddObservation,
     )
 
-func handleAddObservation(args: map of string to any) (any, error)
+func handleAddObservation(args: ToolArgs) (any, error)
     id := argString(args, "entity_id")
     text := argString(args, "text")
     if id equals "" or text equals ""
@@ -206,7 +208,7 @@ func registerRelate(server: reference mcp.Server)
         handleRelate,
     )
 
-func handleRelate(args: map of string to any) (any, error)
+func handleRelate(args: ToolArgs) (any, error)
     src := argString(args, "src")
     rel := argString(args, "rel")
     dst := argString(args, "dst")
@@ -242,7 +244,7 @@ func registerSearchTool(server: reference mcp.Server)
         handleSearch,
     )
 
-func handleSearch(args: map of string to any) (any, error)
+func handleSearch(args: ToolArgs) (any, error)
     query := argString(args, "query")
     if query equals ""
         return mcp.ErrorResult("query is required"), empty
@@ -279,7 +281,7 @@ func registerGetContext(server: reference mcp.Server)
         handleGetContext,
     )
 
-func handleGetContext(args: map of string to any) (any, error)
+func handleGetContext(args: ToolArgs) (any, error)
     id := argString(args, "id")
     if id equals ""
         return mcp.ErrorResult("id is required"), empty
@@ -298,7 +300,7 @@ func handleGetContext(args: map of string to any) (any, error)
         outReach := reachableOutgoing(pool, id, depth) onerr return mcp.ErrorResult("cannot read outgoing closure: {error}"), empty
         inReach := reachableIncoming(pool, id, depth) onerr return mcp.ErrorResult("cannot read incoming closure: {error}"), empty
 
-        payload := map of string to any{
+        payload := ToolArgs{
             "entity": e,
             "depth": depth,
             "outgoing": outReach,
@@ -311,7 +313,7 @@ func handleGetContext(args: map of string to any) (any, error)
     outgoing := outgoingContext(pool, id) onerr return mcp.ErrorResult("cannot read outgoing: {error}"), empty
     incoming := incomingContext(pool, id) onerr return mcp.ErrorResult("cannot read incoming: {error}"), empty
 
-    payload := map of string to any{
+    payload := ToolArgs{
         "entity": e,
         "outgoing": outgoing,
         "incoming": incoming,
@@ -344,7 +346,7 @@ func registerSimilarTool(server: reference mcp.Server)
         handleSimilar,
     )
 
-func handleSimilar(args: map of string to any) (any, error)
+func handleSimilar(args: ToolArgs) (any, error)
     id := argString(args, "id")
     text := argString(args, "text")
     if id equals "" and text equals ""
@@ -398,7 +400,7 @@ func reEmbed(pool: db.Pool, id: string) error
 # --- Argument helpers ---
 
 # argString extracts a string from the MCP args map.
-func argString(args: map of string to any, key: string) string
+func argString(args: ToolArgs, key: string) string
     v, ok := args[key]
     if not ok
         return ""
@@ -408,7 +410,7 @@ func argString(args: map of string to any, key: string) string
     return s
 
 # argInt extracts an int from the MCP args map with a default.
-func argInt(args: map of string to any, key: string, defaultVal: int) int
+func argInt(args: ToolArgs, key: string, defaultVal: int) int
     v, ok := args[key]
     if not ok
         return defaultVal
@@ -418,7 +420,7 @@ func argInt(args: map of string to any, key: string, defaultVal: int) int
     return n
 
 # argStringList extracts a list of strings from the MCP args map.
-func argStringList(args: map of string to any, key: string) list of string
+func argStringList(args: ToolArgs, key: string) list of string
     v, ok := args[key]
     if not ok
         return make(list of string, 0)
