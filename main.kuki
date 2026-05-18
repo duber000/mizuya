@@ -264,9 +264,7 @@ func doSearch(args: cli.Args)
     if query equals ""
         errPrint("--query is required")
         return
-    limit, err := cli.GetInt(args, "limit")
-    if err isnt empty
-        limit = 10
+    limit := cli.GetIntOr(args, "limit", 10)
 
     pool := openPool(args) onerr
         errPrint("cannot open database: {error}")
@@ -306,8 +304,8 @@ func doContext(args: cli.Args)
 
     defer db.Close(pool)
 
-    depth, derr := cli.GetInt(args, "depth")
-    if derr isnt empty or depth < 1
+    depth := cli.GetIntOr(args, "depth", 1)
+    if depth < 1
         depth = 1
 
     e := getEntity(pool, id) onerr
@@ -368,12 +366,8 @@ func doSimilar(args: cli.Args)
     if id equals "" and text equals ""
         errPrint("either --id or --text is required")
         return
-    limit, err := cli.GetInt(args, "limit")
-    if err isnt empty
-        limit = 5
-    threshold, terr := cli.GetInt(args, "threshold")
-    if terr isnt empty
-        threshold = 0
+    limit := cli.GetIntOr(args, "limit", 5)
+    threshold := cli.GetIntOr(args, "threshold", 0)
 
     pool := openPool(args) onerr
         errPrint("cannot open database: {error}")
@@ -418,9 +412,7 @@ func doSimilar(args: cli.Args)
 
 func doList(args: cli.Args)
     etype := cli.GetString(args, "type")
-    limit, err := cli.GetInt(args, "limit")
-    if err isnt empty
-        limit = 50
+    limit := cli.GetIntOr(args, "limit", 50)
 
     pool := openPool(args) onerr
         errPrint("cannot open database: {error}")
