@@ -4,7 +4,6 @@
 
 petiole main
 
-import "stdlib/cast"
 import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/mcp"
@@ -19,6 +18,40 @@ import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
 type ToolArgs = map of string to any
+
+# Tool argument structs — bound to each tool at registration via `mcp.ToolWithOpts of T`.
+# JSON tags match the snake_case property names declared in the tool's schema.
+
+type upsertEntityArgs
+    Id string as "id"
+    Type string as "type"
+    Name string as "name"
+    Summary string as "summary"
+    Tags list of string as "tags"
+
+type addObservationArgs
+    EntityId string as "entity_id"
+    Text string as "text"
+    Source string as "source"
+
+type relateArgs
+    Src string as "src"
+    Rel string as "rel"
+    Dst string as "dst"
+
+type searchArgs
+    Query string as "query"
+    Limit int as "limit"
+
+type getContextArgs
+    Id string as "id"
+    Depth int as "depth"
+
+type similarArgs
+    Id string as "id"
+    Text string as "text"
+    Limit int as "limit"
+    Threshold int as "threshold"
 
 # mcpDBPath is the database path used by the MCP server, set from the
 # --db flag before starting the server.
@@ -115,7 +148,7 @@ func registerUpsertEntity(server: reference mcp.Server)
     })
         |> mcp.Required({"id", "type", "name"})
 
-    mcp.ToolWithOpts(
+    mcp.ToolWithOpts of upsertEntityArgs(
         server,
         "upsert_entity",
         "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.",
@@ -124,27 +157,22 @@ func registerUpsertEntity(server: reference mcp.Server)
         handleUpsertEntity,
     )
 
-func handleUpsertEntity(args: ToolArgs) (any, error)
-    id := argString(args, "id")
-    etype := argString(args, "type")
-    name := argString(args, "name")
-    if id equals "" or name equals ""
+func handleUpsertEntity(args: upsertEntityArgs) (any, error)
+    if args.Id equals "" or args.Name equals ""
         return mcp.ErrorResult("id and name are required"), empty
 
+    etype := args.Type
     if etype equals ""
         etype = "concept"
-
-    summary := argString(args, "summary")
-    tags := argStringList(args, "tags")
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    upsertEntity(pool, id, etype, name, summary, tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
+    upsertEntity(pool, args.Id, etype, args.Name, args.Summary, args.Tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
 
-    reEmbed(pool, id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+    reEmbed(pool, args.Id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
-    e := getEntity(pool, id) onerr return mcp.ErrorResult("fetch failed: {error}"), empty
+    e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("fetch failed: {error}"), empty
     return entityJSON(e), empty
 
 # --- Tool: add_observation ---
@@ -157,7 +185,7 @@ func registerAddObservation(server: reference mcp.Server)
     })
         |> mcp.Required({"entity_id", "text"})
 
-    mcp.ToolWithOpts(
+    mcp.ToolWithOpts of addObservationArgs(
         server,
         "add_observation",
         "Record a fact or note about an entity. Appended to the entity's observation history.",
@@ -166,24 +194,22 @@ func registerAddObservation(server: reference mcp.Server)
         handleAddObservation,
     )
 
-func handleAddObservation(args: ToolArgs) (any, error)
-    id := argString(args, "entity_id")
-    text := argString(args, "text")
-    if id equals "" or text equals ""
+func handleAddObservation(args: addObservationArgs) (any, error)
+    if args.EntityId equals "" or args.Text equals ""
         return mcp.ErrorResult("entity_id and text are required"), empty
 
-    source := argString(args, "source")
+    source := args.Source
     if source equals ""
         source = "conversation"
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    addObservation(pool, id, text, source) onerr return mcp.ErrorResult("observe failed: {error}{suggestionsFor(pool, id)}"), empty
+    addObservation(pool, args.EntityId, args.Text, source) onerr return mcp.ErrorResult("observe failed: {error}{suggestionsFor(pool, args.EntityId)}"), empty
 
-    reEmbed(pool, id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+    reEmbed(pool, args.EntityId) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
-    return mcp.TextResult("observed: {text}"), empty
+    return mcp.TextResult("observed: {args.Text}"), empty
 
 # --- Tool: relate ---
 
@@ -199,7 +225,7 @@ func registerRelate(server: reference mcp.Server)
     })
         |> mcp.Required({"src", "rel", "dst"})
 
-    mcp.ToolWithOpts(
+    mcp.ToolWithOpts of relateArgs(
         server,
         "relate",
         "Create a typed edge between two entities in the knowledge graph.",
@@ -208,19 +234,16 @@ func registerRelate(server: reference mcp.Server)
         handleRelate,
     )
 
-func handleRelate(args: ToolArgs) (any, error)
-    src := argString(args, "src")
-    rel := argString(args, "rel")
-    dst := argString(args, "dst")
-    if src equals "" or rel equals "" or dst equals ""
+func handleRelate(args: relateArgs) (any, error)
+    if args.Src equals "" or args.Rel equals "" or args.Dst equals ""
         return mcp.ErrorResult("src, rel, and dst are required"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    relate(pool, src, rel, dst) onerr return mcp.ErrorResult("relate failed: {error}"), empty
+    relate(pool, args.Src, args.Rel, args.Dst) onerr return mcp.ErrorResult("relate failed: {error}"), empty
 
-    return mcp.TextResult("related: {src} --{rel}--> {dst}"), empty
+    return mcp.TextResult("related: {args.Src} --{args.Rel}--> {args.Dst}"), empty
 
 # --- Tool: search ---
 
@@ -235,7 +258,7 @@ func registerSearchTool(server: reference mcp.Server)
     })
         |> mcp.Required({"query"})
 
-    mcp.ToolWithOpts(
+    mcp.ToolWithOpts of searchArgs(
         server,
         "search",
         "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).",
@@ -244,17 +267,18 @@ func registerSearchTool(server: reference mcp.Server)
         handleSearch,
     )
 
-func handleSearch(args: ToolArgs) (any, error)
-    query := argString(args, "query")
-    if query equals ""
+func handleSearch(args: searchArgs) (any, error)
+    if args.Query equals ""
         return mcp.ErrorResult("query is required"), empty
 
-    limit := argInt(args, "limit", 10)
+    limit := args.Limit
+    if limit equals 0
+        limit = 10
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    hits := hybridSearch(pool, query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
+    hits := hybridSearch(pool, args.Query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
 
     data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
@@ -272,7 +296,7 @@ func registerGetContext(server: reference mcp.Server)
     })
         |> mcp.Required({"id"})
 
-    mcp.ToolWithOpts(
+    mcp.ToolWithOpts of getContextArgs(
         server,
         "get_context",
         "Get full context for an entity: its data, observations, and related entities up to N hops (default 1).",
@@ -281,24 +305,23 @@ func registerGetContext(server: reference mcp.Server)
         handleGetContext,
     )
 
-func handleGetContext(args: ToolArgs) (any, error)
-    id := argString(args, "id")
-    if id equals ""
+func handleGetContext(args: getContextArgs) (any, error)
+    if args.Id equals ""
         return mcp.ErrorResult("id is required"), empty
 
-    depth := argInt(args, "depth", 1)
+    depth := args.Depth
     if depth < 1
         depth = 1
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    e := getEntity(pool, id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, id)}"), empty
-    obs := listObservations(pool, id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+    e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, args.Id)}"), empty
+    obs := listObservations(pool, args.Id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
 
     if depth > 1
-        outReach := reachableOutgoing(pool, id, depth) onerr return mcp.ErrorResult("cannot read outgoing closure: {error}"), empty
-        inReach := reachableIncoming(pool, id, depth) onerr return mcp.ErrorResult("cannot read incoming closure: {error}"), empty
+        outReach := reachableOutgoing(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read outgoing closure: {error}"), empty
+        inReach := reachableIncoming(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read incoming closure: {error}"), empty
 
         payload := ToolArgs{
             "entity": e,
@@ -310,8 +333,8 @@ func handleGetContext(args: ToolArgs) (any, error)
         data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
         return mcp.TextResult(data as string), empty
 
-    outgoing := outgoingContext(pool, id) onerr return mcp.ErrorResult("cannot read outgoing: {error}"), empty
-    incoming := incomingContext(pool, id) onerr return mcp.ErrorResult("cannot read incoming: {error}"), empty
+    outgoing := outgoingContext(pool, args.Id) onerr return mcp.ErrorResult("cannot read outgoing: {error}"), empty
+    incoming := incomingContext(pool, args.Id) onerr return mcp.ErrorResult("cannot read incoming: {error}"), empty
 
     payload := ToolArgs{
         "entity": e,
@@ -337,7 +360,7 @@ func registerSimilarTool(server: reference mcp.Server)
         ),
     })
 
-    mcp.ToolWithOpts(
+    mcp.ToolWithOpts of similarArgs(
         server,
         "similar",
         "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly). Use threshold for percentile-based cutoff when k is unknown.",
@@ -346,27 +369,26 @@ func registerSimilarTool(server: reference mcp.Server)
         handleSimilar,
     )
 
-func handleSimilar(args: ToolArgs) (any, error)
-    id := argString(args, "id")
-    text := argString(args, "text")
-    if id equals "" and text equals ""
+func handleSimilar(args: similarArgs) (any, error)
+    if args.Id equals "" and args.Text equals ""
         return mcp.ErrorResult("either id or text is required"), empty
 
-    limit := argInt(args, "limit", 5)
-    threshold := argInt(args, "threshold", 0)
+    limit := args.Limit
+    if limit equals 0
+        limit = 5
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
     vec := make(list of float64, 0)
-    if id isnt ""
-        vec = getEmbedding(pool, id) onerr return mcp.ErrorResult("no embedding for {id}: {error}{suggestionsFor(pool, id)}"), empty
+    if args.Id isnt ""
+        vec = getEmbedding(pool, args.Id) onerr return mcp.ErrorResult("no embedding for {args.Id}: {error}{suggestionsFor(pool, args.Id)}"), empty
     else
-        vec = embedText(text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
+        vec = embedText(args.Text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
     hits := make(list of SimilarHit, 0)
-    if threshold > 0
-        hits = similarByPercentile(pool, vec, threshold) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+    if args.Threshold > 0
+        hits = similarByPercentile(pool, vec, args.Threshold) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
     else
         hits = similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
 
@@ -396,44 +418,6 @@ func openMCPPool() (db.Pool, error)
 func reEmbed(pool: db.Pool, id: string) error
     reEmbedIfChanged(pool, id) onerr return
     return empty
-
-# --- Argument helpers ---
-
-# argString extracts a string from the MCP args map.
-func argString(args: ToolArgs, key: string) string
-    v, ok := args[key]
-    if not ok
-        return ""
-    s, err := cast.SmartString(v)
-    if err isnt empty
-        return ""
-    return s
-
-# argInt extracts an int from the MCP args map with a default.
-func argInt(args: ToolArgs, key: string, defaultVal: int) int
-    v, ok := args[key]
-    if not ok
-        return defaultVal
-    n, err := cast.SmartInt(v)
-    if err isnt empty
-        return defaultVal
-    return n
-
-# argStringList extracts a list of strings from the MCP args map.
-func argStringList(args: ToolArgs, key: string) list of string
-    v, ok := args[key]
-    if not ok
-        return make(list of string, 0)
-    v |> switch as arr
-        when list of any
-            result := make(list of string, 0, len(arr))
-            for _, item in arr
-                s, err := cast.SmartString(item)
-                if err equals empty
-                    result = append(result, s)
-            return result
-
-    return make(list of string, 0)
 
 # entityJSON marshals an entity for MCP tool results.
 func entityJSON(e: Entity) any
