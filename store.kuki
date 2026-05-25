@@ -5,7 +5,6 @@ petiole main
 
 import "stdlib/crypto"
 import "stdlib/db"
-import "stdlib/files"
 import "stdlib/json" as jsonpkg
 import "stdlib/slice"
 import "stdlib/sqlite"
@@ -13,9 +12,7 @@ import "stdlib/string" as strpkg
 
 # openDB opens (or creates) the SQLite database at the given path.
 func openDB(dbPath: string) (db.Pool, error)
-    files.MkDirAll(files.Dirname(dbPath)) onerr return
-    pool := sqlite.Open(dbPath) onerr return
-    return pool, empty
+    return sqlite.OpenPath(dbPath)
 
 # --- Entity CRUD ---
 

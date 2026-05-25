@@ -23,7 +23,7 @@ func printEntityList(rows: list of Entity)
         return
     t := table.New({"id", "type", "name", "updated_at"})
     for e in rows
-        t = t |> table.AddRow({e.Id, e.Type, truncate(e.Name, 40), e.UpdatedAt})
+        t = t |> table.AddRow({e.Id, e.Type, strpkg.Truncate(e.Name, 40), e.UpdatedAt})
     t |> table.Print()
 
 func printSearchHits(hits: list of SearchHit)
@@ -34,7 +34,7 @@ func printSearchHits(hits: list of SearchHit)
     for h in hits
         t = t
             |> table.AddRow(
-                {h.Id, h.Type, truncate(h.Name, 40), truncate(h.Summary, 60)},
+                {h.Id, h.Type, strpkg.Truncate(h.Name, 40), strpkg.Truncate(h.Summary, 60)},
             )
     t |> table.Print()
 
@@ -47,17 +47,10 @@ func printSimilarHits(hits: list of SimilarHit)
         dist := fmt.Sprintf("%.4f", h.Distance)
         t = t
             |> table.AddRow(
-                {h.Id, h.Type, dist, truncate(h.Name, 40), truncate(h.Summary, 60)},
+                {h.Id, h.Type, dist, strpkg.Truncate(h.Name, 40), strpkg.Truncate(h.Summary, 60)},
             )
     t |> table.Print()
 
-# truncate shortens s to n chars with a trailing ellipsis when needed,
-# collapsing newlines to spaces so the result is safe for single-line display.
-func truncate(s: string, n: int) string
-    s = strpkg.ReplaceAll(s, "\n", " ")
-    if len(s) <= n
-        return s
-    return s[:n - 3] + "..."
 
 func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of ContextRow, obs: list of ObsRow)
     printEntityHeader(e)
