@@ -51,7 +51,6 @@ func printSimilarHits(hits: list of SimilarHit)
             )
     t |> table.Print()
 
-
 func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of ContextRow, obs: list of ObsRow)
     printEntityHeader(e)
     print("")

@@ -16,13 +16,21 @@ petiole main
 import "stdlib/env"
 import "stdlib/llm/embeddings"
 
+# EmbedProvider is the closed set of supported embedding backends.
+# ParseEmbedProvider validates the MIZUYA_EMBED_PROVIDER env var.
+enum EmbedProvider
+    Ollama = "ollama"
+    OpenAI = "openai"
+    Voyage = "voyage"
+    Cohere = "cohere"
+
 # embedConfig is the resolved embedding configuration. Empty provider means
 # fall back to hashEmbed and the package-level EmbedDim/EmbedModel constants.
 type embedConfig
-    provider string
-    url      string
-    model    string
-    apiKey   string
+    provider: string
+    url: string
+    model: string
+    apiKey: string
 
 # loadEmbedConfig reads embedding settings from environment variables and
 # applies provider-specific defaults.
@@ -49,7 +57,7 @@ func embedText(text: string) (list of float64, error)
         client = embeddings.BaseURL(client, cfg.url)
     if cfg.apiKey isnt ""
         client = embeddings.APIKey(client, cfg.apiKey)
-    vec32 := embeddings.EmbedOne(client, text) onerr return
+    vec32 := embeddings.EmbedOne(client, text)
     out := make(list of float64, len(vec32))
     for i, v in vec32
         out[i] = v as float64

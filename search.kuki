@@ -100,7 +100,7 @@ func similar(pool: db.Pool, vec: list of float64, k: int) (list of SimilarHit, e
 func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of SimilarHit, error)
     if pct <= 0 or pct > 100
         return empty, error "threshold must be in (0, 100], got {pct}"
-    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec") onerr return
+    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
     if count equals 0
         return make(list of SimilarHit, 0), empty
     blob := serializeVec(vec)

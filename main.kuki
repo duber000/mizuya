@@ -23,6 +23,7 @@ skill Mizuya
     version: "0.1.0"
 
 import "stdlib/cli"
+import "stdlib/color"
 import "stdlib/db"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
@@ -34,9 +35,13 @@ import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
-# validEntityTypes is the canonical entity-type list, surfaced both in
-# the CLI flag help and in the MCP tool schema so they don't drift.
-const validEntityTypes string = "project, tool, person, concept, config, org"
+# validEntityTypes is surfaced in CLI flag help and MCP tool schemas.
+# Built from AllEntityType() so it stays in sync with the enum declaration.
+func validEntityTypes() string
+    types := make(list of string, 0)
+    for t in AllEntityType()
+        types = append(types, t.String())
+    return strpkg.Join(types, ", ")
 
 func main()
     cli.New("mizuya")
@@ -55,7 +60,8 @@ func main()
             makeListCmd(),
             makeMCPCmd(),
         )
-        |> cli.Run() onerr cli.Fatal("{error}")
+        |> cli.Run() onerr
+            cli.Fatal("{error}")
 
 func makeInitCmd() reference cli.SubcommandDef
     return cli.NewCommand("init", "Initialize a new mizuya database")
@@ -64,7 +70,7 @@ func makeInitCmd() reference cli.SubcommandDef
 func makeUpsertCmd() reference cli.SubcommandDef
     return cli.NewCommand("upsert", "Create or update an entity")
         |> .StringFlag("id", "Entity id (slug)", "")
-        |> .StringFlag("type", "Entity type ({validEntityTypes})", "concept")
+        |> .StringFlag("type", "Entity type ({validEntityTypes()})", "concept")
         |> .StringFlag("name", "Human-readable name", "")
         |> .StringFlag("summary", "One-line summary", "")
         |> .StringFlag("tags", "Comma-separated tags", "")
@@ -127,12 +133,12 @@ func makeMCPCmd() reference cli.SubcommandDef
 func openPool(args: cli.Args) (db.Pool, error)
     dbPath := cli.GetString(args, "db")
     pool := openDB(dbPath) onerr return
-    sqliteext.Register(pool, vec1ext.Register) onerr return
-    sqliteext.Register(pool, regexpext.Register) onerr return
-    sqliteext.Register(pool, uuidext.Register) onerr return
-    sqliteext.Register(pool, statsext.Register) onerr return
-    sqliteext.Register(pool, spellfixext.Register) onerr return
-    sqliteext.Register(pool, unicodeext.Register) onerr return
+    sqliteext.Register(pool, vec1ext.Register)
+    sqliteext.Register(pool, regexpext.Register)
+    sqliteext.Register(pool, uuidext.Register)
+    sqliteext.Register(pool, statsext.Register)
+    sqliteext.Register(pool, spellfixext.Register)
+    sqliteext.Register(pool, unicodeext.Register)
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 
@@ -212,7 +218,7 @@ func doObserve(args: cli.Args)
     if id equals "" or text equals ""
         errPrint("--id and --text are required")
         return
-    source := strpkg.OrDefault(cli.GetString(args, "source"), "conversation")
+    source := strpkg.Or(cli.GetString(args, "source"), "conversation")
 
     pool := openPool(args) onerr
         errPrint("cannot open database: {error}")

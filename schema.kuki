@@ -97,6 +97,6 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, fuzzyIdsClearSQL) onerr return
         db.TxExec(tx, fuzzyIdsPopulateSQL) onerr return
         return empty
-    ) onerr return
+    )
 
     return empty
