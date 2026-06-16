@@ -61,7 +61,7 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
     # 4. Collect all candidate IDs and sort by RRF score descending.
     ids := maps.Keys(scores)
 
-    sort.By(ids, (a: string, b: string) bool =>
+    sort.By(ids, (a, b) =>
         scores[b] < scores[a]
     )
 
