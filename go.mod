@@ -20,7 +20,7 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	codeberg.org/kukichalang/kukicha/stdlib v0.52.0
+	codeberg.org/kukichalang/kukicha/stdlib v0.56.3
 )
 
 replace codeberg.org/kukichalang/kukicha/stdlib => ./.kukicha/stdlib
