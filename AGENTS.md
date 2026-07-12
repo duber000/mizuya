@@ -1,7 +1,7 @@
 <!-- kukicha:start -->
 ## Writing Kukicha
 
-Kukicha is a near-superset of Go: most Go compiles as-is — including `{ }` brace blocks — with a few exceptions (`range`, `case`/`default`, `struct {}`, `chan T`, `goto`, generic `[T]` declarations, parenthesized `const ( ... )`) that have Kukicha replacements. Go-compat forms are for migration, not authoring: **always write Kukicha syntax** (4-space indentation, `and`/`or`/`not`, `list of T`, `onerr`, pipes, enums) and use Kukicha's stdlib (`stdlib/*`) over raw Go packages. Fall back to Go only when Kukicha has no equivalent.
+Kukicha is a near-superset of Go: most Go compiles as-is — including `{ }` brace blocks — with a few exceptions (`range`, `case`/`default`, `struct {}`, `chan T`, `goto`, generic `[T]` declarations, parenthesized `const ( ... )`, Go-style `type X interface { ... }` declarations, and C-style `for init; cond; post { }` loops) that have Kukicha replacements. Go-compat forms are for migration, not authoring: **always write Kukicha syntax** (4-space indentation, `and`/`or`/`not`, `list of T`, `onerr`, pipes, enums) and use Kukicha's stdlib (`stdlib/*`) over raw Go packages. Fall back to Go only when Kukicha has no equivalent.
 
 Comments start with `#` (Go's `//` is not a comment in Kukicha — it parses as two division operators).
 
@@ -58,6 +58,7 @@ func main()
 | `for item in items` | `for _, item := range items` |
 | `for i from 0 to 10` | `for i := 0; i < 10; i++` |
 | `for i from 0 through 10` | `for i := 0; i <= 10; i++` |
+| `interface Reader` + indented methods | `type Reader interface { ... }` |
 | 4-space indentation | `{ }` braces |
 
 `func`/`var`/`const`/`enum` have aliases `function`/`variable`/`constant`/`enumeration`: use the short forms in production code; the long forms are for beginner tutorials only.
@@ -126,9 +127,11 @@ prompt := """
 - `"""..."""` — multi-line prose (prompts, markdown, long error messages).
 - `'...'` — content with embedded double quotes (HTML, SQL). Single- or multi-line.
 
-**`{` always starts interpolation** whenever a matching `}` appears before the string ends — `{a + b}`, `{user.Name}`, `{len(xs)}` all interpolate. Only `{}` (empty), a lone `{`, and partial snippets like `"{\"key\":"` stay literal. Escape intentional literal braces with `\{` `\}`, or use backticks for brace-heavy content — `"{\"k\": \"v\"}"`-style JSON in an interpolating string is a parse error, not literal text. Quoted string literals work *inside* interpolation directly — `print("{row["name"]}")` and `print("{string.ToUpper("hi")}")` both parse, no escaping of the inner quotes needed.
+**`{` always starts interpolation** whenever a matching `}` appears before the string ends — `{a + b}`, `{user.Name}`, `{len(xs)}` all interpolate. Only `{}` (empty), a lone `{`, and partial snippets like `"{\"key\":"` stay literal. Escape intentional literal braces with `\{` `\}`, or use backticks for brace-heavy content — `"{\"k\": \"v\"}"`-style JSON in an interpolating string is a parse error, not literal text. For actual JSON production, use `json.String` / `json.PrettyString` instead of hand-writing JSON text — the codec avoids the interpolation rule entirely. Quoted string literals work *inside* interpolation directly — `print("{row["name"]}")` and `print("{string.ToUpper("hi")}")` both parse, no escaping of the inner quotes needed.
 
 There are no rune literals — `'x'` is a one-character *string*, not a Go `rune`.
+
+`fmt.Sprintf` remains the right tool for format verbs interpolation can't express — width/precision (`%-20s`), zero-padding (`%08d`), scientific notation (`%e`). The `sprintf-interpolation` lint fires on any `fmt.Sprintf` in `.kuki` source to steer plain `%s`/`%d` cases to interpolation; suppress with `--suppress-lint=stdlib-idiom` when a format verb justifies the call.
 
 ### Types
 
@@ -153,6 +156,10 @@ type TextContent = mcp.TextContent
 type UserMap = map of string to reference User
 
 func MergeUsers(primary: UserMap, secondary: UserMap, overrides: list of UserMap) UserMap
+
+# Interface — methods listed in an indented block (not `type X interface { }`)
+interface Validatable
+    Validate() list of FieldError
 ```
 
 ### Optional references
@@ -387,6 +394,17 @@ func parseKind(s: string) (string, error)
 
 # Shorthand .Field / .Method() — pipe context only
 name := user |> .Name
+
+# Shorthand .Method() on collections dispatches to the matching stdlib
+# package based on the piped value's type kind:
+#   list of T  → slice.*    (xs |> .Filter(f) → slice.Filter(xs, f))
+#   map of K V → maps.*     (m |> .Keys() → maps.Keys(m))
+#   string     → string.*   (s |> .ToUpper() → string.ToUpper(s))
+# This is the canonical fluent pipeline form — no Go generic methods needed.
+result := users
+    |> .Filter(u => u.active)
+    |> .Map(u => u.name)
+    |> .Reverse()
 ```
 
 ### Control Flow
@@ -401,12 +419,17 @@ else if count < 10
 for item in items
     process(item)
 
-# Map iteration — `for x in m` yields *values*, not keys. (Careful: opposite
-# of Go's single-variable `range` and Python's `for k in d`.)
+# Map iteration — `for x in m` yields KEYS (matching Go and Python).
+# Use the two-variable form for key + value. Named discards (`_k`, `_v`)
+# make single-aspect iteration self-documenting.
+for k in scores           # k = key (matches Go and Python)
+    print(k)
 for k, v in scores         # k = key, v = value
     print("{k}: {v}")
-for k, _ in scores         # keys only
+for k, _v in scores       # keys only (named value discard)
     print(k)
+for _k, v in scores       # values only (named key discard)
+    print(v)
 
 for i from 0 to 10        # 0..9 (exclusive)
     continue
@@ -536,6 +559,8 @@ if v is string as s
     print("text: " + s)               # s is a string here
 if v is reference Task as task
     print(task.name)
+if v is ext.Vec3 as vec               # imported Go struct types narrow too
+    print(vec.X)
 ok := v is int                        # bool form, no binding
 
 # Type switch for 3+ alternatives (see Control Flow)
@@ -621,6 +646,7 @@ kukicha fmt -w <target>       # format in place (use --check in CI)
 kukicha context <target>      # project metadata as JSON (for agents)
 kukicha context --graph <target>  # add the knowledge graph: nodes + call/import edges
 kukicha context --stdlib      # stdlib API index as JSON: signatures + docs + security/deprecated/panics tags
+kukicha context --stdlib --level=recommended  # filter to beginner-friendly wrappers (untagged symbols excluded; default stays complete)
 kukicha brew <target>         # convert .kuki → standalone .go (publication only)
 kukicha audit [--source=govulncheck|pkgsite|both] [--json] [--warn-only] [dir]  # vulnerability check
 kukicha pack [--output dir] <skill.kuki>  # package a skill for distribution
@@ -632,7 +658,7 @@ kukicha infer-nullable [--apply|--diff] <target>  # suggest/apply optional refer
 kukicha explain <code>        # title + summary + reproducer + fix recipe for a diagnostic code or concept/* construct (--list to enumerate)
 ```
 
-Run `kukicha <cmd> --help` for flags. Common ones: `--json` (structured diagnostics on `check`/`build`/`run`/`fmt`/`audit`), `--wasm`/`--vulncheck`/`--debug` (build), `--strict`/`--strict-security` (check), `--package-context` (single-file `check`/`build` that resolves refs into sibling `.kuki` files), `--target` (build/run override). When the compiler emits a diagnostic with a stable code (e.g. `[semantic/deref-nullable]`), `kukicha explain <code>` prints the full recipe; the same command teaches language constructs via the `concept/*` namespace (`kukicha explain concept/pipes`, `concept/onerr`, `concept/variant-enums`, …). Run `kukicha fmt -w` before committing.
+Run `kukicha <cmd> --help` for flags. Common ones: `--json` (structured diagnostics on `check`/`build`/`run`/`fmt`/`audit`), `--wasm`/`--vulncheck`/`--debug` (build), `--strict`/`--strict-security` (check), `--package-context` (single-file `check`/`build` that resolves refs into sibling `.kuki` files), `--target` (build/run override). When the compiler emits a diagnostic with a stable code (e.g. `[semantic/deref-nullable]`), `kukicha explain <code>` prints the full recipe; the same command teaches language constructs via the `concept/*` namespace (`kukicha explain concept/pipes`, `concept/onerr`, `concept/variant-enums`, `concept/go-compat-lints`, `concept/raw-go-interop`, `concept/recommended-wrappers`, …). Run `kukicha fmt -w` before committing.
 
 **Compiler directives** — `# kuki:...` comments attached above a declaration or statement:
 
@@ -642,6 +668,7 @@ Run `kukicha <cmd> --help` for flags. Common ones: `--json` (structured diagnost
 # kuki:security "cat"     # func: security sink; cat = sql|html|fetch|files|redirect|shell|regex
 # kuki:validate "rules"   # struct field: generate Validate() (see the validate package)
 # kuki:returns N          # statement: declare return-arity of an unresolvable external Go call
+# kuki:level "recommended" # stdlib func: "recommended" (beginner-first wrapper) or "advanced" (escape hatch); surfaces in `context --stdlib --level`
 # kuki:embed PATTERN      # var: emit //go:embed PATTERN above `var name embed.FS` / `string` / `[]byte`
 ```
 
@@ -683,11 +710,11 @@ The stdlib is extracted to `.kukicha/stdlib/` on `kukicha init` — **read the `
 
 **Collections & strings.** `stdlib/slice` (`Filter`/`Map`/`Reject`/`Partition`/`Sort`/`First`/`FindOr`/`Sum`/`Min`/`Max`…), `stdlib/maps`, `stdlib/set`, `stdlib/sort` (`By`/`ByKey`), `stdlib/string` as `strpkg`, `stdlib/regex` (`MustCompile` + `*Compiled` variants), `stdlib/iterator` (lazy `iter.Seq`), `stdlib/cast` (`SmartInt`/`SmartBool`/`IsNil`…), `stdlib/math` (`Abs`/`Round`/`Clamp` — reach for Go's `math` for `Sqrt`/`Pow`/…).
 
-**Data & encoding.** `stdlib/json` as `jsonpkg`, `stdlib/parse` (typed `parse.JSON of T from text`, also YAML/Form/Env/CSV/Int/URL — auto-runs `Validate()`), `stdlib/encoding` (base64/hex), `stdlib/template`, `stdlib/markdown` (CommonMark+GFM, pair with `http.SafeHTML` for untrusted input).
+**Data & encoding.** `stdlib/json` as `jsonpkg` (`String`/`PrettyString` for JSON production — prefer over hand-written JSON strings that hit the interpolation rule; `Bytes`/`PrettyBytes` for `[]byte`; naming-aware `Codec` for tag-free JSON — `NewCodec(json.SnakeCase).Omit("Password") |> EncodeWith(v)`; `c |> DecodeStringWith of T from data`), `stdlib/parse` (typed `parse.JSON of T from text`, also YAML/Form/Env/CSV/Int/URL — auto-runs `Validate()`), `stdlib/encoding` (base64/hex), `stdlib/template`, `stdlib/markdown` (CommonMark+GFM, pair with `http.SafeHTML` for untrusted input).
 
 **I/O & files.** `stdlib/files` (`Read`/`Write`/`Copy`/`List`/`Watch`/…), `stdlib/archive` (zip+tar.gz, zip-slip + decompression-bomb safe), `stdlib/sandbox` (filesystem jail for HTTP handlers), `stdlib/shell` (`Output`/`Lines`/`Capture` + `shell.New |> .Dir |> .Env |> .Stdin |> .Output()` builder), `stdlib/blob` (unified S3-compatible object storage client — AWS S3, Cloudflare R2, GCS, MinIO, Backblaze B2, Wasabi; `OpenEnv`/`Put`/`Get`/`ListAll`).
 
-**HTTP & networking.** `stdlib/fetch` (client with builder, auth, retry, SSRF — `Get`/`SafeGet`/`GetJSON of T from url`), `stdlib/http` as `httphelper` (`JSON*` responders, `SafeRedirect`, `SafeHTML`, `TrustedHosts` middleware, `RealIP` for client-IP behind a proxy), `stdlib/html` (auto-escaping components), `stdlib/netguard` (SSRF guards), `stdlib/url` (parse/build/encode, `MustParse` for startup, `CleanPath`/`IsSubpath` for traversal-safe paths), `stdlib/shellguard` (subprocess allowlist for agent ops, fail-closed), `stdlib/policy` (approval-gate variant for agent ops, fail-closed).
+**HTTP & networking.** `stdlib/fetch` (client with builder, auth, retry, SSRF — `Get`/`SafeGet`/`GetJSON of T from url`), `stdlib/http` as `httphelper` (`JSON*` responders, `SafeRedirect`, `SafeHTML`, `TrustedHosts` middleware, `RealIP` for client-IP behind a proxy), `stdlib/html` (auto-escaping components; `html.Raw` for pre-rendered trusted HTML like `markdown.ToHTML` output), `stdlib/netguard` (SSRF guards), `stdlib/url` (parse/build/encode, `MustParse` for startup, `CleanPath`/`IsSubpath` for traversal-safe paths), `stdlib/shellguard` (subprocess allowlist for agent ops, fail-closed), `stdlib/policy` (approval-gate variant for agent ops, fail-closed).
 
 **CLI & system.** `stdlib/cli` (flag/subcommand parser — prefer typed `BoolFlag`/`IntFlag`/`StringFlag` over generic `AddFlag`), `stdlib/input` (`Prompt`/`Confirm`/`Choose`, `NewForm`), `stdlib/table`, `stdlib/color`, `stdlib/term` (**single source of truth for tty/color/width — `IsTTY`/`VisibleWidth`/`PadRightVisible`**), `stdlib/log` (leveled structured logger), `stdlib/env` (`Get`/`GetOr`/`GetInt`/`GetBool`), `stdlib/must` (panic-on-error startup), `stdlib/signal` (`WaitFor`/`Context` with English signal names).
 
@@ -695,7 +722,7 @@ The stdlib is extracted to `.kukicha/stdlib/` on `kukicha init` — **read the `
 
 **Data & storage.** `stdlib/db` as `dbpkg` (SQL with struct scanning: `Query |> ScanAll of T`), `stdlib/sqlite` (WAL/foreign-keys defaults; queries go through `stdlib/db`), `stdlib/sqliteext` (register ncruces extensions — process-global, one-shot at startup), `stdlib/audit` (tamper-evident hash-chained ed25519-signed decision log for agents — `audit.Record` for decisions, `log.Info` for breadcrumbs).
 
-**Security & crypto.** `stdlib/crypto` (`SHA256`/`HMAC`/`RandomToken`/`Equal`), `stdlib/validate` (pipe-style + `# kuki:validate "rules"` tag-driven; pairs with `parse.JSON of T from body`), `stdlib/random`, `stdlib/errors` as `errs` (`Wrap`/`Opaque`/`Is`/`NewPublic`).
+**Security & crypto.** `stdlib/crypto` (`SHA256`/`HMAC`/`RandomToken`/`Equal`/`SignMLDSA`), `stdlib/uuid` (`New`/`Parse`), `stdlib/validate` (pipe-style + `# kuki:validate "rules"` tag-driven; pairs with `parse.JSON of T from body`), `stdlib/random`, `stdlib/errors` as `errs` (`Wrap`/`Opaque`/`Is`/`NewPublic`).
 
 **DevOps.** `stdlib/git` (via `gh`), `stdlib/semver`, `stdlib/obs`.
 
@@ -826,6 +853,8 @@ go test ./internal/foo/...                                     # or go test ./..
 **`in` / `not in` are membership operators**: `x in xs` works on lists (element comparison), maps (key lookup), and strings (substring). For lists with non-comparable element types (slices, maps, funcs as elements), use `slice.Contains` with a custom predicate. `in` also still drives `for` loops.
 
 **`ctxpkg.WithTimeout` (and `WithCancel`/`WithDeadline`) returns `Handle` by value**, not `reference Handle` — a helper signed `func New() reference ctxpkg.Handle` won't compile; return the bare type. And `defer h.Cancel()` belongs in the function that *uses* the resource, not a builder that returns it (a defer in the builder kills the context before the caller can use it).
+
+**`fetch.WithContext` makes the context the sole deadline source** — it clears any fetch-level `Timeout` (including the 30s default) so the two can't race. If you want a fetch-level timeout after attaching a context, call `fetch.Timeout()` *after* `fetch.WithContext` in the pipe chain; the later call wins. Reversing the order (`Timeout |> WithContext`) silently drops the fetch-level timeout and only the context deadline applies.
 
 **Discards.** Kukicha forbids `_ = call()` for sole-value discards — call the function as a bare statement and let `onerr` handle the error. Multi-return destructuring (`_, err := f()`) is allowed, but if two or more callers spell the same return slot as `_`, the signature is wrong — drop the return rather than spreading discards across call sites.
 

@@ -87,7 +87,7 @@ func registerResources(server: reference mcp.Server)
         "entity://list",
         "Entity list",
         "All knowledge-graph entities",
-        listEntitiesResource,
+        mcp.TextResourceFunc(listEntitiesResource),
     )
     entityTemplate := "entity://" + "{" + "id}"
     mcp.TextResourceTemplate(
@@ -95,7 +95,7 @@ func registerResources(server: reference mcp.Server)
         entityTemplate,
         "Entity context",
         "Full context: data, observations, and relations for an entity",
-        entityContextResource,
+        mcp.TextResourceFunc(entityContextResource),
     )
 
 func listEntitiesResource(uri: string) (string, error)

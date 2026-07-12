@@ -1,6 +1,6 @@
 module mizuya
 
-go 1.26.4
+go 1.27rc2
 
 require (
 	github.com/kukichalang/kukicha v0.49.0
@@ -20,7 +20,7 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	codeberg.org/kukichalang/kukicha/stdlib v0.56.3
+	codeberg.org/kukichalang/kukicha/stdlib v0.59.1
 )
 
 replace codeberg.org/kukichalang/kukicha/stdlib => ./.kukicha/stdlib
