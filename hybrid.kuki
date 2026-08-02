@@ -30,7 +30,7 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
 
     # 2. Vector similarity search — embed the query text and compare.
     vec, embedErr := embedText(query)
-    vecHits := make(list of SimilarHit, 0)
+    vecHits := empty list of SimilarHit
     vecErr := embedErr
     if embedErr equals empty
         vecHits, vecErr = similar(pool, vec, fetchLimit)

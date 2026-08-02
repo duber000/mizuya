@@ -380,13 +380,13 @@ func handleSimilar(args: similarArgs) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    vec := make(list of float64, 0)
+    vec := empty list of float64
     if args.Id isnt ""
         vec = getEmbedding(pool, args.Id) onerr return mcp.ErrorResult("no embedding for {args.Id}: {error}{suggestionsFor(pool, args.Id)}"), empty
     else
         vec = embedText(args.Text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
-    hits := make(list of SimilarHit, 0)
+    hits := empty list of SimilarHit
     if args.Threshold > 0
         hits = similarByPercentile(pool, vec, args.Threshold) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
     else

@@ -38,7 +38,7 @@ import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 # validEntityTypes is surfaced in CLI flag help and MCP tool schemas.
 # Built from AllEntityType() so it stays in sync with the enum declaration.
 func validEntityTypes() string
-    types := make(list of string, 0)
+    types := empty list of string
     for t in AllEntityType()
         types = append(types, t.String())
     return strpkg.Join(types, ", ")
@@ -279,7 +279,7 @@ func doSearch(args: cli.Args)
     defer db.Close(pool)
 
     useRegex := cli.GetBool(args, "regex")
-    hits := make(list of SearchHit, 0)
+    hits := empty list of SearchHit
     if useRegex
         hits = regexSearch(pool, query, limit) onerr
             errPrint("regex search failed: {error}")
@@ -381,7 +381,7 @@ func doSimilar(args: cli.Args)
 
     defer db.Close(pool)
 
-    vec := make(list of float64, 0)
+    vec := empty list of float64
     if id isnt ""
         v, err := getEmbedding(pool, id)
         if err isnt empty
@@ -393,7 +393,7 @@ func doSimilar(args: cli.Args)
             errPrint("cannot compute embedding: {error}")
             return
 
-    hits := make(list of SimilarHit, 0)
+    hits := empty list of SimilarHit
     if threshold > 0
         hits = similarByPercentile(pool, vec, threshold) onerr
             errPrint("similarity query failed: {error}")

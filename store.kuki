@@ -49,7 +49,7 @@ func deleteEntity(pool: db.Pool, id: string) error
 # listEntities returns all entities, optionally filtered by type.
 func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, error)
     q := "SELECT id, type, name, json(data) AS data, created_at, updated_at FROM entities"
-    args := make(list of any, 0)
+    args := empty list of any
     if etype isnt ""
         q = q + " WHERE type = ?"
         args = append(args, etype)

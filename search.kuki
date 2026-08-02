@@ -102,7 +102,7 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of
         return empty, error "threshold must be in (0, 100], got {pct}"
     count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
     if count equals 0
-        return make(list of SimilarHit, 0), empty
+        return empty list of SimilarHit, empty
     blob := serializeVec(vec)
     knnArg := "\{k: {count}\}"
     q := "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists) ORDER BY d.d ASC"

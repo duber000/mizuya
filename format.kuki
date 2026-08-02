@@ -156,7 +156,7 @@ func suggestionsFor(pool: db.Pool, id: string) string
 # dropping empty entries.
 func parseTags(raw: string) list of string
     if raw equals ""
-        return make(list of string, 0)
+        return empty list of string
     return strpkg.Split(raw, ",")
         |> slice.Map(s => strpkg.TrimSpace(s))
         |> slice.Filter(s => s isnt "")

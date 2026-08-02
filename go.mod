@@ -3,8 +3,8 @@ module mizuya
 go 1.27rc2
 
 require (
-	github.com/kukichalang/kukicha v0.49.0
 	github.com/ncruces/go-sqlite3 v0.34.4
+	kukicha.org/kukicha/stdlib v0.73.0
 )
 
 require (
@@ -18,9 +18,9 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
-	codeberg.org/kukichalang/kukicha/stdlib v0.59.1
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
+
 )
 
-replace codeberg.org/kukichalang/kukicha/stdlib => ./.kukicha/stdlib
+replace kukicha.org/kukicha/stdlib => ./.kukicha/stdlib
