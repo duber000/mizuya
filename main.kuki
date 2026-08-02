@@ -25,8 +25,11 @@ skill Mizuya
 import "stdlib/cli"
 import "stdlib/color"
 import "stdlib/db"
+import "stdlib/files"
+import "stdlib/log"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
+import "strings"
 
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
 import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
@@ -59,6 +62,7 @@ func main()
             makeSimilarCmd(),
             makeListCmd(),
             makeMCPCmd(),
+            makeImportOpenWikiCmd(),
         )
         |> cli.Run() onerr
             cli.Fatal("{error}")
@@ -124,6 +128,11 @@ func makeListCmd() reference cli.SubcommandDef
 func makeMCPCmd() reference cli.SubcommandDef
     return cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
         |> .Action(doMCP)
+
+func makeImportOpenWikiCmd() reference cli.SubcommandDef
+    return cli.NewCommand("import-openwiki", "Import an OpenWiki corpus into the knowledge graph")
+        |> .RestArg("dir", "Path to a directory containing an openwiki/ folder")
+        |> .Action(doImportOpenWiki)
 
 # --- Command handlers ---
 
@@ -439,3 +448,194 @@ func doMCP(args: cli.Args)
     dbPath := cli.GetString(args, "db")
     startMCP(dbPath) onerr
         errPrint("MCP server error: {error}")
+
+# OpenWikiDoc holds a parsed wiki page between the two import passes.
+type OpenWikiDoc
+    Slug: string
+    Body: string
+
+# --- import-openwiki ---
+
+# doImportOpenWiki parses an OpenWiki corpus (openwiki/*.md with OKF front
+# matter) into mizuya entities + relations. Each concept doc becomes an
+# entity (id = filename stem, type = concept or from front matter, tagged
+# "openwiki"); each markdown link [text](other.md) becomes a `references`
+# edge. Re-importing is idempotent — upsertEntity is ON CONFLICT, and
+# reEmbedIfChanged short-circuits when the content hash hasn't changed.
+func doImportOpenWiki(args: cli.Args)
+    rest := cli.GetRest(args, "dir")
+    if len(rest) equals 0
+        errPrint("usage: mizuya import-openwiki <dir>")
+        return
+    baseDir := rest[0]
+
+    openwikiDir := files.Join(baseDir, "openwiki")
+    if not files.Exists(openwikiDir)
+        errPrint("no openwiki/ directory found at {baseDir}")
+        return
+
+    pool := openPool(args) onerr
+        errPrint("cannot open database: {error}")
+        return
+
+    defer db.Close(pool)
+
+    entries, lErr := files.Walk(openwikiDir)
+    if lErr isnt empty
+        errPrint("cannot walk openwiki dir: {lErr}")
+        return
+
+    imported := 0
+    linked := 0
+    # First pass: upsert all entities so links can resolve to any doc
+    # regardless of Walk order.
+    docs := empty list of OpenWikiDoc
+    for entry in entries
+        if entry.IsDir or not strpkg.HasSuffix(entry.Name, ".md")
+            continue
+        # slug = path relative to openwiki/ with .md stripped (e.g.
+        # "architecture/overview" for openwiki/architecture/overview.md).
+        relPath := strpkg.TrimPrefix(entry.Path, openwikiDir + "/")
+        slug := strpkg.TrimSuffix(relPath, ".md")
+        raw := files.ReadString(entry.Path) onerr
+            log.Warn("import-openwiki: skipping unreadable file", "file", entry.Path, "err", error)
+            continue
+
+        fm, body := parseOKFFrontMatter(raw)
+        name := strpkg.Or(fm["title"], slug)
+        summary := strpkg.Or(fm["description"], firstParagraph(body))
+        etype := strpkg.Or(strpkg.ToLower(fm["type"]), "concept")
+        if etype isnt "concept" and etype isnt "feature" and etype isnt "project" and etype isnt "tool" and etype isnt "person" and etype isnt "config" and etype isnt "org"
+            etype = "concept"
+        tags := list of string{"openwiki"}
+        if fm["type"] isnt ""
+            tags = append(tags, strpkg.ToLower(fm["type"]))
+        fmTagsRaw := fm["tags"]
+        fmTagsRaw = strpkg.TrimPrefix(fmTagsRaw, "[")
+        fmTagsRaw = strpkg.TrimSuffix(fmTagsRaw, "]")
+        fmTags := strpkg.Split(fmTagsRaw, ",")
+        for t in fmTags
+            t = strpkg.TrimSpace(t)
+            if t isnt ""
+                tags = append(tags, t)
+
+        upsertEntity(pool, slug, etype, name, summary, tags) onerr
+            log.Warn("import-openwiki: upsert failed", "slug", slug, "err", error)
+            continue
+
+        reEmbedIfChanged(pool, slug) onerr discard
+        docs = append(docs, OpenWikiDoc{Slug: slug, Body: body})
+        imported = imported + 1
+
+    # Second pass: create references edges now that all entities exist.
+    for doc in docs
+        slug := doc.Slug
+        body := doc.Body
+        srcDir := ""
+        if slashIdx := strpkg.LastIndex(slug, "/"); slashIdx >= 0
+            srcDir = slug[:slashIdx + 1]
+        links := extractMarkdownLinks(body)
+        for dst in links
+            # Skip external URLs, anchors, absolute paths, and directory links.
+            if strpkg.HasPrefix(dst, "http") or strpkg.HasPrefix(dst, "#") or strpkg.HasPrefix(dst, "/") or strpkg.HasSuffix(dst, "/")
+                continue
+            # Resolve relative to the source doc's directory, then strip
+            # ../ prefixes and .md to get the full slug.
+            dstPath := srcDir + dst
+            dstPath = strpkg.ReplaceAll(dstPath, "../", "")
+            dstSlug := strpkg.TrimSuffix(dstPath, ".md")
+            if dstSlug equals slug
+                continue
+            # Only relate if the target entity exists (avoid FK violations).
+            _, dErr := getEntity(pool, dstSlug)
+            if dErr isnt empty
+                continue
+            relate(pool, slug, "references", dstSlug) onerr
+                log.Warn(
+                    "import-openwiki: relate failed",
+                    "src",
+                    slug,
+                    "dst",
+                    dstSlug,
+                    "err",
+                    error,
+                )
+                continue
+
+            linked = linked + 1
+
+    if cli.IsJSON(args)
+        printJSON({"status": "imported", "entities": imported, "links": linked})
+    else
+        print("{color.Green("imported")} {imported} entities, {linked} links from {openwikiDir}")
+
+# parseOKFFrontMatter splits raw markdown into front matter (the YAML-like
+# block between --- delimiters) and body. Returns a map of key->value from
+# the front matter, plus the body. If no front matter, returns an empty map
+# and the full text as body.
+func parseOKFFrontMatter(raw: string) (map of string to string, string)
+    fm := make(map of string to string)
+    lines := strpkg.Split(raw, "\n")
+    if len(lines) equals 0 or lines[0] isnt "---"
+        return fm, raw
+    i := 1
+    for i < len(lines)
+        if lines[i] equals "---"
+            break
+        parseKV(lines[i], fm)
+        i = i + 1
+    if i >= len(lines)
+        return fm, raw
+    body := strpkg.Join(lines[i + 1:], "\n")
+    return fm, body
+
+# parseKV parses a single "key: value" line into the map. Handles optional
+# quotes around the value.
+func parseKV(line: string, fm: map of string to string)
+    idx := strpkg.Index(line, ":")
+    if idx < 0
+        return
+    key := strpkg.TrimSpace(line[:idx])
+    val := strpkg.TrimSpace(line[idx + 1:])
+    # Strip surrounding quotes: "value" or 'value'.
+    val = strpkg.TrimPrefix(val, "\"")
+    val = strpkg.TrimSuffix(val, "\"")
+    val = strpkg.TrimPrefix(val, "'")
+    val = strpkg.TrimSuffix(val, "'")
+    fm[key] = val
+
+# firstParagraph returns the first non-heading, non-empty line of the body,
+# as a plain-text summary fallback when the description front-matter is absent.
+func firstParagraph(body: string) string
+    lines := strpkg.Split(body, "\n")
+    for line in lines
+        t := strpkg.TrimSpace(line)
+        if t isnt "" and not strpkg.HasPrefix(t, "#")
+            return t
+    return ""
+
+# extractMarkdownLinks scans body text for [text](target.md) patterns and
+# returns the list of target paths.
+func extractMarkdownLinks(body: string) list of string
+    links := empty list of string
+    pos := 0
+    for true
+        openBracket := strings.Index(body[pos:], "[")
+        if openBracket < 0
+            break
+        openBracket = openBracket + pos
+        closeBracket := strings.Index(body[openBracket + 1:], "]")
+        if closeBracket < 0
+            break
+        closeBracket = closeBracket + openBracket + 1
+        if closeBracket + 1 >= len(body) or not strpkg.HasPrefix(body[closeBracket + 1:], "(")
+            pos = closeBracket + 1
+            continue
+        closeParen := strings.Index(body[closeBracket + 2:], ")")
+        if closeParen < 0
+            break
+        closeParen = closeParen + closeBracket + 2
+        target := body[closeBracket + 2:closeParen]
+        links = append(links, target)
+        pos = closeParen + 1
+    return links
