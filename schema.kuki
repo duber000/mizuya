@@ -5,6 +5,7 @@
 petiole main
 
 import "stdlib/db"
+import "stdlib/sqlite"
 
 # --- Table DDL ---
 
@@ -21,7 +22,7 @@ const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL RE
 # filtered individually. The id default uses uuid(7) for time-ordered
 # UUIDs (better B-tree locality than v4) — requires the uuid extension
 # registered before any INSERT.
-const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (datetime('now')))"
+const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (datetime('now')), distilled INTEGER NOT NULL DEFAULT 0)"
 
 # Embeddings live in a vec1 virtual table. The 'flat' index does brute-force
 # scan inside vec1 (no training step) — fine for thousands of entities.
@@ -63,6 +64,11 @@ const idxEntityUpdated = "CREATE INDEX IF NOT EXISTS idx_entities_updated ON ent
 # composite index serves listObservations without a sort.
 const idxObsEntity = "CREATE INDEX IF NOT EXISTS idx_observations_entity_at ON observations(entity_id, at DESC)"
 
+# Index for filtering undistilled observations in distillation queries.
+const idxObsDistilled = "CREATE INDEX IF NOT EXISTS idx_observations_distilled ON observations(distilled, at DESC) WHERE distilled = 0"
+
+const migrateObsDistilledSQL = "ALTER TABLE observations ADD COLUMN distilled INTEGER NOT NULL DEFAULT 0"
+
 # --- Spellfix1 fuzzy index over entity ids ---
 # spellfix1 is a virtual table that supports approximate-match lookups
 # against a vocabulary. We populate it from entities.id at startup so a
@@ -93,10 +99,30 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, idxEntityType) onerr return
         db.TxExec(tx, idxEntityUpdated) onerr return
         db.TxExec(tx, idxObsEntity) onerr return
+        db.TxExec(tx, idxObsDistilled) onerr return
         db.TxExec(tx, fuzzyIdsSQL) onerr return
         db.TxExec(tx, fuzzyIdsClearSQL) onerr return
         db.TxExec(tx, fuzzyIdsPopulateSQL) onerr return
         return empty
     )
 
+    migrateObsDistilled(pool)
     return empty
+
+# migrateObsDistilled adds the observations.distilled column for databases
+# created before it was folded into the CREATE TABLE statement.
+func migrateObsDistilled(pool: db.Pool) error
+    if columnExists(pool, "observations", "distilled")
+        return empty
+    db.Exec(pool, migrateObsDistilledSQL) onerr return
+    return empty
+
+# columnExists checks whether a column exists on a table using PRAGMA
+# table_info. Used by ADD COLUMN migrations to guard against "duplicate
+# column name" errors on fresh databases.
+func columnExists(pool: db.Pool, table: string, column: string) bool
+    cols := sqlite.Columns(pool, table) onerr return false
+    for col in cols
+        if col.Name equals column
+            return true
+    return false

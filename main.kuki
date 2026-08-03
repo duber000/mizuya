@@ -22,6 +22,8 @@ skill Mizuya
     description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, mcp."
     version: "0.1.0"
 
+import "context"
+import "os/exec"
 import "stdlib/cli"
 import "stdlib/color"
 import "stdlib/db"
@@ -30,6 +32,7 @@ import "stdlib/log"
 import "stdlib/sqliteext"
 import "stdlib/string" as strpkg
 import "strings"
+import "time"
 
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
 import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
@@ -63,6 +66,8 @@ func main()
             makeListCmd(),
             makeMCPCmd(),
             makeImportOpenWikiCmd(),
+            makeDistillCmd(),
+            makeDriftCmd(),
         )
         |> cli.Run() onerr
             cli.Fatal("{error}")
@@ -133,6 +138,27 @@ func makeImportOpenWikiCmd() reference cli.SubcommandDef
     return cli.NewCommand("import-openwiki", "Import an OpenWiki corpus into the knowledge graph")
         |> .RestArg("dir", "Path to a directory containing an openwiki/ folder")
         |> .Action(doImportOpenWiki)
+
+func makeDistillCmd() reference cli.SubcommandDef
+    return cli.NewCommand(
+        "distill",
+        "Select high-reuse observations and feed them to openwiki for promotion to docs",
+    )
+        |> .StringFlag("dir", "Project directory (passed to openwiki as cwd)", ".")
+        |> .StringFlag("openwiki-cmd", "OpenWiki CLI binary", "openwiki")
+        |> .IntFlag("min-age-days", "Minimum observation age in days", 7)
+        |> .IntFlag("min-observations", "Minimum observations per entity to qualify", 3)
+        |> .IntFlag("limit", "Max entities to distill in one run", 10)
+        |> .BoolFlag("dry-run", "Print the prompt without calling openwiki", false)
+        |> .Action(doDistill)
+
+func makeDriftCmd() reference cli.SubcommandDef
+    return cli.NewCommand(
+        "drift",
+        "Detect observations whose source entity has changed since they were recorded",
+    )
+        |> .IntFlag("limit", "Max drift rows to report", 50)
+        |> .Action(doDrift)
 
 # --- Command handlers ---
 
@@ -568,6 +594,163 @@ func doImportOpenWiki(args: cli.Args)
         printJSON({"status": "imported", "entities": imported, "links": linked})
     else
         print("{color.Green("imported")} {imported} entities, {linked} links from {openwikiDir}")
+
+# --- distill ---
+
+# distillRow is one entity selected for distillation with its undistilled
+# observations.
+type distillRow
+    Id: string as "id"
+    Name: string as "name"
+    ObsCount: int as "obs_count"
+
+# distillObsRow is an observation selected for distillation.
+type distillObsRow
+    Id: string as "id"
+    Text: string as "text"
+    EntityId: string as "entity_id"
+
+# doDistill selects entities with many old, undistilled observations,
+# assembles a prompt from them, and shells out to `openwiki -p` to
+# incorporate the findings into the wiki. Selected observations are then
+# marked as distilled so they aren't re-selected.
+func doDistill(args: cli.Args)
+    minAge := cli.GetIntOr(args, "min-age-days", 7)
+    minObs := cli.GetIntOr(args, "min-observations", 3)
+    limit := cli.GetIntOr(args, "limit", 10)
+    dryRun := cli.GetBool(args, "dry-run")
+    dir := cli.GetString(args, "dir")
+    openwikiCmd := cli.GetString(args, "openwiki-cmd")
+
+    pool := openPool(args) onerr
+        errPrint("cannot open database: {error}")
+        return
+
+    defer db.Close(pool)
+
+    # Select entities with >= minObs undistilled observations older than
+    # the age threshold, ordered by observation count descending.
+    q := "SELECT e.id AS id, e.name AS name, COUNT(o.id) AS obs_count FROM entities e JOIN observations o ON o.entity_id = e.id WHERE o.distilled = 0 AND o.at < datetime('now', ?) GROUP BY e.id HAVING COUNT(o.id) >= ? ORDER BY obs_count DESC LIMIT ?"
+    candidates := db.Query(pool, q, "-{minAge} days", minObs, limit) |> db.ScanAll of distillRow onerr
+        errPrint("distill query failed: {error}")
+        return
+
+    if len(candidates) equals 0
+        if cli.IsJSON(args)
+            printJSON({"status": "no-candidates"})
+        else
+            print(color.Dim("no entities meet the distillation threshold"))
+        return
+
+    # Collect the observations for each candidate and build the prompt.
+    promptParts := empty list of string
+    promptParts = append(
+        promptParts,
+        "Incorporate these runtime findings into the project wiki. Each block is an entity followed by observations agents recorded during real sessions. Add relevant details to the appropriate wiki page, preserving technical accuracy.\n",
+    )
+    allObsIds := empty list of string
+    for c in candidates
+        promptParts = append(promptParts, "\n## {c.Name} ({c.Id})\n")
+        obsQ := "SELECT id, text, entity_id FROM observations WHERE entity_id = ? AND distilled = 0 AND at < datetime('now', ?) ORDER BY at DESC"
+        obs, _ := db.Query(pool, obsQ, c.Id, "-{minAge} days") |> db.ScanAll of distillObsRow
+        for o in obs
+            promptParts = append(promptParts, "- {o.Text}\n")
+            allObsIds = append(allObsIds, o.Id)
+
+    prompt := strpkg.Join(promptParts, "")
+
+    if dryRun
+        if cli.IsJSON(args)
+            printJSON({
+                "status": "dry-run",
+                "candidates": len(candidates),
+                "observations": len(allObsIds),
+                "prompt": prompt,
+            })
+        else
+            print(
+                color.Bold("dry run — {len(candidates)} entities, {len(allObsIds)} observations"),
+            )
+            print(prompt)
+        return
+
+    if openwikiCmd equals ""
+        errPrint("--openwiki-cmd is required (or use --dry-run)")
+        return
+
+    # Shell out to openwiki with the assembled prompt.
+    ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Minute)
+    defer cancel()
+    cmd := exec.CommandContext(ctx, openwikiCmd, "-p", prompt)
+    cmd.Dir = dir
+    out, runErr := cmd.CombinedOutput()
+    if runErr isnt empty
+        errPrint("openwiki distill failed: {runErr}\n{out}")
+        return
+
+    # Mark the selected observations as distilled.
+    for obsId in allObsIds
+        db.Exec(pool, "UPDATE observations SET distilled = 1 WHERE id = ?", obsId) onerr discard
+
+    if cli.IsJSON(args)
+        printJSON({
+            "status": "distilled",
+            "candidates": len(candidates),
+            "observations": len(allObsIds),
+            "output": strpkg.TrimSpace(out as string),
+        })
+    else
+        print(
+            "{color.Green("distilled")} {len(candidates)} entities, {len(allObsIds)} observations -> {openwikiCmd}",
+        )
+        print(strpkg.TrimSpace(out as string))
+
+# --- drift ---
+
+# driftRow is one observation whose entity has been modified since the
+# observation was recorded.
+type driftRow
+    ObsId: string as "obs_id"
+    EntityId: string as "entity_id"
+    EntityName: string as "entity_name"
+    ObsText: string as "obs_text"
+    ObsAt: string as "obs_at"
+    EntityUpdated: string as "entity_updated"
+
+# doDrift finds observations whose entity was modified (updated_at or
+# content_hash changed) after the observation was recorded. These
+# observations may reference stale information and warrant review.
+func doDrift(args: cli.Args)
+    limit := cli.GetIntOr(args, "limit", 50)
+
+    pool := openPool(args) onerr
+        errPrint("cannot open database: {error}")
+        return
+
+    defer db.Close(pool)
+
+    # An observation is "drifted" if its entity's updated_at is newer
+    # than the observation's `at` timestamp — the entity changed after
+    # the observation was recorded.
+    q := "SELECT o.id AS obs_id, o.entity_id AS entity_id, e.name AS entity_name, o.text AS obs_text, o.at AS obs_at, e.updated_at AS entity_updated FROM observations o JOIN entities e ON e.id = o.entity_id WHERE e.updated_at > o.at AND o.distilled = 0 ORDER BY e.updated_at DESC LIMIT ?"
+    rows := db.Query(pool, q, limit) |> db.ScanAll of driftRow onerr
+        errPrint("drift query failed: {error}")
+        return
+
+    if len(rows) equals 0
+        if cli.IsJSON(args)
+            printJSON({"status": "no-drift", "count": 0})
+        else
+            print(color.Dim("no drift detected"))
+        return
+
+    if cli.IsJSON(args)
+        printJSON(rows)
+    else
+        print(color.Bold("drift: {len(rows)} stale observations"))
+        for r in rows
+            print("  {color.Bold(r.EntityId)}  {color.Dim(r.ObsAt)} -> {r.EntityUpdated}")
+            print("    {color.Dim(strpkg.Truncate(r.ObsText, 80))}")
 
 # parseOKFFrontMatter splits raw markdown into front matter (the YAML-like
 # block between --- delimiters) and body. Returns a map of key->value from
