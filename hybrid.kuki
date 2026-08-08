@@ -12,7 +12,7 @@ import "stdlib/sort"
 # rrfK is the Reciprocal Rank Fusion constant. The standard value of 60
 # balances contributions so that a #1 hit from either ranker scores ~0.016
 # while a #10 hit scores ~0.014 — keeping both rankers competitive.
-const rrfK int = 60
+const rrfK: int = 60
 
 # hybridSearch runs FTS5 keyword search and vector similarity search in
 # parallel, then merges results using Reciprocal Rank Fusion. If vector
