@@ -34,6 +34,7 @@ import "stdlib/string" as strpkg
 import "strings"
 import "time"
 
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
 import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
 import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
@@ -170,6 +171,7 @@ func openPool(args: cli.Args) (db.Pool, error)
     pool := openDB(dbPath) onerr return
     sqliteext.Register(pool, vec1ext.Register)
     sqliteext.Register(pool, regexpext.Register)
+    sqliteext.Register(pool, fts5ext.Register)
     sqliteext.Register(pool, uuidext.Register)
     sqliteext.Register(pool, statsext.Register)
     sqliteext.Register(pool, spellfixext.Register)
@@ -187,6 +189,10 @@ func doInit(args: cli.Args)
 
     sqliteext.Register(pool, vec1ext.Register) onerr
         errPrint("cannot register vec1 extension: {error}")
+        return
+
+    sqliteext.Register(pool, fts5ext.Register) onerr
+        errPrint("cannot register fts5 extension: {error}")
         return
 
     sqliteext.Register(pool, uuidext.Register) onerr
