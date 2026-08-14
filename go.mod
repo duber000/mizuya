@@ -1,16 +1,16 @@
 module mizuya
 
-go 1.27rc2
+go 1.27rc3
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.3
-	kukicha.org/kukicha/stdlib v0.77.0
+	kukicha.org/kukicha/stdlib v0.78.2
 )
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.6.0 // indirect
+	github.com/modelcontextprotocol/go-sdk v1.7.0 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v2 v2.6.35302 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v3 v3.2.35304 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
