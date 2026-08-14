@@ -658,7 +658,10 @@ func doDistill(args: cli.Args)
     for c in candidates
         promptParts = append(promptParts, "\n## {c.Name} ({c.Id})\n")
         obsQ := "SELECT id, text, entity_id FROM observations WHERE entity_id = ? AND distilled = 0 AND at < datetime('now', ?) ORDER BY at DESC"
-        obs, _ := db.Query(pool, obsQ, c.Id, "-{minAge} days") |> db.ScanAll of distillObsRow
+        obs := db.Query(pool, obsQ, c.Id, "-{minAge} days") |> db.ScanAll of distillObsRow onerr
+            errPrint("observations query failed: {error}")
+            return
+
         for o in obs
             promptParts = append(promptParts, "- {o.Text}\n")
             allObsIds = append(allObsIds, o.Id)
