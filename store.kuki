@@ -104,7 +104,7 @@ func entityText(pool: db.Pool, id: string) (string, error)
     parts := list of string{e.Name}
 
     # Pull summary out of the stored JSON via typed unmarshal.
-    ed := jsonpkg.ParseString of entityData from e.Data
+    ed := jsonpkg.Parse of entityData from e.Data
     if ed.Summary isnt ""
         parts = append(parts, ed.Summary)
 
