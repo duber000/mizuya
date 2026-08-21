@@ -687,10 +687,14 @@ func doDistill(args: cli.Args)
         errPrint("--openwiki-cmd is required (or use --dry-run)")
         return
 
+    if openwikiCmd isnt "openwiki"
+        errPrint("--openwiki-cmd must be 'openwiki' (got: {openwikiCmd})")
+        return
+
     # Shell out to openwiki with the assembled prompt.
     ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Minute)
     defer cancel()
-    cmd := exec.CommandContext(ctx, openwikiCmd, "-p", prompt)
+    cmd := exec.CommandContext(ctx, "openwiki", "-p", prompt)
     cmd.Dir = dir
     out, runErr := cmd.CombinedOutput()
     if runErr isnt empty

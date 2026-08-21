@@ -1,10 +1,10 @@
 module mizuya
 
-go 1.27rc3
+go 1.27.0
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.3
-	kukicha.org/kukicha/stdlib v0.80.1
+	kukicha.org/kukicha/stdlib v0.81.0
 )
 
 require (
