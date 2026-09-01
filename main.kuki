@@ -168,13 +168,31 @@ func makeDriftCmd() reference cli.Command
 # we no longer pin MaxOpenConns=1 to host a Kukicha-side UDF.
 func openPool(args: cli.Args) (db.Pool, error)
     dbPath := cli.GetString(args, "db")
-    pool := sqlite.OpenWithExtensions(dbPath, empty map of string to string, vec1ext.Register, regexpext.Register, fts5ext.Register, uuidext.Register, statsext.Register, spellfixext.Register, unicodeext.Register) onerr return
+    pool := sqlite.OpenWithExtensions(
+        dbPath,
+        empty map of string to string,
+        vec1ext.Register,
+        regexpext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        statsext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    ) onerr return
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 
 func doInit(args: cli.Args)
     dbPath := cli.GetString(args, "db")
-    pool := sqlite.OpenWithExtensions(dbPath, empty map of string to string, vec1ext.Register, fts5ext.Register, uuidext.Register, spellfixext.Register, unicodeext.Register) onerr
+    pool := sqlite.OpenWithExtensions(
+        dbPath,
+        empty map of string to string,
+        vec1ext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    ) onerr
         errPrint("cannot open database: {error}")
         return
 
@@ -509,8 +527,11 @@ func doImportOpenWiki(args: cli.Args)
         fm, body := parseOKFFrontMatter(raw)
         name := strpkg.Or(fm["title"], slug)
         summary := strpkg.Or(fm["description"], firstParagraph(body))
+        # Validate through the enum so the accepted set stays in sync
+        # with EntityType; anything outside it (e.g. front-matter
+        # "Reference", "Quickstart") files as a concept, same as before.
         etype := strpkg.Or(strpkg.ToLower(fm["type"]), "concept")
-        if etype isnt "concept" and etype isnt "feature" and etype isnt "project" and etype isnt "tool" and etype isnt "person" and etype isnt "config" and etype isnt "org"
+        if _, perr := ParseEntityType(etype); perr isnt empty
             etype = "concept"
         tags := list of string{"openwiki"}
         if fm["type"] isnt ""

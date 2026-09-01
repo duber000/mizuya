@@ -1,6 +1,11 @@
 # mizuya — database schema
 # All DDL statements and initDB. Uses FTS5 with content=entities so the
 # virtual table mirrors the base table row-for-row via triggers.
+#
+# Timestamp contract: every *_at column is stamped datetime('now') —
+# UTC with no offset suffix. Compare against them with plain
+# datetime('now', ...); adding 'localtime' to the threshold but not
+# the stamp skews the window by the local UTC offset (4h in EDT).
 
 petiole main
 
