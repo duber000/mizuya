@@ -23,15 +23,19 @@ skill Mizuya
     version: "0.1.0"
 
 import "context"
+import "os"
 import "os/exec"
 import "stdlib/cli"
 import "stdlib/color"
 import "stdlib/db"
 import "stdlib/files"
+import "stdlib/input"
 import "stdlib/log"
+import "stdlib/parse"
+import "stdlib/regex"
 import "stdlib/sqlite"
 import "stdlib/string" as strpkg
-import "strings"
+import "stdlib/term"
 import "time"
 
 import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
@@ -163,6 +167,58 @@ func makeDriftCmd() reference cli.Command
 
 # --- Command handlers ---
 
+# pickSuggestion prompts the operator to choose among fuzzy id matches;
+# returns "" when non-interactive (JSON mode or no TTY), on cancel, or
+# when there are no candidates. The MCP server never uses this — its
+# stdio surface is not interactive.
+func pickSuggestion(pool: db.Pool, args: cli.Args, id: string) string
+    if cli.IsJSON(args) or not term.IsTTY(os.Stdin)
+        return ""
+    ids, serr := suggestIds(pool, id, 3)
+    if serr isnt empty or len(ids) equals 0
+        return ""
+    idx := input.Choose("'{id}' not found — did you mean:", ids) onerr return ""
+    return ids[idx]
+
+# resolveEntity fetches an entity by id; on a miss with an interactive TTY
+# (outside JSON mode), offers fuzzy matches for selection and re-fetches.
+func resolveEntity(pool: db.Pool, args: cli.Args, id: string) (Entity, error)
+    e := getEntity(pool, id) onerr
+        picked := pickSuggestion(pool, args, id)
+        if picked equals ""
+            return Entity{}, error "entity not found: {id}"
+        refetched, rerr := getEntity(pool, picked)
+        if rerr isnt empty
+            return Entity{}, rerr
+        return refetched, empty
+
+    return e, empty
+
+# resolveEmbedding fetches an embedding vector by id; on a miss with an
+# interactive TTY (outside JSON mode), offers fuzzy matches and re-fetches.
+func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float64, error)
+    v := getEmbedding(pool, id) onerr
+        picked := pickSuggestion(pool, args, id)
+        if picked equals ""
+            return empty list of float64, error "no embedding for {id}"
+        refetched, rerr := getEmbedding(pool, picked)
+        if rerr isnt empty
+            return empty list of float64, rerr
+        return refetched, empty
+
+    return v, empty
+
+# observeResolved adds an observation for id; on a miss with an interactive
+# TTY (outside JSON mode), offers fuzzy matches and retries with the pick.
+func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string) error
+    aerr := addObservation(pool, id, text, source)
+    if aerr equals empty
+        return empty
+    picked := pickSuggestion(pool, args, id)
+    if picked equals ""
+        return aerr
+    return addObservation(pool, picked, text, source)
+
 # openPool opens the database and registers the vec1 vector extension.
 # vec1 ships native vec1_cos_distance and a virtual-table KNN index, so
 # we no longer pin MaxOpenConns=1 to host a Kukicha-side UDF.
@@ -258,7 +314,7 @@ func doObserve(args: cli.Args)
 
     defer db.Close(pool)
 
-    addObservation(pool, id, text, source) onerr
+    observeResolved(pool, args, id, text, source) onerr
         errPrint("cannot add observation: {error}{suggestionsFor(pool, id)}")
         return
 
@@ -346,8 +402,8 @@ func doContext(args: cli.Args)
     if depth < 1
         depth = 1
 
-    e := getEntity(pool, id) onerr
-        errPrint("entity not found: {error}{suggestionsFor(pool, id)}")
+    e := resolveEntity(pool, args, id) onerr
+        errPrint("{error}{suggestionsFor(pool, id)}")
         return
 
     obs := listObservations(pool, id) onerr
@@ -369,7 +425,7 @@ func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, 
         return
 
     if cli.IsJSON(args)
-        printJSON({
+        printJSON(map of string to any{
             "entity": e,
             "outgoing": outgoing,
             "incoming": incoming,
@@ -388,7 +444,7 @@ func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, dep
         return
 
     if cli.IsJSON(args)
-        printJSON({
+        printJSON(map of string to any{
             "entity": e,
             "depth": depth,
             "outgoing": outReach,
@@ -415,10 +471,10 @@ func doSimilar(args: cli.Args)
 
     vec := empty list of float64
     if id isnt ""
-        v, err := getEmbedding(pool, id)
-        if err isnt empty
-            errPrint("no embedding for {id}: {err}{suggestionsFor(pool, id)}")
+        v := resolveEmbedding(pool, args, id) onerr
+            errPrint("{error}{suggestionsFor(pool, id)}")
             return
+
         vec = v
     else
         vec = embedText(text) onerr
@@ -524,23 +580,31 @@ func doImportOpenWiki(args: cli.Args)
             log.Warn("import-openwiki: skipping unreadable file", "file", entry.Path, "err", error)
             continue
 
-        fm, body := parseOKFFrontMatter(raw)
-        name := strpkg.Or(fm["title"], slug)
-        summary := strpkg.Or(fm["description"], firstParagraph(body))
+        fmBlock, body := splitFrontMatter(raw)
+        var fm: FrontMatter
+        if fmBlock isnt ""
+            fm = parse.YAML of FrontMatter from fmBlock onerr
+                log.Warn(
+                    "import-openwiki: skipping file with bad front matter",
+                    "file",
+                    entry.Path,
+                    "err",
+                    error,
+                )
+                continue
+
+        name := strpkg.Or(fm.title, slug)
+        summary := strpkg.Or(fm.description, firstParagraph(body))
         # Validate through the enum so the accepted set stays in sync
         # with EntityType; anything outside it (e.g. front-matter
         # "Reference", "Quickstart") files as a concept, same as before.
-        etype := strpkg.Or(strpkg.ToLower(fm["type"]), "concept")
+        etype := strpkg.Or(strpkg.ToLower(fm.entityType), "concept")
         if _, perr := ParseEntityType(etype); perr isnt empty
             etype = "concept"
         tags := list of string{"openwiki"}
-        if fm["type"] isnt ""
-            tags = append(tags, strpkg.ToLower(fm["type"]))
-        fmTagsRaw := fm["tags"]
-        fmTagsRaw = strpkg.TrimPrefix(fmTagsRaw, "[")
-        fmTagsRaw = strpkg.TrimSuffix(fmTagsRaw, "]")
-        fmTags := strpkg.Split(fmTagsRaw, ",")
-        for t in fmTags
+        if fm.entityType isnt ""
+            tags = append(tags, strpkg.ToLower(fm.entityType))
+        for t in fm.tags
             t = strpkg.TrimSpace(t)
             if t isnt ""
                 tags = append(tags, t)
@@ -591,7 +655,7 @@ func doImportOpenWiki(args: cli.Args)
             linked = linked + 1
 
     if cli.IsJSON(args)
-        printJSON({"status": "imported", "entities": imported, "links": linked})
+        printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
     else
         print("{color.Green("imported")} {imported} entities, {linked} links from {openwikiDir}")
 
@@ -664,7 +728,7 @@ func doDistill(args: cli.Args)
 
     if dryRun
         if cli.IsJSON(args)
-            printJSON({
+            printJSON(map of string to any{
                 "status": "dry-run",
                 "candidates": len(candidates),
                 "observations": len(allObsIds),
@@ -700,7 +764,7 @@ func doDistill(args: cli.Args)
         db.Exec(pool, "UPDATE observations SET distilled = 1 WHERE id = ?", obsId) onerr discard
 
     if cli.IsJSON(args)
-        printJSON({
+        printJSON(map of string to any{
             "status": "distilled",
             "candidates": len(candidates),
             "observations": len(allObsIds),
@@ -746,7 +810,7 @@ func doDrift(args: cli.Args)
 
     if len(rows) equals 0
         if cli.IsJSON(args)
-            printJSON({"status": "no-drift", "count": 0})
+            printJSON(map of string to any{"status": "no-drift", "count": 0})
         else
             print(color.Dim("no drift detected"))
         return
@@ -759,40 +823,28 @@ func doDrift(args: cli.Args)
             print("  {color.Bold(r.EntityId)}  {color.Dim(r.ObsAt)} -> {r.EntityUpdated}")
             print("    {color.Dim(strpkg.Truncate(r.ObsText, 80))}")
 
-# parseOKFFrontMatter splits raw markdown into front matter (the YAML-like
-# block between --- delimiters) and body. Returns a map of key->value from
-# the front matter, plus the body. If no front matter, returns an empty map
-# and the full text as body.
-func parseOKFFrontMatter(raw: string) (map of string to string, string)
-    fm := make(map of string to string)
+# FrontMatter is the OKF front-matter shape the openwiki importer reads.
+# Unknown keys are ignored; tags accepts both [a, b] and block-list YAML.
+type FrontMatter
+    title: string as "title"
+    description: string as "description"
+    entityType: string as "type"
+    tags: list of string as "tags"
+
+# splitFrontMatter splits raw markdown into the front-matter YAML text
+# (the block between --- delimiters; "" when absent) and the body.
+func splitFrontMatter(raw: string) (string, string)
     lines := strpkg.Split(raw, "\n")
     if len(lines) equals 0 or lines[0] isnt "---"
-        return fm, raw
+        return "", raw
     i := 1
     for i < len(lines)
         if lines[i] equals "---"
             break
-        parseKV(lines[i], fm)
         i = i + 1
     if i >= len(lines)
-        return fm, raw
-    body := strpkg.Join(lines[i + 1:], "\n")
-    return fm, body
-
-# parseKV parses a single "key: value" line into the map. Handles optional
-# quotes around the value.
-func parseKV(line: string, fm: map of string to string)
-    idx := strpkg.Index(line, ":")
-    if idx < 0
-        return
-    key := strpkg.TrimSpace(line[:idx])
-    val := strpkg.TrimSpace(line[idx + 1:])
-    # Strip surrounding quotes: "value" or 'value'.
-    val = strpkg.TrimPrefix(val, "\"")
-    val = strpkg.TrimSuffix(val, "\"")
-    val = strpkg.TrimPrefix(val, "'")
-    val = strpkg.TrimSuffix(val, "'")
-    fm[key] = val
+        return "", raw
+    return strpkg.Join(lines[1:i], "\n"), strpkg.Join(lines[i + 1:], "\n")
 
 # firstParagraph returns the first non-heading, non-empty line of the body,
 # as a plain-text summary fallback when the description front-matter is absent.
@@ -804,28 +856,14 @@ func firstParagraph(body: string) string
             return t
     return ""
 
+# markdownLinkPattern matches [text](target.md) wiki links; used by
+# extractMarkdownLinks. Compiled once at package level.
+var markdownLinkPattern = regex.MustCompile('\[([^\]]*)\]\(([^)]+\.md)\)')
+
 # extractMarkdownLinks scans body text for [text](target.md) patterns and
 # returns the list of target paths.
 func extractMarkdownLinks(body: string) list of string
     links := empty list of string
-    pos := 0
-    for true
-        openBracket := strings.Index(body[pos:], "[")
-        if openBracket < 0
-            break
-        openBracket = openBracket + pos
-        closeBracket := strings.Index(body[openBracket + 1:], "]")
-        if closeBracket < 0
-            break
-        closeBracket = closeBracket + openBracket + 1
-        if closeBracket + 1 >= len(body) or not strpkg.HasPrefix(body[closeBracket + 1:], "(")
-            pos = closeBracket + 1
-            continue
-        closeParen := strings.Index(body[closeBracket + 2:], ")")
-        if closeParen < 0
-            break
-        closeParen = closeParen + closeBracket + 2
-        target := body[closeBracket + 2:closeParen]
-        links = append(links, target)
-        pos = closeParen + 1
+    for groups in markdownLinkPattern.FindAllGroups(body)
+        links = append(links, groups[2])
     return links

@@ -23,7 +23,7 @@ func printEntityList(rows: list of Entity)
         return
     t := table.New({"id", "type", "name", "updated_at"})
     for e in rows
-        t = t |> table.AddRow({e.Id, e.Type, strpkg.Truncate(e.Name, 40), e.UpdatedAt})
+        t = t |> table.AddRowValues(e.Id, e.Type, strpkg.Truncate(e.Name, 40), e.UpdatedAt)
     t |> table.Print()
 
 func printSearchHits(hits: list of SearchHit)
@@ -33,8 +33,11 @@ func printSearchHits(hits: list of SearchHit)
     t := table.New({"id", "type", "name", "summary"})
     for h in hits
         t = t
-            |> table.AddRow(
-                {h.Id, h.Type, strpkg.Truncate(h.Name, 40), strpkg.Truncate(h.Summary, 60)},
+            |> table.AddRowValues(
+                h.Id,
+                h.Type,
+                strpkg.Truncate(h.Name, 40),
+                strpkg.Truncate(h.Summary, 60),
             )
     t |> table.Print()
 
@@ -46,8 +49,12 @@ func printSimilarHits(hits: list of SimilarHit)
     for h in hits
         dist := fmt.Sprintf("%.4f", h.Distance)
         t = t
-            |> table.AddRow(
-                {h.Id, h.Type, dist, strpkg.Truncate(h.Name, 40), strpkg.Truncate(h.Summary, 60)},
+            |> table.AddRowValues(
+                h.Id,
+                h.Type,
+                dist,
+                strpkg.Truncate(h.Name, 40),
+                strpkg.Truncate(h.Summary, 60),
             )
     t |> table.Print()
 

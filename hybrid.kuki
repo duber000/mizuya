@@ -42,8 +42,8 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
         return ftsHits, empty
 
     # 3. Build per-entity RRF scores from both ranked lists.
-    scores := make(map of string to float64)
-    hitMap := make(map of string to SearchHit)
+    scores := empty map of string to float64
+    hitMap := empty map of string to SearchHit
 
     for i, h in ftsHits
         rank := i + 1
@@ -61,9 +61,7 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
     # 4. Collect all candidate IDs and sort by RRF score descending.
     ids := maps.Keys(scores)
 
-    sort.By(ids, (a, b) =>
-        scores[b] < scores[a]
-    )
+    sort.ByKeyDesc(ids, id => scores[id])
 
     # 5. Build the final result list, capped at limit.
     result := make(list of SearchHit, 0, limit)
