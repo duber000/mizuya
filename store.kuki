@@ -5,6 +5,7 @@ petiole main
 
 import "stdlib/crypto"
 import "stdlib/db"
+import "stdlib/errors" as errs
 import "stdlib/json" as jsonpkg
 import "stdlib/slice"
 import "stdlib/sqlite"
@@ -110,7 +111,7 @@ func entityText(pool: db.Pool, id: string) (string, error)
     if ed.Summary isnt ""
         parts = append(parts, ed.Summary)
 
-    obs := listObservations(pool, id) onerr return "", error "{error}"
+    obs := listObservations(pool, id) onerr return "", error
     texts := obs
         |> slice.Filter(o => o.Text isnt "")
         |> slice.Map(o => o.Text)
@@ -149,12 +150,12 @@ func reEmbedIfChanged(pool: db.Pool, id: string) (bool, error)
     if err isnt empty
         return false, err
     h := corpusHash(text)
-    prev := storedHash(pool, id) onerr return false, error "{error}"
+    prev := storedHash(pool, id) onerr return false, error
     if prev equals h and prev isnt ""
         return false, empty
-    vec := embedText(text) onerr return false, error "{error}"
-    upsertEmbedding(pool, id, vec) onerr return false, error "{error}"
-    setStoredHash(pool, id, h) onerr return false, error "{error}"
+    vec := embedText(text) onerr return false, error
+    upsertEmbedding(pool, id, vec) onerr return false, error
+    setStoredHash(pool, id, h) onerr return false, error
     return true, empty
 
 # --- Tags ---

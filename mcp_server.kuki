@@ -5,6 +5,7 @@
 petiole main
 
 import "stdlib/db"
+import "stdlib/errors" as errs
 import "stdlib/json" as jsonpkg
 import "stdlib/jsonschema"
 import "stdlib/mcp"
@@ -101,10 +102,10 @@ func registerResources(server: reference mcp.Server)
     )
 
 func listEntitiesResource(uri: string) (string, error)
-    pool := openDB(mcpDBPath) onerr return "", error "{error}"
+    pool := openDB(mcpDBPath) onerr return "", error
     defer db.Close(pool)
-    entities := listEntities(pool, "", 500) onerr return "", error "{error}"
-    data := jsonpkg.PrettyBytes(entities) onerr return "", error "{error}"
+    entities := listEntities(pool, "", 500) onerr return "", error
+    data := jsonpkg.PrettyBytes(entities) onerr return "", error
     return data as string, empty
 
 func entityContextResource(uri: string) (string, error)
@@ -112,13 +113,13 @@ func entityContextResource(uri: string) (string, error)
     if id equals ""
         return "", error "missing entity ID in URI: {uri}"
 
-    pool := openMCPPool() onerr return "", error "{error}"
+    pool := openMCPPool() onerr return "", error
     defer db.Close(pool)
 
-    e := getEntity(pool, id) onerr return "", error "entity not found: {id}: {error}"
-    outgoing := outgoingContext(pool, id) onerr return "", error "{error}"
-    incoming := incomingContext(pool, id) onerr return "", error "{error}"
-    obs := listObservations(pool, id) onerr return "", error "{error}"
+    e := getEntity(pool, id) onerr return "", errs.Wrap(error, "entity not found: {id}")
+    outgoing := outgoingContext(pool, id) onerr return "", error
+    incoming := incomingContext(pool, id) onerr return "", error
+    obs := listObservations(pool, id) onerr return "", error
 
     payload := ToolArgs{
         "entity": e,
@@ -126,7 +127,7 @@ func entityContextResource(uri: string) (string, error)
         "incoming": incoming,
         "observations": obs,
     }
-    data := jsonpkg.PrettyBytes(payload) onerr return "", error "{error}"
+    data := jsonpkg.PrettyBytes(payload) onerr return "", error
     return data as string, empty
 
 # registerTools adds all 6 knowledge graph tools to the MCP server.

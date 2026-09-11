@@ -5,6 +5,7 @@
 petiole main
 
 import "stdlib/db"
+import "stdlib/errors" as errs
 import "stdlib/maps"
 import "stdlib/slice"
 import "stdlib/sort"
@@ -26,7 +27,7 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
     fetchLimit := limit * 3
 
     # 1. FTS5 keyword search
-    ftsHits := ftsSearch(pool, query, fetchLimit) onerr return empty, error "FTS search failed: {error}"
+    ftsHits := ftsSearch(pool, query, fetchLimit) onerr return empty, errs.Wrap(error, "FTS search failed")
 
     # 2. Vector similarity search — embed the query text and compare.
     vec, embedErr := embedText(query)
