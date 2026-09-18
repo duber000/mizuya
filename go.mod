@@ -4,13 +4,13 @@ go 1.27.0
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.4
-	kukicha.org/kukicha/stdlib v0.85.0
+	kukicha.org/kukicha/stdlib v0.85.1
 )
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.7.0 // indirect
+	github.com/modelcontextprotocol/go-sdk v1.8.0 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v5 v5.0.35304 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/ncruces/sort v1.0.0 // indirect

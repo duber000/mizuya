@@ -223,6 +223,7 @@ func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, so
 # we no longer pin MaxOpenConns=1 to host a Kukicha-side UDF.
 func openPool(args: cli.Args) (db.Pool, error)
     dbPath := cli.GetString(args, "db")
+    files.MkDirAll(files.Dirname(dbPath)) onerr return
     pool := sqlite.OpenWithExtensions(
         dbPath,
         empty map of string to string,
@@ -239,6 +240,10 @@ func openPool(args: cli.Args) (db.Pool, error)
 
 func doInit(args: cli.Args)
     dbPath := cli.GetString(args, "db")
+    files.MkDirAll(files.Dirname(dbPath)) onerr
+        errPrint("cannot create database directory: {error}")
+        return
+
     pool := sqlite.OpenWithExtensions(
         dbPath,
         empty map of string to string,
