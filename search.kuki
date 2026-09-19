@@ -5,9 +5,9 @@
 
 petiole main
 
-import "encoding/binary"
 import "math"
 import "stdlib/db"
+import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 
 # --- FTS5 keyword search ---
@@ -36,25 +36,15 @@ func regexSearch(pool: db.Pool, pattern: string, limit: int) (list of SearchHit,
 
 # --- Binary vector serialization ---
 
-# serializeVec packs a float64 slice into a vec1-compatible BLOB
-# (little-endian float32, 4 bytes per element). A 768-dim vector is
-# exactly 3,072 bytes. The float64→float32 narrowing is fine for
-# similarity search; vec1 itself runs in float32.
+# serializeVec packs a float64 slice into a vec1-compatible BLOB using sqlite.PackVector64.
 func serializeVec(v: list of float64) list of byte
-    buf := make(list of byte, len(v) * 4)
-    for i from 0 to len(v)
-        binary.LittleEndian.PutUint32(buf[i * 4:], math.Float32bits(v[i] as float32))
-    return buf
+    return sqlite.PackVector64(v)
 
 # deserializeVec unpacks a little-endian float32 BLOB into a float64
-# slice. Returns nil if the BLOB length is not a multiple of 4.
+# slice using sqlite.UnpackVector64. Returns nil if the BLOB length is not a multiple of 4.
 func deserializeVec(b: list of byte) list of float64
-    if len(b) % 4 isnt 0
-        return empty
-    v := make(list of float64, len(b) / 4)
-    for i from 0 to len(v)
-        v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i * 4:])) as float64
-    return v
+    vec := sqlite.UnpackVector64(b) onerr return empty
+    return vec
 
 # --- Embedding storage ---
 
