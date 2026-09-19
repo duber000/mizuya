@@ -117,17 +117,8 @@ func initDB(pool: db.Pool) error
 # migrateObsDistilled adds the observations.distilled column for databases
 # created before it was folded into the CREATE TABLE statement.
 func migrateObsDistilled(pool: db.Pool) error
-    if columnExists(pool, "observations", "distilled")
+    exists := sqlite.ColumnExists(pool, "observations", "distilled") onerr return
+    if exists
         return empty
     db.Exec(pool, migrateObsDistilledSQL) onerr return
     return empty
-
-# columnExists checks whether a column exists on a table using PRAGMA
-# table_info. Used by ADD COLUMN migrations to guard against "duplicate
-# column name" errors on fresh databases.
-func columnExists(pool: db.Pool, table: string, column: string) bool
-    cols := sqlite.Columns(pool, table) onerr return false
-    for col in cols
-        if col.Name equals column
-            return true
-    return false
