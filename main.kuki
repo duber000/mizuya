@@ -174,7 +174,7 @@ func pickSuggestion(pool: db.Pool, args: cli.Args, id: string) string
     if cli.IsJSON(args) or not term.IsTTY(os.Stdin)
         return ""
     ids, serr := suggestIds(pool, id, 3)
-    if serr isnt empty or len(ids) equals 0
+    if serr isnt empty or ids is empty
         return ""
     idx := input.Choose("'{id}' not found — did you mean:", ids) onerr return ""
     return ids[idx]
@@ -547,7 +547,7 @@ type OpenWikiDoc
 # reEmbedIfChanged short-circuits when the content hash hasn't changed.
 func doImportOpenWiki(args: cli.Args)
     rest := cli.GetRest(args, "dir")
-    if len(rest) equals 0
+    if rest is empty
         errPrint("usage: mizuya import-openwiki <dir>")
         return
     baseDir := rest[0]
@@ -703,7 +703,7 @@ func doDistill(args: cli.Args)
         errPrint("distill query failed: {error}")
         return
 
-    if len(candidates) equals 0
+    if candidates is empty
         if cli.IsJSON(args)
             printJSON({"status": "no-candidates"})
         else
@@ -812,7 +812,7 @@ func doDrift(args: cli.Args)
         errPrint("drift query failed: {error}")
         return
 
-    if len(rows) equals 0
+    if rows is empty
         if cli.IsJSON(args)
             printJSON(map of string to any{"status": "no-drift", "count": 0})
         else
@@ -839,7 +839,7 @@ type FrontMatter
 # (the block between --- delimiters; "" when absent) and the body.
 func splitFrontMatter(raw: string) (string, string)
     lines := strpkg.Split(raw, "\n")
-    if len(lines) equals 0 or lines[0] isnt "---"
+    if lines is empty or lines[0] isnt "---"
         return "", raw
     i := 1
     for i < len(lines)

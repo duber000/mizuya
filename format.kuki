@@ -2,7 +2,6 @@
 
 petiole main
 
-import "fmt"
 import "stdlib/cli"
 import "stdlib/color"
 import "stdlib/db"
@@ -18,7 +17,7 @@ func printEntityHeader(e: Entity)
 
 # printEntityList renders a list of entities as a plain-style table.
 func printEntityList(rows: list of Entity)
-    if len(rows) equals 0
+    if rows is empty
         print(color.Dim("  No entities."))
         return
     t := table.New({"id", "type", "name", "updated_at"})
@@ -27,7 +26,7 @@ func printEntityList(rows: list of Entity)
     t |> table.Print()
 
 func printSearchHits(hits: list of SearchHit)
-    if len(hits) equals 0
+    if hits is empty
         print(color.Dim("  No matches."))
         return
     t := table.New({"id", "type", "name", "summary"})
@@ -42,12 +41,12 @@ func printSearchHits(hits: list of SearchHit)
     t |> table.Print()
 
 func printSimilarHits(hits: list of SimilarHit)
-    if len(hits) equals 0
+    if hits is empty
         print(color.Dim("  No embeddings available."))
         return
     t := table.New({"id", "type", "distance", "name", "summary"})
     for h in hits
-        dist := fmt.Sprintf("%.4f", h.Distance)
+        dist := "{h.Distance:.4f}"
         t = t
             |> table.AddRowValues(
                 h.Id,
@@ -145,7 +144,7 @@ func errPrint(msg: string)
 # messages. Returns an empty string when there are no suggestions so
 # callers can append unconditionally without leading punctuation drift.
 func didYouMean(ids: list of string) string
-    if len(ids) equals 0
+    if ids is empty
         return ""
     return ". did you mean: " + strpkg.Join(ids, ", ") + "?"
 
