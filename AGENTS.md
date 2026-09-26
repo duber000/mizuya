@@ -1,3 +1,39 @@
+# AGENTS.md — mizuya repository guide
+
+Guidelines, verification commands, and architecture notes for agents working in `mizuya`.
+
+## Overview
+
+`mizuya` is an MCP server providing persistent long-term memory, entity graphs, and observation tracking for AI agents. It uses SQLite for structured storage and vector search, exposed through Model Context Protocol (`stdlib/mcp`) tools and resources.
+
+## Commands
+
+```bash
+# Type check all packages
+kukicha check ./...
+
+# Format check
+kukicha fmt --check --json .
+
+# Auto-format
+kukicha fmt -w .
+
+# Build executable (outputs ./mizuya)
+kukicha build .
+
+# Run unit tests
+go test ./...
+```
+
+## Critical Rules & Invariants
+
+### 1. MCP Tool Signatures
+- Tools registered with `stdlib/mcp` should declare explicit argument and return types using `mcp.Tool` or `mcp.ToolWithOpts`.
+- Fallible operations inside tool handlers should return error values to let MCP handle failure responses cleanly.
+
+### 2. Binary Cleanup
+Building with `kukicha build .` produces a local binary (`./mizuya`). Delete the binary and temporary `main.go` after test builds before staging.
+
 <!-- kukicha:start -->
 # Kukicha
 
