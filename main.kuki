@@ -174,7 +174,7 @@ func pickSuggestion(pool: db.Pool, args: cli.Args, id: string) string
     if cli.IsJSON(args) or not term.IsTTY(os.Stdin)
         return ""
     ids, serr := suggestIds(pool, id, 3)
-    if serr isnt empty or ids is empty
+    if serr isnt empty or (ids is empty)
         return ""
     idx := input.Choose("'{id}' not found — did you mean:", ids) onerr return ""
     return ids[idx]
@@ -839,7 +839,7 @@ type FrontMatter
 # (the block between --- delimiters; "" when absent) and the body.
 func splitFrontMatter(raw: string) (string, string)
     lines := strpkg.Split(raw, "\n")
-    if lines is empty or lines[0] isnt "---"
+    if (lines is empty) or lines[0] isnt "---"
         return "", raw
     i := 1
     for i < len(lines)
