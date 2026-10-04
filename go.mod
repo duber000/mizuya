@@ -6,7 +6,7 @@ replace kukicha.org/kukicha/stdlib => ./.kukicha/stdlib
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.4
-	kukicha.org/kukicha/stdlib v0.85.8
+	kukicha.org/kukicha/stdlib v0.85.9
 )
 
 require (
