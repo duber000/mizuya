@@ -64,7 +64,7 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
     print("  {e.Data}")
     print("")
 
-    if len(outgoing) > 0
+    if outgoing isnt empty
         print(color.Bold("outgoing:"))
         for r in outgoing
             print(
@@ -72,8 +72,8 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
             )
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
-    if len(incoming) > 0
-        if len(outgoing) > 0
+    if incoming isnt empty
+        if outgoing isnt empty
             print("")
         print(color.Bold("incoming:"))
         for r in incoming
@@ -83,8 +83,8 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
 
-    if len(obs) > 0
-        if len(outgoing) > 0 or len(incoming) > 0
+    if obs isnt empty
+        if outgoing isnt empty or incoming isnt empty
             print("")
         print(color.Bold("observations:"))
         for o in obs
@@ -101,7 +101,7 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
     print("  {e.Data}")
     print("")
 
-    if len(outgoing) > 0
+    if outgoing isnt empty
         print(color.Bold("outgoing:"))
         for r in outgoing
             print(
@@ -109,8 +109,8 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
             )
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
-    if len(incoming) > 0
-        if len(outgoing) > 0
+    if incoming isnt empty
+        if outgoing isnt empty
             print("")
         print(color.Bold("incoming:"))
         for r in incoming
@@ -120,8 +120,8 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
             if r.Summary isnt ""
                 print("     {color.Dim(r.Summary)}")
 
-    if len(obs) > 0
-        if len(outgoing) > 0 or len(incoming) > 0
+    if obs isnt empty
+        if outgoing isnt empty or incoming isnt empty
             print("")
         print(color.Bold("observations:"))
         for o in obs
