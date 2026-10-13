@@ -28,6 +28,7 @@ import "os/exec"
 import "stdlib/cli"
 import "stdlib/color"
 import "stdlib/db"
+import "stdlib/errors" as errs
 import "stdlib/files"
 import "stdlib/input"
 import "stdlib/log"
@@ -78,7 +79,7 @@ func main()
 
 func makeInitCmd() reference cli.Command
     return cli.NewCommand("init", "Initialize a new mizuya database")
-        |> .Action(doInit)
+        |> .ActionE(doInit)
 
 func makeUpsertCmd() reference cli.Command
     return cli.NewCommand("upsert", "Create or update an entity")
@@ -87,34 +88,34 @@ func makeUpsertCmd() reference cli.Command
         |> .StringFlag("name", "Human-readable name", "")
         |> .StringFlag("summary", "One-line summary", "")
         |> .StringFlag("tags", "Comma-separated tags", "")
-        |> .Action(doUpsert)
+        |> .ActionE(doUpsert)
 
 func makeObserveCmd() reference cli.Command
     return cli.NewCommand("observe", "Append an observation to an entity")
         |> .StringFlag("id", "Entity id", "")
         |> .StringFlag("text", "Observation text", "")
         |> .StringFlag("source", "Observation source", "conversation")
-        |> .Action(doObserve)
+        |> .ActionE(doObserve)
 
 func makeRelateCmd() reference cli.Command
     return cli.NewCommand("relate", "Create a typed edge between two entities")
         |> .StringFlag("src", "Source entity id", "")
         |> .StringFlag("rel", "Relation label (uses, depends_on, part_of, ...)", "related_to")
         |> .StringFlag("dst", "Destination entity id", "")
-        |> .Action(doRelate)
+        |> .ActionE(doRelate)
 
 func makeSearchCmd() reference cli.Command
     return cli.NewCommand("search", "BM25 full-text search across entities (or regex with --regex)")
         |> .StringFlag("query", "FTS5 query (or regex pattern with --regex)", "")
         |> .IntFlag("limit", "Max results", 10)
         |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
-        |> .Action(doSearch)
+        |> .ActionE(doSearch)
 
 func makeContextCmd() reference cli.Command
     return cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
         |> .StringFlag("id", "Entity id", "")
         |> .IntFlag("depth", "Hops to traverse via the closure vtable (1 = immediate neighbors)", 1)
-        |> .Action(doContext)
+        |> .ActionE(doContext)
 
 func makeSimilarCmd() reference cli.Command
     return cli.NewCommand("similar", "Vector similarity search (cosine distance)")
@@ -126,22 +127,22 @@ func makeSimilarCmd() reference cli.Command
             "Return everything in the closest N percentile of distances (1-100, 0 = use --limit instead)",
             0,
         )
-        |> .Action(doSimilar)
+        |> .ActionE(doSimilar)
 
 func makeListCmd() reference cli.Command
     return cli.NewCommand("list", "List entities (optionally filtered by --type)")
         |> .StringFlag("type", "Filter by type", "")
         |> .IntFlag("limit", "Max results", 50)
-        |> .Action(doList)
+        |> .ActionE(doList)
 
 func makeMCPCmd() reference cli.Command
     return cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
-        |> .Action(doMCP)
+        |> .ActionE(doMCP)
 
 func makeImportOpenWikiCmd() reference cli.Command
     return cli.NewCommand("import-openwiki", "Import an OpenWiki corpus into the knowledge graph")
         |> .RestArg("dir", "Path to a directory containing an openwiki/ folder")
-        |> .Action(doImportOpenWiki)
+        |> .ActionE(doImportOpenWiki)
 
 func makeDistillCmd() reference cli.Command
     return cli.NewCommand(
@@ -154,7 +155,7 @@ func makeDistillCmd() reference cli.Command
         |> .IntFlag("min-observations", "Minimum observations per entity to qualify", 3)
         |> .IntFlag("limit", "Max entities to distill in one run", 10)
         |> .BoolFlag("dry-run", "Print the prompt without calling openwiki", false)
-        |> .Action(doDistill)
+        |> .ActionE(doDistill)
 
 func makeDriftCmd() reference cli.Command
     return cli.NewCommand(
@@ -162,7 +163,7 @@ func makeDriftCmd() reference cli.Command
         "Detect observations whose source entity has changed since they were recorded",
     )
         |> .IntFlag("limit", "Max drift rows to report", 50)
-        |> .Action(doDrift)
+        |> .ActionE(doDrift)
 
 # --- Command handlers ---
 
@@ -238,11 +239,9 @@ func openPool(args: cli.Args) (db.Pool, error)
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 
-func doInit(args: cli.Args)
+func doInit(args: cli.Args) error
     dbPath := cli.GetString(args, "db")
-    files.MkDirAll(files.Dirname(dbPath)) onerr
-        errPrint("cannot create database directory: {error}")
-        return
+    files.MkDirAll(files.Dirname(dbPath)) onerr return errs.Wrap(error, "cannot create database directory")
 
     pool := sqlite.OpenWithExtensions(
         dbPath,
@@ -252,103 +251,81 @@ func doInit(args: cli.Args)
         uuidext.Register,
         spellfixext.Register,
         unicodeext.Register,
-    ) onerr
-        errPrint("cannot open database: {error}")
-        return
+    ) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
-    initDB(pool) onerr
-        errPrint("cannot initialize schema: {error}")
-        return
+    initDB(pool) onerr return errs.Wrap(error, "cannot initialize schema")
 
     if cli.IsJSON(args)
         printJSON({"status": "initialized", "db": dbPath})
     else
         print(color.Green("Initialized mizuya database at {dbPath}"))
+    return empty
 
-func doUpsert(args: cli.Args)
+func doUpsert(args: cli.Args) error
     id := cli.GetString(args, "id")
     if id equals ""
-        errPrint("--id is required")
-        return
+        return error "--id is required"
     name := cli.GetString(args, "name")
     if name equals ""
-        errPrint("--name is required")
-        return
+        return error "--name is required"
     etype := cli.GetString(args, "type")
     summary := cli.GetString(args, "summary")
     tags := parseTags(cli.GetString(args, "tags"))
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
-    upsertEntity(pool, id, etype, name, summary, tags) onerr
-        errPrint("cannot upsert entity: {error}")
-        return
+    upsertEntity(pool, id, etype, name, summary, tags) onerr return errs.Wrap(error, "cannot upsert entity")
 
     # Regenerate the embedding only if the corpus actually changed.
-    reEmbedIfChanged(pool, id) onerr
-        errPrint("cannot refresh embedding: {error}")
-        return
+    reEmbedIfChanged(pool, id) onerr return errs.Wrap(error, "cannot refresh embedding")
 
-    e := getEntity(pool, id) onerr
-        errPrint("cannot fetch upserted entity: {error}")
-        return
+    e := getEntity(pool, id) onerr return errs.Wrap(error, "cannot fetch upserted entity")
 
     if cli.IsJSON(args)
         printJSON(e)
     else
         print("{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {name}")
+    return empty
 
-func doObserve(args: cli.Args)
+func doObserve(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if id equals "" or text equals ""
-        errPrint("--id and --text are required")
-        return
+        return error "--id and --text are required"
     source := strpkg.Or(cli.GetString(args, "source"), "conversation")
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
     observeResolved(pool, args, id, text, source) onerr
-        errPrint("cannot add observation: {error}{suggestionsFor(pool, id)}")
-        return
+        return error "cannot add observation: {error:w}{suggestionsFor(pool, id)}"
 
     # Re-embed: observations are part of the entity's text corpus.
-    reEmbedIfChanged(pool, id) onerr
-        errPrint("cannot refresh embedding: {error}")
-        return
+    reEmbedIfChanged(pool, id) onerr return errs.Wrap(error, "cannot refresh embedding")
 
     if cli.IsJSON(args)
         printJSON({"status": "observed", "id": id, "text": text})
     else
         print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}")
+    return empty
 
-func doRelate(args: cli.Args)
+func doRelate(args: cli.Args) error
     src := cli.GetString(args, "src")
     rel := cli.GetString(args, "rel")
     dst := cli.GetString(args, "dst")
     if src equals "" or rel equals "" or dst equals ""
-        errPrint("--src, --rel, and --dst are required")
-        return
+        return error "--src, --rel, and --dst are required"
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
-    relate(pool, src, rel, dst) onerr
-        errPrint("cannot create relation: {error}")
-        return
+    relate(pool, src, rel, dst) onerr return errs.Wrap(error, "cannot create relation")
 
     if cli.IsJSON(args)
         printJSON({"status": "related", "src": src, "rel": rel, "dst": dst})
@@ -356,30 +333,24 @@ func doRelate(args: cli.Args)
         print(
             "{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}",
         )
+    return empty
 
-func doSearch(args: cli.Args)
+func doSearch(args: cli.Args) error
     query := cli.GetString(args, "query")
     if query equals ""
-        errPrint("--query is required")
-        return
+        return error "--query is required"
     limit := cli.GetIntOr(args, "limit", 10)
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
     useRegex := cli.GetBool(args, "regex")
     hits := empty list of SearchHit
     if useRegex
-        hits = regexSearch(pool, query, limit) onerr
-            errPrint("regex search failed: {error}")
-            return
+        hits = regexSearch(pool, query, limit) onerr return errs.Wrap(error, "regex search failed")
     else
-        hits = hybridSearch(pool, query, limit) onerr
-            errPrint("search failed: {error}")
-            return
+        hits = hybridSearch(pool, query, limit) onerr return errs.Wrap(error, "search failed")
 
     if cli.IsJSON(args)
         printJSON(hits)
@@ -389,16 +360,14 @@ func doSearch(args: cli.Args)
         else
             print("{color.Bold("search:")} {query}")
         printSearchHits(hits)
+    return empty
 
-func doContext(args: cli.Args)
+func doContext(args: cli.Args) error
     id := cli.GetString(args, "id")
     if id equals ""
-        errPrint("--id is required")
-        return
+        return error "--id is required"
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
@@ -407,26 +376,20 @@ func doContext(args: cli.Args)
         depth = 1
 
     e := resolveEntity(pool, args, id) onerr
-        errPrint("{error}{suggestionsFor(pool, id)}")
-        return
+        return error "{error:w}{suggestionsFor(pool, id)}"
 
-    obs := listObservations(pool, id) onerr
-        errPrint("cannot read observations: {error}")
-        return
+    obs := listObservations(pool, id) onerr return errs.Wrap(error, "cannot read observations")
 
     if depth > 1
-        renderDeepContext(args, pool, e, id, depth, obs)
+        renderDeepContext(args, pool, e, id, depth, obs) onerr return
         return
-    renderShallowContext(args, pool, e, id, obs)
+    renderShallowContext(args, pool, e, id, obs) onerr return
+    return empty
 
-func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow)
-    outgoing := outgoingContext(pool, id) onerr
-        errPrint("cannot read outgoing: {error}")
-        return
+func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow) error
+    outgoing := outgoingContext(pool, id) onerr return errs.Wrap(error, "cannot read outgoing")
 
-    incoming := incomingContext(pool, id) onerr
-        errPrint("cannot read incoming: {error}")
-        return
+    incoming := incomingContext(pool, id) onerr return errs.Wrap(error, "cannot read incoming")
 
     if cli.IsJSON(args)
         printJSON(map of string to any{
@@ -437,15 +400,12 @@ func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, 
         })
         return
     printContext(e, outgoing, incoming, obs)
+    return empty
 
-func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow)
-    outReach := reachableOutgoing(pool, id, depth) onerr
-        errPrint("cannot read outgoing closure: {error}")
-        return
+func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow) error
+    outReach := reachableOutgoing(pool, id, depth) onerr return errs.Wrap(error, "cannot read outgoing closure")
 
-    inReach := reachableIncoming(pool, id, depth) onerr
-        errPrint("cannot read incoming closure: {error}")
-        return
+    inReach := reachableIncoming(pool, id, depth) onerr return errs.Wrap(error, "cannot read incoming closure")
 
     if cli.IsJSON(args)
         printJSON(map of string to any{
@@ -457,43 +417,34 @@ func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, dep
         })
         return
     printReachableContext(e, depth, outReach, inReach, obs)
+    return empty
 
-func doSimilar(args: cli.Args)
+func doSimilar(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if id equals "" and text equals ""
-        errPrint("either --id or --text is required")
-        return
+        return error "either --id or --text is required"
     limit := cli.GetIntOr(args, "limit", 5)
     threshold := cli.GetIntOr(args, "threshold", 0)
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
     vec := empty list of float64
     if id isnt ""
         v := resolveEmbedding(pool, args, id) onerr
-            errPrint("{error}{suggestionsFor(pool, id)}")
-            return
+            return error "{error:w}{suggestionsFor(pool, id)}"
 
         vec = v
     else
-        vec = embedText(text) onerr
-            errPrint("cannot compute embedding: {error}")
-            return
+        vec = embedText(text) onerr return errs.Wrap(error, "cannot compute embedding")
 
     hits := empty list of SimilarHit
     if threshold > 0
-        hits = similarByPercentile(pool, vec, threshold) onerr
-            errPrint("similarity query failed: {error}")
-            return
+        hits = similarByPercentile(pool, vec, threshold) onerr return errs.Wrap(error, "similarity query failed")
     else
-        hits = similar(pool, vec, limit) onerr
-            errPrint("similarity query failed: {error}")
-            return
+        hits = similar(pool, vec, limit) onerr return errs.Wrap(error, "similarity query failed")
 
     if cli.IsJSON(args)
         printJSON(hits)
@@ -507,30 +458,28 @@ func doSimilar(args: cli.Args)
             header = header + " (closest {threshold}%)"
         print(color.Bold(header))
         printSimilarHits(hits)
+    return empty
 
-func doList(args: cli.Args)
+func doList(args: cli.Args) error
     etype := cli.GetString(args, "type")
     limit := cli.GetIntOr(args, "limit", 50)
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
-    rows := listEntities(pool, etype, limit) onerr
-        errPrint("list failed: {error}")
-        return
+    rows := listEntities(pool, etype, limit) onerr return errs.Wrap(error, "list failed")
 
     if cli.IsJSON(args)
         printJSON(rows)
     else
         printEntityList(rows)
+    return empty
 
-func doMCP(args: cli.Args)
+func doMCP(args: cli.Args) error
     dbPath := cli.GetString(args, "db")
-    startMCP(dbPath) onerr
-        errPrint("MCP server error: {error}")
+    startMCP(dbPath) onerr return errs.Wrap(error, "MCP server error")
+    return empty
 
 # OpenWikiDoc holds a parsed wiki page between the two import passes.
 type OpenWikiDoc
@@ -545,28 +494,23 @@ type OpenWikiDoc
 # "openwiki"); each markdown link [text](other.md) becomes a `references`
 # edge. Re-importing is idempotent — upsertEntity is ON CONFLICT, and
 # reEmbedIfChanged short-circuits when the content hash hasn't changed.
-func doImportOpenWiki(args: cli.Args)
+func doImportOpenWiki(args: cli.Args) error
     rest := cli.GetRest(args, "dir")
     if rest is empty
-        errPrint("usage: mizuya import-openwiki <dir>")
-        return
+        return error "usage: mizuya import-openwiki <dir>"
     baseDir := rest[0]
 
     openwikiDir := files.Join(baseDir, "openwiki")
     if not files.Exists(openwikiDir)
-        errPrint("no openwiki/ directory found at {baseDir}")
-        return
+        return error "no openwiki/ directory found at {baseDir}"
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
     entries, lErr := files.Walk(openwikiDir)
     if lErr isnt empty
-        errPrint("cannot walk openwiki dir: {lErr}")
-        return
+        return errs.Wrap(lErr, "cannot walk openwiki dir")
 
     imported := 0
     linked := 0
@@ -662,6 +606,7 @@ func doImportOpenWiki(args: cli.Args)
         printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
     else
         print("{color.Green("imported")} {imported} entities, {linked} links from {openwikiDir}")
+    return empty
 
 # --- distill ---
 
@@ -682,7 +627,7 @@ type distillObsRow
 # assembles a prompt from them, and shells out to `openwiki -p` to
 # incorporate the findings into the wiki. Selected observations are then
 # marked as distilled so they aren't re-selected.
-func doDistill(args: cli.Args)
+func doDistill(args: cli.Args) error
     minAge := cli.GetIntOr(args, "min-age-days", 7)
     minObs := cli.GetIntOr(args, "min-observations", 3)
     limit := cli.GetIntOr(args, "limit", 10)
@@ -690,18 +635,14 @@ func doDistill(args: cli.Args)
     dir := cli.GetString(args, "dir")
     openwikiCmd := cli.GetString(args, "openwiki-cmd")
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
     # Select entities with >= minObs undistilled observations older than
     # the age threshold, ordered by observation count descending.
     q := "SELECT e.id AS id, e.name AS name, COUNT(o.id) AS obs_count FROM entities e JOIN observations o ON o.entity_id = e.id WHERE o.distilled = 0 AND o.at < datetime('now', ?) GROUP BY e.id HAVING COUNT(o.id) >= ? ORDER BY obs_count DESC LIMIT ?"
-    candidates := db.Query(pool, q, "-{minAge} days", minObs, limit) |> db.ScanAll of distillRow onerr
-        errPrint("distill query failed: {error}")
-        return
+    candidates := db.Query(pool, q, "-{minAge} days", minObs, limit) |> db.ScanAll of distillRow onerr return errs.Wrap(error, "distill query failed")
 
     if candidates is empty
         if cli.IsJSON(args)
@@ -720,9 +661,7 @@ func doDistill(args: cli.Args)
     for c in candidates
         promptParts = append(promptParts, "\n## {c.Name} ({c.Id})\n")
         obsQ := "SELECT id, text, entity_id FROM observations WHERE entity_id = ? AND distilled = 0 AND at < datetime('now', ?) ORDER BY at DESC"
-        obs := db.Query(pool, obsQ, c.Id, "-{minAge} days") |> db.ScanAll of distillObsRow onerr
-            errPrint("observations query failed: {error}")
-            return
+        obs := db.Query(pool, obsQ, c.Id, "-{minAge} days") |> db.ScanAll of distillObsRow onerr return errs.Wrap(error, "observations query failed")
 
         for o in obs
             promptParts = append(promptParts, "- {o.Text}\n")
@@ -746,12 +685,10 @@ func doDistill(args: cli.Args)
         return
 
     if openwikiCmd equals ""
-        errPrint("--openwiki-cmd is required (or use --dry-run)")
-        return
+        return error "--openwiki-cmd is required (or use --dry-run)"
 
     if openwikiCmd isnt "openwiki"
-        errPrint("--openwiki-cmd must be 'openwiki' (got: {openwikiCmd})")
-        return
+        return error "--openwiki-cmd must be 'openwiki' (got: {openwikiCmd})"
 
     # Shell out to openwiki with the assembled prompt.
     ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Minute)
@@ -760,8 +697,7 @@ func doDistill(args: cli.Args)
     cmd.Dir = dir
     out, runErr := cmd.CombinedOutput()
     if runErr isnt empty
-        errPrint("openwiki distill failed: {runErr}\n{out}")
-        return
+        return error "openwiki distill failed: {runErr:w}\n{out}"
 
     # Mark the selected observations as distilled.
     for obsId in allObsIds
@@ -779,6 +715,7 @@ func doDistill(args: cli.Args)
             "{color.Green("distilled")} {len(candidates)} entities, {len(allObsIds)} observations -> {openwikiCmd}",
         )
         print(strpkg.TrimSpace(out as string))
+    return empty
 
 # --- drift ---
 
@@ -795,12 +732,10 @@ type driftRow
 # doDrift finds observations whose entity was modified (updated_at or
 # content_hash changed) after the observation was recorded. These
 # observations may reference stale information and warrant review.
-func doDrift(args: cli.Args)
+func doDrift(args: cli.Args) error
     limit := cli.GetIntOr(args, "limit", 50)
 
-    pool := openPool(args) onerr
-        errPrint("cannot open database: {error}")
-        return
+    pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
 
     defer db.Close(pool)
 
@@ -808,9 +743,7 @@ func doDrift(args: cli.Args)
     # than the observation's `at` timestamp — the entity changed after
     # the observation was recorded.
     q := "SELECT o.id AS obs_id, o.entity_id AS entity_id, e.name AS entity_name, o.text AS obs_text, o.at AS obs_at, e.updated_at AS entity_updated FROM observations o JOIN entities e ON e.id = o.entity_id WHERE e.updated_at > o.at AND o.distilled = 0 ORDER BY e.updated_at DESC LIMIT ?"
-    rows := db.Query(pool, q, limit) |> db.ScanAll of driftRow onerr
-        errPrint("drift query failed: {error}")
-        return
+    rows := db.Query(pool, q, limit) |> db.ScanAll of driftRow onerr return errs.Wrap(error, "drift query failed")
 
     if rows is empty
         if cli.IsJSON(args)
@@ -826,6 +759,7 @@ func doDrift(args: cli.Args)
         for r in rows
             print("  {color.Bold(r.EntityId)}  {color.Dim(r.ObsAt)} -> {r.EntityUpdated}")
             print("    {color.Dim(strpkg.Truncate(r.ObsText, 80))}")
+    return empty
 
 # FrontMatter is the OKF front-matter shape the openwiki importer reads.
 # Unknown keys are ignored; tags accepts both [a, b] and block-list YAML.

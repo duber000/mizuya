@@ -137,9 +137,6 @@ func printJSON(v: any)
 
     print(data as string)
 
-func errPrint(msg: string)
-    cli.Error("{color.BrightRed("error:")} {msg}")
-
 # didYouMean formats a fuzzy-suggestion list for tacking onto error
 # messages. Returns an empty string when there are no suggestions so
 # callers can append unconditionally without leading punctuation drift.
