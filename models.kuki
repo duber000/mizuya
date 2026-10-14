@@ -81,6 +81,10 @@ type SimilarHit
 type hashRow
     Hash: string as "hash"
 
+# sqlRow scans DDL text out of the sqlite_schema table.
+type sqlRow
+    SQL: string as "sql"
+
 # suggestRow is a single fuzzy-match suggestion from the spellfix1
 # vtab. Word is the matched id; we don't currently surface rank or
 # distance.
@@ -93,10 +97,8 @@ type entityData
     Summary: string as "summary"
     Tags: list of string as "tags"
 
-# vecRow scans a stored float32 LE BLOB from the vec_raw side-copy
-# column. We carry the BLOB as metadata in the vec1 table because
-# vec1's indexed `vector` column reads back in an opaque native
-# layout outside the KNN path.
+# vecRow scans a stored float32 LE BLOB from the embeddings_raw side
+# table (the vec1 vtab is write/search only — see schema.kuki).
 type vecRow
     Vec: list of byte as "vec"
 

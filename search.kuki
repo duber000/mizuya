@@ -48,13 +48,25 @@ func deserializeVec(b: list of byte) list of float64
 
 # --- Embedding storage ---
 
-# upsertEmbedding stores (or replaces) the embedding for an entity in the
-# vec1 virtual table. vec1 has no UPSERT, so we delete + insert.
+# upsertEmbedding stores (or replaces) the embedding for an entity. The
+# vec1 virtual table carries only the vector and the entity_id TEXT meta
+# column — BLOB metadata columns corrupt the %_meta arrays in the vendored
+# vec1 build during its tombstone-compress path, so the raw bytes are
+# kept in the plain embeddings_raw table for reads (see schema.kuki).
+# vec1 has no UPSERT, so we delete + insert on the vtab side.
 func upsertEmbedding(pool: db.Pool, id: string, vec: list of float64) error
     blob := serializeVec(vec)
     db.Exec(pool, "DELETE FROM embeddings_vec WHERE entity_id = ?", id) onerr return
-    q := "INSERT INTO embeddings_vec(vector, entity_id, model, dim, vec_raw) VALUES (?, ?, ?, ?, ?)"
-    db.Exec(pool, q, blob, id, embedModel(), len(vec), blob) onerr return
+    q := "INSERT INTO embeddings_vec(vector, entity_id) VALUES (?, ?)"
+    db.Exec(pool, q, blob, id) onerr return
+    db.Exec(
+        pool,
+        "INSERT OR REPLACE INTO embeddings_raw(entity_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+        id,
+        embedModel(),
+        len(vec),
+        blob,
+    ) onerr return
     return empty
 
 # similar returns the k entities whose embeddings are closest to the query
@@ -90,10 +102,12 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of
 
 # getEmbedding fetches the stored embedding for an entity (for the
 # "similar --id ..." path where we use an entity's own vector as the
-# query). vec1 stores vectors in an opaque native layout, so we read
-# them back via vec1_to_json and parse the JSON array.
+# query). Reads come from the plain embeddings_raw table — the vec1
+# vtab's `vector` column can return shifted bytes through a
+# meta-constrained scan in the vendored build, so it is write/search
+# only.
 func getEmbedding(pool: db.Pool, id: string) (list of float64, error)
-    result := db.Query(pool, "SELECT vec_raw AS vec FROM embeddings_vec WHERE entity_id = ?", id)
+    result := db.Query(pool, "SELECT vec AS vec FROM embeddings_raw WHERE entity_id = ?", id)
         |> db.ScanOne of vecRow
     vec := deserializeVec(result.Vec)
     if vec equals empty

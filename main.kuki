@@ -236,6 +236,10 @@ func openPool(args: cli.Args) (db.Pool, error)
         spellfixext.Register,
         unicodeext.Register,
     ) onerr return
+    # Repair databases still on the old vec1 layout (with the vec_raw
+    # BLOB metadata column) before any write touches the vector index.
+    # No-op on current databases.
+    migrateVec1Schema(pool) onerr return
     refreshFuzzyIds(pool) onerr return
     return pool, empty
 

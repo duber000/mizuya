@@ -11,6 +11,7 @@ petiole main
 
 import "stdlib/db"
 import "stdlib/sqlite"
+import "stdlib/string" as strpkg
 
 # --- Table DDL ---
 
@@ -33,10 +34,30 @@ const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMAR
 # scan inside vec1 (no training step) — fine for thousands of entities.
 # Bump to a trained IVFADC model later by replacing the rebuild config.
 # Vector column accepts 4-byte-aligned BLOBs (float32 LE).
-# vec_raw mirrors the float32 BLOB we inserted into `vector`. vec1's
-# `vector` column reads back in an opaque native layout outside the KNN
-# path, so we keep a side-copy as metadata for `getEmbedding`.
-const embeddingsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_vec USING vec1(vector, entity_id, model, dim, vec_raw)"
+#
+# NB: the vtab carries only a single TEXT metadata column (entity_id).
+# The vendored vec1 wasm build (v6.3.35304) has two defects that constrain
+# the schema:
+#   1. Its tombstone-compress path (vec1ListBuilderCompress) leaves the
+#      %_meta array for a BLOB-valued column one byte too long per
+#      compress, which desyncs the meta-value walk and SIGSEGVs the
+#      process once enough drift accumulates (~27 embeddings under the
+#      observe workload). BLOB metadata columns are therefore forbidden.
+#   2. Reading the `vector` column back through a meta-constrained scan
+#      can return shifted bytes depending on cursor state. The vtab is
+#      write-and-search only.
+# Raw vectors for `similar --id` are served from the plain embeddings_raw
+# table instead; see migrateVec1Schema.
+const embeddingsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_vec USING vec1(vector, entity_id)"
+
+# embeddings_raw is the authoritative side store of the raw float32 LE
+# embedding blobs plus their provenance (model, dim). A plain table: no
+# vec1 code path touches reads or writes here.
+const embeddingsRawSQL = "CREATE TABLE IF NOT EXISTS embeddings_raw (entity_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)"
+
+# Plain tables can't rely on the vec1 cascade trigger. A second trigger
+# keeps the raw side store in sync when an entity is deleted.
+const embeddingsRawCascadeSQL = "CREATE TRIGGER IF NOT EXISTS embeddings_raw_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM embeddings_raw WHERE entity_id = old.id; END"
 
 const embeddingsRebuildSQL = `INSERT INTO embeddings_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
 
@@ -94,6 +115,8 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, relationsSQL) onerr return
         db.TxExec(tx, observationsSQL) onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
+        db.TxExec(tx, embeddingsRawSQL) onerr return
+        db.TxExec(tx, embeddingsRawCascadeSQL) onerr return
         db.TxExec(tx, embeddingsRebuildSQL) onerr return
         db.TxExec(tx, embeddingsCascadeSQL) onerr return
         db.TxExec(tx, entitiesFtsSQL) onerr return
@@ -111,6 +134,7 @@ func initDB(pool: db.Pool) error
         return empty
     )
 
+    migrateVec1Schema(pool) onerr return
     migrateObsDistilled(pool)
     return empty
 
@@ -121,4 +145,67 @@ func migrateObsDistilled(pool: db.Pool) error
     if exists
         return empty
     db.Exec(pool, migrateObsDistilledSQL) onerr return
+    return empty
+
+# --- vec1 schema migration ---
+#
+# migrateVec1Schema repairs databases created with the old
+# `vec1(vector, entity_id, model, dim, vec_raw)` layout. The vec_raw BLOB
+# metadata column trips a bug in the vendored vec1 wasm build: its
+# tombstone-compress path (vec1ListBuilderCompress) leaves the %_meta
+# array for a BLOB-valued column one byte too long on every compress,
+# which desyncs the meta-value walk and SIGSEGVs the process once enough
+# drift accumulates (~27 embeddings under the observe workload). Reads
+# still work on affected databases, so we copy the rows out through the
+# vtab (whose entity_id/meta arrays stay self-consistent), drop the
+# corrupted shadow tables with the vtab, and repopulate the current
+# schema plus the embeddings_raw side store. Idempotent — the probe
+# queries make it a no-op on migrated and fresh databases.
+func migrateVec1Schema(pool: db.Pool) error
+    rows := db.Query(pool, "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'embeddings_vec'")
+        |> db.ScanAll of sqlRow
+    if rows is empty
+        return empty
+    if not strpkg.Contains(rows[0].SQL, "vec_raw")
+        return backfillRawEmbeddings(pool)
+
+    db.Transaction(pool, tx =>
+        db.TxExec(
+            tx,
+            "CREATE TABLE embeddings_vec_migrate AS SELECT vector, entity_id, model, dim FROM embeddings_vec",
+        ) onerr return
+        db.TxExec(tx, "DROP TABLE embeddings_vec") onerr return
+        db.TxExec(tx, embeddingsSQL) onerr return
+        db.TxExec(
+            tx,
+            "INSERT INTO embeddings_vec(vector, entity_id) SELECT vector, entity_id FROM embeddings_vec_migrate",
+        ) onerr return
+        db.TxExec(tx, embeddingsRawSQL) onerr return
+        db.TxExec(
+            tx,
+            "INSERT OR REPLACE INTO embeddings_raw(entity_id, model, dim, vec) SELECT entity_id, model, dim, vector FROM embeddings_vec_migrate",
+        ) onerr return
+        db.TxExec(tx, embeddingsRebuildSQL) onerr return
+        db.TxExec(tx, "DROP TABLE embeddings_vec_migrate") onerr return
+        return empty
+    ) onerr return
+    return empty
+
+# backfillRawEmbeddings populates embeddings_raw for databases whose vec1
+# table already has the current layout but whose raw side store is missing
+# rows (e.g. a database touched by an intermediate build). No-op once
+# every vec1 row has a raw copy.
+func backfillRawEmbeddings(pool: db.Pool) error
+    db.Exec(pool, embeddingsRawSQL) onerr return
+    db.Exec(pool, embeddingsRawCascadeSQL) onerr return
+    missing := db.Count(
+        pool,
+        "SELECT count(*) FROM embeddings_vec v WHERE NOT EXISTS (SELECT 1 FROM embeddings_raw r WHERE r.entity_id = v.entity_id)",
+    )
+    if missing equals 0
+        return empty
+    db.Exec(
+        pool,
+        "INSERT OR REPLACE INTO embeddings_raw(entity_id, model, dim, vec) SELECT entity_id, 'unknown', 0, vector FROM embeddings_vec WHERE entity_id NOT IN (SELECT entity_id FROM embeddings_raw)",
+    ) onerr return
     return empty
