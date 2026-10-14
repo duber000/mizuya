@@ -227,7 +227,7 @@ func openPool(args: cli.Args) (db.Pool, error)
     files.MkDirAll(files.Dirname(dbPath)) onerr return
     pool := sqlite.OpenWithExtensions(
         dbPath,
-        empty map of string to string,
+        map of string to string{"journal_mode": "WAL"},
         vec1ext.Register,
         regexpext.Register,
         fts5ext.Register,
@@ -249,7 +249,7 @@ func doInit(args: cli.Args) error
 
     pool := sqlite.OpenWithExtensions(
         dbPath,
-        empty map of string to string,
+        map of string to string{"journal_mode": "WAL"},
         vec1ext.Register,
         fts5ext.Register,
         uuidext.Register,

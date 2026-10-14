@@ -414,7 +414,7 @@ func handleSimilar(args: similarArgs) (any, error)
 func openMCPPool() (db.Pool, error)
     pool := sqlite.OpenWithExtensions(
         mcpDBPath,
-        empty map of string to string,
+        map of string to string{"journal_mode": "WAL"},
         fts5ext.Register,
         statsext.Register,
         unicodeext.Register,
