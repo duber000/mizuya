@@ -177,8 +177,7 @@ func pickSuggestion(pool: db.Pool, args: cli.Args, id: string) string
     ids, serr := suggestIds(pool, id, 3)
     if serr isnt empty or (ids is empty)
         return ""
-    idx := input.Choose("'{id}' not found — did you mean:", ids) onerr return ""
-    return ids[idx]
+    return input.ChooseValue("'{id}' not found — did you mean:", ids) onerr return ""
 
 # resolveEntity fetches an entity by id; on a miss with an interactive TTY
 # (outside JSON mode), offers fuzzy matches for selection and re-fetches.
