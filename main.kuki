@@ -177,14 +177,15 @@ func pickSuggestion(pool: db.Pool, args: cli.Args, id: string) string
     ids, serr := suggestIds(pool, id, 3)
     if serr isnt empty or (ids is empty)
         return ""
-    return input.ChooseValue("'{id}' not found — did you mean:", ids) onerr return ""
+    picked := input.ChooseValue("'{id}' not found — did you mean:", ids) onerr return ""
+    return picked
 
 # resolveEntity fetches an entity by id; on a miss with an interactive TTY
 # (outside JSON mode), offers fuzzy matches for selection and re-fetches.
 func resolveEntity(pool: db.Pool, args: cli.Args, id: string) (Entity, error)
     e := getEntity(pool, id) onerr
         picked := pickSuggestion(pool, args, id)
-        if picked equals ""
+        if picked is empty
             return Entity{}, error "entity not found: {id}"
         refetched, rerr := getEntity(pool, picked)
         if rerr isnt empty
@@ -198,7 +199,7 @@ func resolveEntity(pool: db.Pool, args: cli.Args, id: string) (Entity, error)
 func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float64, error)
     v := getEmbedding(pool, id) onerr
         picked := pickSuggestion(pool, args, id)
-        if picked equals ""
+        if picked is empty
             return empty list of float64, error "no embedding for {id}"
         refetched, rerr := getEmbedding(pool, picked)
         if rerr isnt empty
@@ -214,7 +215,7 @@ func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, so
     if aerr equals empty
         return empty
     picked := pickSuggestion(pool, args, id)
-    if picked equals ""
+    if picked is empty
         return aerr
     return addObservation(pool, picked, text, source)
 
@@ -268,10 +269,10 @@ func doInit(args: cli.Args) error
 
 func doUpsert(args: cli.Args) error
     id := cli.GetString(args, "id")
-    if id equals ""
+    if id is empty
         return error "--id is required"
     name := cli.GetString(args, "name")
-    if name equals ""
+    if name is empty
         return error "--name is required"
     etype := cli.GetString(args, "type")
     summary := cli.GetString(args, "summary")
@@ -297,7 +298,7 @@ func doUpsert(args: cli.Args) error
 func doObserve(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
-    if id equals "" or text equals ""
+    if (id is empty) or (text is empty)
         return error "--id and --text are required"
     source := strpkg.Or(cli.GetString(args, "source"), "conversation")
 
@@ -321,7 +322,7 @@ func doRelate(args: cli.Args) error
     src := cli.GetString(args, "src")
     rel := cli.GetString(args, "rel")
     dst := cli.GetString(args, "dst")
-    if src equals "" or rel equals "" or dst equals ""
+    if (src is empty) or (rel is empty) or (dst is empty)
         return error "--src, --rel, and --dst are required"
 
     pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
@@ -340,7 +341,7 @@ func doRelate(args: cli.Args) error
 
 func doSearch(args: cli.Args) error
     query := cli.GetString(args, "query")
-    if query equals ""
+    if query is empty
         return error "--query is required"
     limit := cli.GetIntOr(args, "limit", 10)
 
@@ -367,7 +368,7 @@ func doSearch(args: cli.Args) error
 
 func doContext(args: cli.Args) error
     id := cli.GetString(args, "id")
-    if id equals ""
+    if id is empty
         return error "--id is required"
 
     pool := openPool(args) onerr return errs.Wrap(error, "cannot open database")
@@ -425,7 +426,7 @@ func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, dep
 func doSimilar(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
-    if id equals "" and text equals ""
+    if (id is empty) and (text is empty)
         return error "either --id or --text is required"
     limit := cli.GetIntOr(args, "limit", 5)
     threshold := cli.GetIntOr(args, "threshold", 0)
@@ -435,7 +436,7 @@ func doSimilar(args: cli.Args) error
     defer db.Close(pool)
 
     vec := empty list of float64
-    if id isnt ""
+    if id isnt empty
         v := resolveEmbedding(pool, args, id) onerr
             return error "{error:w}{suggestionsFor(pool, id)}"
 
@@ -453,7 +454,7 @@ func doSimilar(args: cli.Args) error
         printJSON(hits)
     else
         header := ""
-        if id isnt ""
+        if id isnt empty
             header = "similar to: {id}"
         else
             header = "similar to text: {text}"
@@ -533,7 +534,7 @@ func doImportOpenWiki(args: cli.Args) error
 
         fmBlock, body := splitFrontMatter(raw)
         var fm: FrontMatter
-        if fmBlock isnt ""
+        if fmBlock isnt empty
             fm = parse.YAML of FrontMatter from fmBlock onerr
                 log.Warn(
                     "import-openwiki: skipping file with bad front matter",
@@ -553,11 +554,11 @@ func doImportOpenWiki(args: cli.Args) error
         if _, perr := ParseEntityType(etype); perr isnt empty
             etype = "concept"
         tags := list of string{"openwiki"}
-        if fm.entityType isnt ""
+        if fm.entityType isnt empty
             tags = append(tags, strpkg.ToLower(fm.entityType))
         for t in fm.tags
             t = strpkg.TrimSpace(t)
-            if t isnt ""
+            if t isnt empty
                 tags = append(tags, t)
 
         upsertEntity(pool, slug, etype, name, summary, tags) onerr
@@ -687,7 +688,7 @@ func doDistill(args: cli.Args) error
             print(prompt)
         return
 
-    if openwikiCmd equals ""
+    if openwikiCmd is empty
         return error "--openwiki-cmd is required (or use --dry-run)"
 
     if openwikiCmd isnt "openwiki"
@@ -793,7 +794,7 @@ func firstParagraph(body: string) string
     lines := strpkg.Split(body, "\n")
     for line in lines
         t := strpkg.TrimSpace(line)
-        if t isnt "" and not strpkg.HasPrefix(t, "#")
+        if t isnt empty and not strpkg.HasPrefix(t, "#")
             return t
     return ""
 

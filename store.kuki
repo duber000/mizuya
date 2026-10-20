@@ -52,7 +52,7 @@ func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, err
     parts := empty list of string
     parts = append(parts, "SELECT id, type, name, json(data) AS data, created_at, updated_at FROM entities")
     args := empty list of any
-    if etype isnt ""
+    if etype isnt empty
         parts = append(parts, "WHERE type = ?")
         args = append(args, etype)
     parts = append(parts, "ORDER BY updated_at DESC")
@@ -108,12 +108,12 @@ func entityText(pool: db.Pool, id: string) (string, error)
 
     # Pull summary out of the stored JSON via typed unmarshal.
     ed := jsonpkg.Parse of entityData from e.Data
-    if ed.Summary isnt ""
+    if ed.Summary isnt empty
         parts = append(parts, ed.Summary)
 
     obs := listObservations(pool, id) onerr return "", error
     texts := obs
-        |> slice.Filter(o => o.Text isnt "")
+        |> slice.Filter(o => o.Text isnt empty)
         |> slice.Map(o => o.Text)
     parts = append(parts, many texts)
 
@@ -151,7 +151,7 @@ func reEmbedIfChanged(pool: db.Pool, id: string) (bool, error)
         return false, err
     h := corpusHash(text)
     prev := storedHash(pool, id) onerr return false, error
-    if prev equals h and prev isnt ""
+    if prev equals h and prev isnt empty
         return false, empty
     vec := embedText(text) onerr return false, error
     upsertEmbedding(pool, id, vec) onerr return false, error
@@ -200,7 +200,7 @@ func incomingContext(pool: db.Pool, id: string) (list of ContextRow, error)
 # empty (and no error) if the vtab is empty or no candidates pass
 # spellfix's similarity threshold.
 func suggestIds(pool: db.Pool, query: string, k: int) (list of string, error)
-    if query equals "" or k <= 0
+    if (query is empty) or k <= 0
         return empty list of string, empty
     q := "SELECT word FROM entity_ids_fuzzy WHERE word MATCH ? AND top=?"
     rows := db.Query(pool, q, query, k) |> db.ScanAll of suggestRow

@@ -70,7 +70,7 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
             print(
                 "  {color.Green("--{r.Rel}->")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
             )
-            if r.Summary isnt ""
+            if r.Summary isnt empty
                 print("     {color.Dim(r.Summary)}")
     if incoming isnt empty
         if outgoing isnt empty
@@ -80,7 +80,7 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
             print(
                 "  {color.Blue("<-{r.Rel}--")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
             )
-            if r.Summary isnt ""
+            if r.Summary isnt empty
                 print("     {color.Dim(r.Summary)}")
 
     if obs isnt empty
@@ -89,7 +89,7 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
         print(color.Bold("observations:"))
         for o in obs
             src := o.Source
-            if src equals ""
+            if src is empty
                 src = "conversation"
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
 
@@ -107,7 +107,7 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
             print(
                 "  {color.Green("[+{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
             )
-            if r.Summary isnt ""
+            if r.Summary isnt empty
                 print("     {color.Dim(r.Summary)}")
     if incoming isnt empty
         if outgoing isnt empty
@@ -117,7 +117,7 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
             print(
                 "  {color.Blue("[-{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
             )
-            if r.Summary isnt ""
+            if r.Summary isnt empty
                 print("     {color.Dim(r.Summary)}")
 
     if obs isnt empty
@@ -126,7 +126,7 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
         print(color.Bold("observations:"))
         for o in obs
             src := o.Source
-            if src equals ""
+            if src is empty
                 src = "conversation"
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
 
@@ -158,8 +158,8 @@ func suggestionsFor(pool: db.Pool, id: string) string
 # parseTags splits a comma-separated tag string into a trimmed slice,
 # dropping empty entries.
 func parseTags(raw: string) list of string
-    if raw equals ""
+    if raw is empty
         return empty list of string
     return strpkg.Split(raw, ",")
         |> slice.Map(s => strpkg.TrimSpace(s))
-        |> slice.Filter(s => s isnt "")
+        |> slice.Filter(s => s isnt empty)

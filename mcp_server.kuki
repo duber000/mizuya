@@ -110,7 +110,7 @@ func listEntitiesResource(uri: string) (string, error)
 
 func entityContextResource(uri: string) (string, error)
     id := strpkg.TrimPrefix(uri, "entity://")
-    if id equals ""
+    if id is empty
         return "", error "missing entity ID in URI: {uri}"
 
     pool := openMCPPool() onerr return "", error
@@ -165,11 +165,11 @@ func registerUpsertEntity(server: reference mcp.Server)
     )
 
 func handleUpsertEntity(args: upsertEntityArgs) (any, error)
-    if args.Id equals "" or args.Name equals ""
+    if (args.Id is empty) or (args.Name is empty)
         return mcp.ErrorResult("id and name are required"), empty
 
     etype := args.Type
-    if etype equals ""
+    if etype is empty
         etype = "concept"
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
@@ -202,11 +202,11 @@ func registerAddObservation(server: reference mcp.Server)
     )
 
 func handleAddObservation(args: addObservationArgs) (any, error)
-    if args.EntityId equals "" or args.Text equals ""
+    if (args.EntityId is empty) or (args.Text is empty)
         return mcp.ErrorResult("entity_id and text are required"), empty
 
     source := args.Source
-    if source equals ""
+    if source is empty
         source = "conversation"
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
@@ -242,7 +242,7 @@ func registerRelate(server: reference mcp.Server)
     )
 
 func handleRelate(args: relateArgs) (any, error)
-    if args.Src equals "" or args.Rel equals "" or args.Dst equals ""
+    if (args.Src is empty) or (args.Rel is empty) or (args.Dst is empty)
         return mcp.ErrorResult("src, rel, and dst are required"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
@@ -275,7 +275,7 @@ func registerSearchTool(server: reference mcp.Server)
     )
 
 func handleSearch(args: searchArgs) (any, error)
-    if args.Query equals ""
+    if args.Query is empty
         return mcp.ErrorResult("query is required"), empty
 
     limit := args.Limit
@@ -313,7 +313,7 @@ func registerGetContext(server: reference mcp.Server)
     )
 
 func handleGetContext(args: getContextArgs) (any, error)
-    if args.Id equals ""
+    if args.Id is empty
         return mcp.ErrorResult("id is required"), empty
 
     depth := args.Depth
@@ -381,7 +381,7 @@ func registerSimilarTool(server: reference mcp.Server)
     )
 
 func handleSimilar(args: similarArgs) (any, error)
-    if args.Id equals "" and args.Text equals ""
+    if (args.Id is empty) and (args.Text is empty)
         return mcp.ErrorResult("either id or text is required"), empty
 
     limit := args.Limit
@@ -392,7 +392,7 @@ func handleSimilar(args: similarArgs) (any, error)
     defer db.Close(pool)
 
     vec := empty list of float64
-    if args.Id isnt ""
+    if args.Id isnt empty
         vec = getEmbedding(pool, args.Id) onerr return mcp.ErrorResult("no embedding for {args.Id}: {error}{suggestionsFor(pool, args.Id)}"), empty
     else
         vec = embedText(args.Text) onerr return mcp.ErrorResult("embed failed: {error}"), empty

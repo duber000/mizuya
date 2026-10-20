@@ -40,9 +40,9 @@ func loadEmbedConfig() embedConfig
     model := env.GetOr("MIZUYA_EMBED_MODEL", "")
     apiKey := env.GetOr("MIZUYA_EMBED_API_KEY", "")
 
-    if provider equals "ollama" and model equals ""
+    if provider equals "ollama" and (model is empty)
         model = "nomic-embed-text"
-    if provider equals "openai" and model equals ""
+    if provider equals "openai" and (model is empty)
         model = "text-embedding-3-small"
     return embedConfig{provider: provider, url: url, model: model, apiKey: apiKey}
 
@@ -50,12 +50,12 @@ func loadEmbedConfig() embedConfig
 # Falls back to hashEmbed when no provider is set.
 func embedText(text: string) (list of float64, error)
     cfg := loadEmbedConfig()
-    if cfg.provider equals ""
+    if cfg.provider is empty
         return hashEmbed(text, EmbedDim), empty
     client := embeddings.New(cfg.model) |> embeddings.Provider(cfg.provider)
-    if cfg.url isnt ""
+    if cfg.url isnt empty
         client = embeddings.BaseURL(client, cfg.url)
-    if cfg.apiKey isnt ""
+    if cfg.apiKey isnt empty
         client = embeddings.APIKey(client, cfg.apiKey)
     vec32 := embeddings.EmbedOne(client, text)
     out := make(list of float64, len(vec32))
@@ -67,6 +67,6 @@ func embedText(text: string) (list of float64, error)
 # used when storing the model tag alongside the embedding.
 func embedModel() string
     cfg := loadEmbedConfig()
-    if cfg.provider equals ""
+    if cfg.provider is empty
         return EmbedModel
     return cfg.model
