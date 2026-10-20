@@ -5,7 +5,6 @@ petiole main
 
 import "stdlib/crypto"
 import "stdlib/db"
-import "stdlib/errors" as errs
 import "stdlib/json" as jsonpkg
 import "stdlib/slice"
 import "stdlib/sqlite"

@@ -5,10 +5,12 @@
 petiole main
 
 import "stdlib/db"
-import "stdlib/errors" as errs
+import "stdlib/env"
 import "stdlib/json" as jsonpkg
 import "stdlib/jsonschema"
+import "stdlib/log"
 import "stdlib/mcp"
+import "stdlib/profile"
 import "stdlib/slice"
 import "stdlib/sqlite"
 import "stdlib/string" as strpkg
@@ -79,6 +81,14 @@ func startMCP(dbPath: string) error
     server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())
     registerTools(server)
     registerResources(server)
+    # CPU profiling is opt-in: MIZUYA_CPU_PROFILE names the output path.
+    profilePath := env.GetOr("MIZUYA_CPU_PROFILE", "")
+    if profilePath isnt empty
+        log.Info("CPU profile enabled", "path", profilePath)
+        profile.CPU(profilePath, func() error
+            return mcp.Serve(server)
+        ) onerr return
+        return empty
     return mcp.Serve(server)
 
 # registerResources exposes knowledge graph data as MCP resources.
@@ -116,7 +126,7 @@ func entityContextResource(uri: string) (string, error)
     pool := openMCPPool() onerr return "", error
     defer db.Close(pool)
 
-    e := getEntity(pool, id) onerr return "", errs.Wrap(error, "entity not found: {id}")
+    e := getEntity(pool, id) onerr explain "entity not found: {id}"
     outgoing := outgoingContext(pool, id) onerr return "", error
     incoming := incomingContext(pool, id) onerr return "", error
     obs := listObservations(pool, id) onerr return "", error
