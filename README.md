@@ -48,7 +48,11 @@ binary at ./mizuya
 | `mcp`     | Start the MCP stdio server for AI agent access                          |
 
 All commands accept the global `--db <path>` (default `.mizuya/mizuya.db`)
-and `--json` for structured output.
+and `--json` for structured output. The exact `--json` shapes of every
+command are a stable, parseable contract — see
+[docs/output-contract.md](docs/output-contract.md). In text mode, search and
+similar print a ready-to-run drill-down line per hit (`→ context --id <id>
+--history`).
 
 ## Append-only beliefs (funes-style)
 

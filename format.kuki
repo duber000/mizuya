@@ -25,6 +25,12 @@ func printEntityList(rows: list of Entity)
         t = t |> table.AddRowValues(e.Id, e.Type, strpkg.Truncate(e.Name, 40), e.UpdatedAt)
     t |> table.Print()
 
+# drillHint returns the ready-to-run drill-down line for a hit, funes-style:
+# the hit's id is the stable coordinate — `context`/`get_context` on it shows
+# the observations (each with its own id) and, with --history, the version log.
+func drillHint(id: string) string
+    return "context --id {id} --history"
+
 func printSearchHits(hits: list of SearchHit)
     if hits is empty
         print(color.Dim("  No matches."))
@@ -42,6 +48,9 @@ func printSearchHits(hits: list of SearchHit)
                 strpkg.Truncate(h.Summary, 60),
             )
     t |> table.Print()
+    # One ready-to-run drill-down line per hit, funes' `→ get ...` convention.
+    for h in hits
+        print("  {color.Dim("→")} {drillHint(h.Id)}")
 
 func printSimilarHits(hits: list of SimilarHit)
     if hits is empty
@@ -60,6 +69,8 @@ func printSimilarHits(hits: list of SimilarHit)
                 strpkg.Truncate(h.Summary, 60),
             )
     t |> table.Print()
+    for h in hits
+        print("  {color.Dim("→")} {drillHint(h.Id)}")
 
 # printHistory renders the append-only version log of an entity, newest
 # first. No-op when the caller did not request history.

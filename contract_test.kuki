@@ -1,0 +1,114 @@
+# mizuya — output contract tests.
+#
+# These pin the exact --json shape of every exported row type, so the
+# stability promise in docs/output-contract.md is enforced by CI: a field
+# rename or removal fails here. Self-contained on purpose — a *_test.kuki
+# cannot see helpers from a sibling *_test.kuki (kukicha checker treats
+# each test file in isolation).
+
+petiole main
+
+import "stdlib/json" as jsonpkg
+import "stdlib/string" as strpkg
+import "stdlib/test"
+import "testing"
+
+# assertJSONKeys marshals v and asserts the top-level object has exactly
+# the wanted key set — no missing, no extra fields.
+func assertJSONKeys(t: reference testing.T, v: any, want: list of string)
+    raw, err := jsonpkg.Bytes(v)
+    test.AssertNoError(t, err)
+    m, perr := jsonpkg.Parse of map of string to any from raw as string
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, len(m), len(want), "key count for {raw as string}")
+    for k in want
+        test.AssertTrue(t, k in m, "missing key {k} in {raw as string}")
+
+func TestSearchHitContract(t: reference testing.T)
+    h := SearchHit{
+        Id: "duck",
+        Type: "concept",
+        Name: "Donald Duck",
+        Summary: "s",
+        UpdatedAt: "2026-11-05 17:04:18",
+        Score: 0.0328,
+    }
+    assertJSONKeys(t, h, list of string{"id", "type", "name", "summary", "updated_at", "score"})
+
+func TestSimilarHitContract(t: reference testing.T)
+    h := SimilarHit{
+        Id: "duck",
+        Name: "Donald Duck",
+        Type: "concept",
+        Summary: "s",
+        UpdatedAt: "2026-11-05 17:04:18",
+        Distance: 0.73,
+    }
+    assertJSONKeys(t, h, list of string{"id", "name", "type", "summary", "updated_at", "distance"})
+
+func TestEntityContract(t: reference testing.T)
+    e := Entity{
+        Id: "duck",
+        Type: "concept",
+        Name: "Donald Duck",
+        Data: "{\"summary\":\"s\",\"tags\":[]}",
+        CreatedAt: "2026-11-05 17:04:18",
+        UpdatedAt: "2026-11-05 17:05:00",
+    }
+    assertJSONKeys(t, e, list of string{"id", "type", "name", "data", "created_at", "updated_at"})
+
+func TestObsRowContract(t: reference testing.T)
+    o := ObsRow{
+        Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
+        Text: "t",
+        Source: "conversation",
+        At: "2026-11-05 17:04:18.647",
+        Supersedes: "",
+    }
+    assertJSONKeys(t, o, list of string{"id", "text", "source", "at", "supersedes"})
+
+func TestHistoryRowContract(t: reference testing.T)
+    h := HistoryRow{
+        Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
+        EntityId: "duck",
+        Type: "concept",
+        Name: "Donald Duck",
+        Data: "{}",
+        ChangedAt: "2026-11-05 17:04:18.647",
+    }
+    assertJSONKeys(t, h, list of string{"id", "entity_id", "type", "name", "data", "changed_at"})
+
+func TestDriftRowContract(t: reference testing.T)
+    r := DriftRow{
+        ObsId: "o",
+        EntityId: "duck",
+        EntityName: "Donald Duck",
+        ObsText: "t",
+        ObsAt: "2026-11-05 17:04:18.647",
+        EntityUpdated: "2026-11-05 17:05:00",
+    }
+    assertJSONKeys(
+        t,
+        r,
+        list of string{"obs_id", "entity_id", "entity_name", "obs_text", "obs_at", "entity_updated"},
+    )
+
+func TestContextRowContract(t: reference testing.T)
+    r := ContextRow{Rel: "uses", Other: "sqlite", Name: "SQLite", Type: "tool", Summary: "s"}
+    assertJSONKeys(t, r, list of string{"rel", "other", "name", "type", "summary"})
+
+func TestReachableRowContract(t: reference testing.T)
+    r := ReachableRow{Depth: 2, Other: "sqlite", Name: "SQLite", Type: "tool", Summary: "s"}
+    assertJSONKeys(t, r, list of string{"depth", "other", "name", "type", "summary"})
+
+# TestDrillHint pins the funes-style ready-to-run drill-down line printed
+# after each search/similar hit in text mode.
+func TestDrillHint(t: reference testing.T)
+    test.AssertEqual(t, drillHint("duck"), "context --id duck --history")
+    test.AssertEqual(t, drillHint("a/b"), "context --id a/b --history")
+
+# TestContractKeysSorted sanity: the contract lists are themselves stable
+# inputs — guard against accidental edits to the shared shapes above.
+func TestContractListsUnchanged(t: reference testing.T)
+    keys := list of string{"id", "type", "name", "summary", "updated_at", "score"}
+    test.AssertEqual(t, strpkg.Join(keys, ","), "id,type,name,summary,updated_at,score")

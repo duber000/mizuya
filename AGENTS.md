@@ -62,11 +62,8 @@ Never silently overwrite what an entity was. `upsertEntity` appends the post-upd
 Tracker lives in [TODO.md](TODO.md) ("Funes lessons" section). Status:
 
 - **Phase 1 — append-only beliefs, read-time synthesis: DONE** (commit `18e5f32`). `entity_history` version log, `observations.supersedes`, `--since/--until/--as-of`, drift rework, `updated_at`+RRF `score` on hits, tests + labeled recall benchmark. See README "Append-only beliefs".
-- **Phase 2 — stable output contract + agent ergonomics: NEXT.**
-  - Document the exact `--json` shape of every command as a stable contract (funes' "agent format": a contract, not a presentation — don't parse loosely). Put it in README or `docs/`.
-  - Add drill-down hints to search hits (funes' `→ get <session> --from --to` line): each hit should name the coordinates to fetch more context (e.g. entity id + observation ids already do this via `get_context`).
-  - MCP tool descriptions already state defaults and token cost (done in phase 1) — keep that convention for any new tool.
-- **Phase 3 — safety, idempotency, measurement: pending.** Fail-closed secret scanner gating `import-openwiki`/`observe`; idempotent import (content-hash dedup, write-temp-then-rename); `docs/STORAGE.md` cost model; "tested and abandoned" retrieval list.
+- **Phase 2 — stable output contract + agent ergonomics: DONE.** `docs/output-contract.md` pins every command's `--json` shape (additive-only rule); enforced by `contract_test.kuki`. Text-mode search/similar print a ready-to-run `→ context --id <id> --history` drill-down line per hit; a hit's `id` is the stable drill coordinate (MCP: `get_context`). Keep the "defaults + token cost in tool descriptions" convention for new MCP tools.
+- **Phase 3 — safety, idempotency, measurement: NEXT.** Fail-closed secret scanner gating `import-openwiki`/`observe`; idempotent import (content-hash dedup, write-temp-then-rename); `docs/STORAGE.md` cost model; "tested and abandoned" retrieval list.
 
 Design principle behind all of it (from funes' RATIONALE): defer to the reader — keep the raw record intact, resolve obsolescence at read time, no LLM in the ingest path, recall is pulled not pushed.
 

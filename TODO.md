@@ -104,11 +104,15 @@ Phase 1 — append-only beliefs, read-time synthesis — **done**:
       already caught a real bug: `sort.ByKeyDesc` returns a copy, so the
       RRF top-k cut was random map order.
 
-Phase 2 — provenance/stable output contract + agent ergonomics — pending:
+Phase 2 — provenance/stable output contract + agent ergonomics — **done**:
 
-- [ ] Document the exact `--json` output shape of every command as a stable
-      contract ("don't parse loosely", like funes' agent format).
-- [ ] Drill-down hints on hits (funes' `→ get <session> --from --to` line).
+- [x] `docs/output-contract.md` pins the exact `--json` shape of every
+      command and shared row type (additive-only stability rule, error shape,
+      drill-down coordinate). Enforced by `contract_test.kuki`.
+- [x] Drill-down hints: text-mode search/similar print one ready-to-run
+      `→ context --id <id> --history` line per hit (funes' `→ get ...`
+      convention); MCP `search` description names `get_context` as the
+      drill-down.
 
 Phase 3 — safety, idempotency, measurement — pending:
 
