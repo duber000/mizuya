@@ -1,0 +1,120 @@
+# mizuya — secret scanning and redaction (funes' fail-closed gate, local).
+#
+# Pluggable behind the SecretScanner interface (funes' design): the default
+# is an offline regex scanner with no external binary, but any engine can be
+# swapped in. Fail-closed by contract: a scanner that cannot run returns an
+# error, never "clean" — callers must propagate that error and refuse the
+# write, exactly like funes' trufflehog gate.
+#
+# Redaction model: a matched secret is replaced in place with
+# `[REDACTED:<detector>]`; the finding keeps the detector name but callers
+# must never log Finding.Raw.
+#
+# Mode is controlled by MIZUYA_SECRET_SCAN: "redact" (default) or "off".
+# Any other value is an error, not a silent default.
+
+petiole main
+
+import "stdlib/env"
+import "stdlib/regex"
+
+# SecretFinding is one detected secret. Raw is the matched value — never
+# log it; redaction replaces it in the text.
+type SecretFinding
+    Detector: string as "detector"
+    Raw: string as "raw"
+
+# SecretScanner is the pluggable detection engine. Implementations must be
+# fail-closed: an error means "could not scan", never "no secrets".
+interface SecretScanner
+    # Scan returns every finding in text.
+    Scan(text: string) (list of SecretFinding, error)
+    # Redact returns text with every finding replaced by a placeholder,
+    # plus the findings (for counting/reporting, never logging Raw).
+    Redact(text: string) (string, list of SecretFinding, error)
+
+# detector pairs a name with a compiled pattern.
+type detector
+    name: string
+    pattern: regex.Pattern
+
+# RegexScanner is the default offline scanner: a fixed list of high-signal
+# token shapes (cloud keys, GitHub/OpenAI/Slack/Google tokens, private key
+# headers, JWTs, and generic key=value assignments).
+type RegexScanner
+    detectors: list of detector
+
+# NewRegexScanner compiles the built-in detector list. Patterns are
+# literals (single-quoted, so no interpolation), so MustCompile cannot
+# fail at runtime — and the compiler's regex-panic lint can see that.
+func NewRegexScanner() RegexScanner
+    return RegexScanner{
+        detectors: list of detector{
+            {name: "aws-access-key", pattern: regex.MustCompile('\b(?:AKIA|ASIA)[0-9A-Z]{16}\b')},
+            {
+                name: "github-token",
+                pattern: regex.MustCompile('\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{22,}\b'),
+            },
+            {
+                name: "openai-key",
+                pattern: regex.MustCompile('\b(?:sk-proj-|sk-)[A-Za-z0-9_-]{20,}\b'),
+            },
+            {name: "slack-token", pattern: regex.MustCompile('\bxox[baprs]-[A-Za-z0-9-]{10,}\b')},
+            {name: "google-api-key", pattern: regex.MustCompile('\bAIza[0-9A-Za-z_-]{35}\b')},
+            {
+                name: "private-key-block",
+                pattern: regex.MustCompile('-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'),
+            },
+            {
+                name: "jwt",
+                pattern: regex.MustCompile(
+                    '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b',
+                ),
+            },
+            {
+                name: "generic-assignment",
+                pattern: regex.MustCompile(
+                    '(?i)\b(?:api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*["\']?[A-Za-z0-9/+_.-]{16,}["\']?',
+                ),
+            },
+        },
+    }
+
+# Scan implements SecretScanner: every match of every detector.
+func Scan on s: RegexScanner(text: string) (list of SecretFinding, error)
+    findings := empty list of SecretFinding
+    for d in s.detectors
+        for m in d.pattern.FindAll(text)
+            findings = append(findings, SecretFinding{Detector: d.name, Raw: m})
+    return findings, empty
+
+# Redact implements SecretScanner: replace each match with a placeholder.
+# Specific token detectors run before the generic assignment detector so a
+# redacted placeholder is never itself re-matched.
+func Redact on s: RegexScanner(text: string) (string, list of SecretFinding, error)
+    out := text
+    findings := empty list of SecretFinding
+    for d in s.detectors
+        matches := d.pattern.FindAll(out)
+        if matches is empty
+            continue
+        for m in matches
+            findings = append(findings, SecretFinding{Detector: d.name, Raw: m})
+        out = d.pattern.Replace(out, "[REDACTED:{d.name}]")
+    return out, findings, empty
+
+# redactSecrets applies the configured gate to text. Returns the (possibly
+# redacted) text and how many secrets were redacted. Fail-closed: a scanner
+# error is returned, and the caller must refuse the write. MIZUYA_SECRET_SCAN
+# selects the mode: "redact" (default) or "off"; anything else errors.
+func redactSecrets(text: string) (string, int, error)
+    mode := env.GetOr("MIZUYA_SECRET_SCAN", "redact")
+    if mode equals "off"
+        return text, 0, empty
+    if mode isnt "redact"
+        return "", 0, error "MIZUYA_SECRET_SCAN must be 'redact' or 'off', got '{mode}'"
+    sc := NewRegexScanner()
+    out, findings, err := sc.Redact(text)
+    if err isnt empty
+        return "", 0, error "secret scan failed (fail-closed, refusing write): {err:w}"
+    return out, len(findings), empty

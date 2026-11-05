@@ -35,6 +35,13 @@ func openDB(dbPath: string) (db.Pool, error)
 # No-op upserts (state identical to the latest logged version) skip the
 # history append so the log is not spammed with duplicates.
 func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summary: string, tags: list of string) error
+    # Fail-closed secret gate on the stored summary (covers import-openwiki,
+    # whose summaries come from wiki files). A scanner error refuses the write.
+    cleanSummary, _, rerr := redactSecrets(summary)
+    if rerr isnt empty
+        return rerr
+    summary = cleanSummary
+
     tagsJSON := jsonpkg.Bytes(tags)
 
     # Initial JSON for a freshly-inserted row — build via jsonpkg.Bytes
@@ -109,29 +116,41 @@ func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, err
 # that this one corrects. The old row is kept (append-only); the link
 # lets readers — and the drift command — tell a deliberate correction
 # apart from staleness. Empty means "corrects nothing".
-func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") error
+#
+# The text passes through the fail-closed secret gate (scanner.kuki):
+# secrets are redacted in place and the count is returned; a scanner error
+# refuses the write entirely.
+func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") (int, error)
     exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
     if err isnt empty
-        return err
+        return 0, err
     if not exists
-        return error "entity not found: {id}"
+        return 0, error "entity not found: {id}"
     if supersedes isnt empty
         ok, serr := db.Exists(pool, "SELECT 1 FROM observations WHERE id = ? AND entity_id = ?", supersedes, id)
         if serr isnt empty
-            return serr
+            return 0, serr
         if not ok
-            return error "superseded observation not found on entity {id}: {supersedes}"
+            return 0, error "superseded observation not found on entity {id}: {supersedes}"
 
-    db.Exec(
+    clean, redacted, rerr := redactSecrets(text)
+    if rerr isnt empty
+        return 0, rerr
+
+    _, ierr := db.Exec(
         pool,
         "INSERT INTO observations (entity_id, text, source, supersedes) VALUES (?, ?, ?, NULLIF(?, ''))",
         id,
-        text,
+        clean,
         source,
         supersedes,
-    ) onerr return
-    db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id) onerr return
-    return empty
+    )
+    if ierr isnt empty
+        return 0, ierr
+    _, uerr := db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id)
+    if uerr isnt empty
+        return 0, uerr
+    return redacted, empty
 
 # listObservations returns the observations for an entity, newest first.
 func listObservations(pool: db.Pool, id: string) (list of ObsRow, error)

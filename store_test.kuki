@@ -158,7 +158,8 @@ func TestObservationSupersedes(t: reference testing.T)
         upsertEntity(pool, "other", "concept", "Other", "s", empty list of string),
     )
 
-    test.AssertNoError(t, addObservation(pool, "duck", "first belief", "conversation"))
+    _, aerr := addObservation(pool, "duck", "first belief", "conversation")
+    test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 1)
@@ -166,10 +167,8 @@ func TestObservationSupersedes(t: reference testing.T)
     test.AssertEqual(t, first.Supersedes, "")
 
     # Correcting observation links to the one it corrects.
-    test.AssertNoError(
-        t,
-        addObservation(pool, "duck", "corrected belief", "conversation", first.Id),
-    )
+    _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
+    test.AssertNoError(t, aerr)
     obs, err = listObservations(pool, "duck")
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 2)
@@ -177,14 +176,15 @@ func TestObservationSupersedes(t: reference testing.T)
     test.AssertEqual(t, obs[1].Id, first.Id)
 
     # Bogus supersedes id: fail-closed error.
-    err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
+    _, err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
     test.AssertError(t, err)
 
     # Observation on a different entity: also rejected.
-    test.AssertNoError(t, addObservation(pool, "other", "o", "conversation"))
+    _, aerr = addObservation(pool, "other", "o", "conversation")
+    test.AssertNoError(t, aerr)
     otherObs, err := listObservations(pool, "other")
     test.AssertNoError(t, err)
-    err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
+    _, err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
     test.AssertError(t, err)
 
 func TestListObservationsRange(t: reference testing.T)
@@ -195,8 +195,10 @@ func TestListObservationsRange(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
     )
-    test.AssertNoError(t, addObservation(pool, "duck", "one", "conversation"))
-    test.AssertNoError(t, addObservation(pool, "duck", "two", "conversation"))
+    _, aerr := addObservation(pool, "duck", "one", "conversation")
+    test.AssertNoError(t, aerr)
+    _, aerr = addObservation(pool, "duck", "two", "conversation")
+    test.AssertNoError(t, aerr)
 
     today, terr := todayDate(pool)
     test.AssertNoError(t, terr)
@@ -297,7 +299,8 @@ func TestListDrift(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
     )
-    test.AssertNoError(t, addObservation(pool, "duck", "stale belief", "conversation"))
+    _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
+    test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
     first := obs[0]
@@ -322,10 +325,8 @@ func TestListDrift(t: reference testing.T)
     # A superseding observation makes the old one a deliberate correction:
     # excluded by default (the new observation is itself drifted by the
     # simulated change), included with includeSuperseded=true.
-    test.AssertNoError(
-        t,
-        addObservation(pool, "duck", "corrected belief", "conversation", first.Id),
-    )
+    _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
+    test.AssertNoError(t, aerr)
     rows, err = listDrift(pool, 50, false)
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(rows), 1)

@@ -43,7 +43,7 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 |---|---|
 | `init` | `{"status": "initialized", "db": string}` |
 | `upsert` | `Entity` |
-| `observe` | `{"status": "observed", "id": string, "text": string}` |
+| `observe` | `{"status": "observed", "id": string, "text": string, "redacted": number /* secrets redacted by the gate */}` |
 | `relate` | `{"status": "related", "src": string, "rel": string, "dst": string}` |
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
 | `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "history"?: HistoryRow[]}` — with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history` |

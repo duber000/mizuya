@@ -239,11 +239,14 @@ func handleAddObservation(args: addObservationArgs) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    addObservation(pool, args.EntityId, args.Text, source, args.Supersedes) onerr return mcp.ErrorResult("observe failed: {error}{suggestionsFor(pool, args.EntityId)}"), empty
+    redacted, oerr := addObservation(pool, args.EntityId, args.Text, source, args.Supersedes)
+    if oerr isnt empty
+        return mcp.ErrorResult("observe failed: {oerr}{suggestionsFor(pool, args.EntityId)}"), empty
 
     reEmbed(pool, args.EntityId) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
-    return mcp.TextResult("observed: {args.Text}"), empty
+    note := if redacted > 0 then " (redacted {redacted} secret(s) before storing)" else ""
+    return mcp.TextResult("observed: {args.Text}{note}"), empty
 
 # --- Tool: relate ---
 

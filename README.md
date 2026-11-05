@@ -54,6 +54,18 @@ command are a stable, parseable contract — see
 similar print a ready-to-run drill-down line per hit (`→ context --id <id>
 --history`).
 
+## Secret gate
+
+All writes pass a fail-closed secret scanner (`scanner.kuki`, pluggable
+`SecretScanner` interface, offline regex engine by default): detected
+tokens (AWS/GitHub/OpenAI/Slack/Google keys, private-key headers, JWTs,
+generic `key = ...` assignments) are redacted in place as
+`[REDACTED:<detector>]` before storing, and a scanner error refuses the
+write rather than reporting "clean". `observe` reports how many secrets
+were redacted (`redacted` field in `--json`, note in text/MCP output).
+Control with `MIZUYA_SECRET_SCAN=redact` (default) or `=off`; any other
+value is an error. Storage sizing notes: [docs/STORAGE.md](docs/STORAGE.md).
+
 ## Append-only beliefs (funes-style)
 
 Nothing is silently overwritten. Every `upsert` appends the post-update

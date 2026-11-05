@@ -1,0 +1,250 @@
+# mizuya — phase 3 tests: fail-closed secret gate + idempotent import.
+#
+# Self-contained on purpose: a *_test.kuki cannot see helpers from a
+# sibling *_test.kuki at check time (kukicha limitation), so this file
+# carries its own pool helper.
+
+petiole main
+
+import "os"
+import "path/filepath"
+import "stdlib/db"
+import "stdlib/env"
+import "stdlib/files"
+import "stdlib/sqlite"
+import "stdlib/test"
+import "testing"
+
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+func p3Pool(t: reference testing.T) (db.Pool, string)
+    dir, err := os.MkdirTemp("", "mizuya-p3-")
+    if err isnt empty
+        t.Fatalf("mktemp: %v", err)
+        return db.Pool{}, ""
+    pool, oerr := sqlite.OpenWithExtensions(
+        filepath.Join(dir, "test.db"),
+        map of string to string{"journal_mode": "WAL"},
+        vec1ext.Register,
+        regexpext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        statsext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    )
+    if oerr isnt empty
+        t.Fatalf("open: %v", oerr)
+        return db.Pool{}, ""
+    test.AssertNoError(t, initDB(pool))
+    return pool, dir
+
+func p3Close(pool: db.Pool, dir: string)
+    db.Close(pool) onerr discard
+    os.RemoveAll(dir) onerr discard
+
+# --- secret scanner ---
+
+func TestRedactSecretsDetectors(t: reference testing.T)
+    sc := NewRegexScanner()
+
+    cases := list of string{
+        "aws key AKIAIOSFODNN7EXAMPLE leaked",
+        "token ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
+        "openai sk-proj-abcdefghijklmnopqrstuvwxyz12",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "password = hunter2hunter2hunter2",
+    }
+    # classic AWS example key
+    # github shape
+    # openai shape
+    # key header
+    # generic assignment
+
+    for c in cases
+        findings, err := sc.Scan(c)
+        test.AssertNoError(t, err)
+        test.AssertTrue(t, len(findings) > 0, "expected a finding in: {c}")
+        out, redacted, rerr := sc.Redact(c)
+        test.AssertNoError(t, rerr)
+        test.AssertEqual(t, len(redacted), len(findings))
+        test.AssertContains(t, out, "[REDACTED:")
+        # The raw secret must be gone from the redacted text.
+        for f in redacted
+            test.AssertFalse(t, strContains(out, f.Raw), "raw secret still present after redact")
+
+    # Clean text passes through untouched.
+    clean := "the duck first appeared in a steamboat"
+    out, findings, err := sc.Redact(clean)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(findings), 0)
+    test.AssertEqual(t, out, clean)
+
+func strContains(s: string, sub: string) bool
+    return len(sub) > 0 and strIndex(s, sub) >= 0
+
+func strIndex(s: string, sub: string) int
+    for i from 0 to len(s) - len(sub)
+        if s[i:i + len(sub)] equals sub
+            return i
+    return -1
+
+# failScanner is a SecretScanner whose engine always errors — the
+# fail-closed contract: error means "could not scan", never "clean".
+type failScanner
+    dummy: int
+
+func Scan on s: failScanner(text: string) (list of SecretFinding, error)
+    return empty list of SecretFinding, error "scanner exploded"
+
+func Redact on s: failScanner(text: string) (string, list of SecretFinding, error)
+    return "", empty list of SecretFinding, error "scanner exploded"
+
+func TestScannerFailClosed(t: reference testing.T)
+    sc := failScanner{}
+    _, err := sc.Scan("anything")
+    test.AssertError(t, err)
+    _, _, err = sc.Redact("anything")
+    test.AssertError(t, err)
+
+func TestRedactSecretsMode(t: reference testing.T)
+    # Default mode redacts.
+    env.Set("MIZUYA_SECRET_SCAN", "redact") onerr discard
+    out, n, err := redactSecrets("key AKIAIOSFODNN7EXAMPLE here")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, n, 1)
+    test.AssertFalse(t, strContains(out, "AKIAIOSFODNN7EXAMPLE"), "secret must be redacted")
+
+    # Off mode passes through.
+    env.Set("MIZUYA_SECRET_SCAN", "off") onerr discard
+    out, n, err = redactSecrets("key AKIAIOSFODNN7EXAMPLE here")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, n, 0)
+    test.AssertContains(t, out, "AKIAIOSFODNN7EXAMPLE")
+
+    # Unknown mode is an error, not a silent default (fail-closed).
+    env.Set("MIZUYA_SECRET_SCAN", "maybe") onerr discard
+    _, _, err = redactSecrets("hello")
+    test.AssertError(t, err)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+func TestObservationRedactedAtWrite(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    n, err := addObservation(pool, "duck", "aws key AKIAIOSFODNN7EXAMPLE was used", "conversation")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, n, 1)
+
+    obs, lerr := listObservations(pool, "duck")
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(obs), 1)
+    test.AssertContains(t, obs[0].Text, "[REDACTED:aws-access-key]")
+    test.AssertFalse(
+        t,
+        strContains(obs[0].Text, "AKIAIOSFODNN7EXAMPLE"),
+        "stored text must not contain the secret",
+    )
+
+func TestUpsertRedactsSummary(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    err := upsertEntity(
+        pool,
+        "deploy",
+        "config",
+        "Deploy",
+        "token = ghp_abcdefghijklmnopqrstuvwxyz0123456789ab in summary",
+        empty list of string,
+    )
+    test.AssertNoError(t, err)
+    e, gerr := getEntity(pool, "deploy")
+    test.AssertNoError(t, gerr)
+    test.AssertContains(t, e.Data, "[REDACTED:github-token]")
+    test.AssertFalse(
+        t,
+        strContains(e.Data, "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab"),
+        "stored summary must not contain the token",
+    )
+
+# --- idempotent import ---
+
+func writeWiki(t: reference testing.T, base: string)
+    dir := filepath.Join(base, "openwiki")
+    test.AssertNoError(t, files.MkDirAll(dir))
+    test.AssertNoError(t, files.WriteString(
+        "---\ntitle: SQLite\ndescription: Embedded SQL database engine\ntype: tool\ntags: [db]\n---\n\nSQLite is a [vec1](vec1.md) friendly embedded database.\n",
+        filepath.Join(dir, "sqlite.md"),
+    ))
+    test.AssertNoError(t, files.WriteString(
+        "---\ntitle: vec1\ndescription: Vector extension for KNN search\ntype: tool\n---\n\nvec1 adds KNN to [SQLite](sqlite.md).\n",
+        filepath.Join(dir, "vec1.md"),
+    ))
+
+func TestImportOpenWikiIdempotent(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    base := filepath.Join(dir, "wiki")
+    writeWiki(t, base)
+
+    imported, linked, err := importOpenWiki(pool, base)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, imported, 2)
+    test.AssertEqual(t, linked, 2)
+
+    # Re-import the same corpus: same counts, no duplicate edges, and the
+    # no-op upserts must not append duplicate history rows.
+    imported2, linked2, err := importOpenWiki(pool, base)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, imported2, 2)
+    test.AssertEqual(t, linked2, 2)
+
+    count, cerr := db.Count(pool, "SELECT count(*) FROM entities")
+    test.AssertNoError(t, cerr)
+    test.AssertEqual(t, count as int, 2)
+    relCount, cerr := db.Count(pool, "SELECT count(*) FROM relations")
+    test.AssertNoError(t, cerr)
+    test.AssertEqual(t, relCount as int, 2)
+    hist, herr := listEntityHistory(pool, "sqlite", 50)
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hist), 1)
+
+func TestImportOpenWikiRedactsSecrets(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    base := filepath.Join(dir, "wiki")
+    wdir := filepath.Join(base, "openwiki")
+    test.AssertNoError(t, files.MkDirAll(wdir))
+    test.AssertNoError(t, files.WriteString(
+        "---\ntitle: Deploy\ndescription: uses key AKIAIOSFODNN7EXAMPLE internally\n---\n\nBody.\n",
+        filepath.Join(wdir, "deploy.md"),
+    ))
+
+    imported, _, err := importOpenWiki(pool, base)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, imported, 1)
+    e, gerr := getEntity(pool, "deploy")
+    test.AssertNoError(t, gerr)
+    test.AssertFalse(
+        t,
+        strContains(e.Data, "AKIAIOSFODNN7EXAMPLE"),
+        "imported summary must be redacted",
+    )
+    test.AssertContains(t, e.Data, "[REDACTED:aws-access-key]")

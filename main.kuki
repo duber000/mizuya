@@ -231,13 +231,14 @@ func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float6
 
 # observeResolved adds an observation for id; on a miss with an interactive
 # TTY (outside JSON mode), offers fuzzy matches and retries with the pick.
-func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) error
-    aerr := addObservation(pool, id, text, source, supersedes)
+# Returns how many secrets the gate redacted from the stored text.
+func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) (int, error)
+    n, aerr := addObservation(pool, id, text, source, supersedes)
     if aerr equals empty
-        return empty
+        return n, empty
     picked := pickSuggestion(pool, args, id)
     if picked is empty
-        return aerr
+        return 0, aerr
     return addObservation(pool, picked, text, source, supersedes)
 
 # openPool opens the database and registers the vec1 vector extension.
@@ -328,16 +329,20 @@ func doObserve(args: cli.Args) error
 
     defer db.Close(pool)
 
-    observeResolved(pool, args, id, text, source, supersedes) onerr
-        return error "cannot add observation: {error:w}{suggestionsFor(pool, id)}"
+    redacted, oerr := observeResolved(pool, args, id, text, source, supersedes)
+    if oerr isnt empty
+        return error "cannot add observation: {oerr:w}{suggestionsFor(pool, id)}"
 
     # Re-embed: observations are part of the entity's text corpus.
     reEmbedIfChanged(pool, id) onerr explain "cannot refresh embedding"
 
     if cli.IsJSON(args)
-        printJSON({"status": "observed", "id": id, "text": text})
+        printJSON(
+            map of string to any{"status": "observed", "id": id, "text": text, "redacted": redacted},
+        )
     else
-        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}")
+        note := if redacted > 0 then "  {color.Yellow("(redacted {redacted} secret(s))")}" else ""
+        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}{note}")
     return empty
 
 func doRelate(args: cli.Args) error
@@ -567,17 +572,33 @@ func doImportOpenWiki(args: cli.Args) error
         return error "usage: mizuya import-openwiki <dir>"
     baseDir := rest[0]
 
-    openwikiDir := files.Join(baseDir, "openwiki")
-    if not files.Exists(openwikiDir)
+    if not files.Exists(files.Join(baseDir, "openwiki"))
         return error "no openwiki/ directory found at {baseDir}"
 
     pool := openPool(args) onerr explain "cannot open database"
 
     defer db.Close(pool)
 
+    imported, linked, ierr := importOpenWiki(pool, baseDir)
+    if ierr isnt empty
+        return ierr
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
+    else
+        print("{color.Green("imported")} {imported} entities, {linked} links")
+    return empty
+
+# importOpenWiki is the testable core of doImportOpenWiki: parse the
+# openwiki corpus under baseDir into entities + references edges. It is
+# idempotent — upsertEntity is ON CONFLICT (and skips the history append
+# when the state is unchanged), relate is INSERT OR IGNORE, and summaries
+# pass through the fail-closed secret gate.
+func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
+    openwikiDir := files.Join(baseDir, "openwiki")
     entries, lErr := files.Walk(openwikiDir)
     if lErr isnt empty
-        return errs.Wrap(lErr, "cannot walk openwiki dir")
+        return 0, 0, errs.Wrap(lErr, "cannot walk openwiki dir")
 
     imported := 0
     linked := 0
@@ -669,11 +690,7 @@ func doImportOpenWiki(args: cli.Args) error
 
             linked = linked + 1
 
-    if cli.IsJSON(args)
-        printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
-    else
-        print("{color.Green("imported")} {imported} entities, {linked} links from {openwikiDir}")
-    return empty
+    return imported, linked, empty
 
 # --- distill ---
 

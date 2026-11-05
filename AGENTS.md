@@ -63,7 +63,7 @@ Tracker lives in [TODO.md](TODO.md) ("Funes lessons" section). Status:
 
 - **Phase 1 — append-only beliefs, read-time synthesis: DONE** (commit `18e5f32`). `entity_history` version log, `observations.supersedes`, `--since/--until/--as-of`, drift rework, `updated_at`+RRF `score` on hits, tests + labeled recall benchmark. See README "Append-only beliefs".
 - **Phase 2 — stable output contract + agent ergonomics: DONE.** `docs/output-contract.md` pins every command's `--json` shape (additive-only rule); enforced by `contract_test.kuki`. Text-mode search/similar print a ready-to-run `→ context --id <id> --history` drill-down line per hit; a hit's `id` is the stable drill coordinate (MCP: `get_context`). Keep the "defaults + token cost in tool descriptions" convention for new MCP tools.
-- **Phase 3 — safety, idempotency, measurement: NEXT.** Fail-closed secret scanner gating `import-openwiki`/`observe`; idempotent import (content-hash dedup, write-temp-then-rename); `docs/STORAGE.md` cost model; "tested and abandoned" retrieval list.
+- **Phase 3 — safety, idempotency, measurement: DONE.** Fail-closed secret gate in `scanner.kuki` (pluggable `SecretScanner`, regex default, error-never-clean; `MIZUYA_SECRET_SCAN=redact|off`) gating `observe` and upsert summaries (covers import). Idempotent `importOpenWiki` (tested). `docs/STORAGE.md` cost model: per-entity ≈ text + FTS copy + `2×dim×4` B vectors. All three funes phases are now adopted; TODO.md tracks the tested-and-abandoned retrieval list.
 
 Design principle behind all of it (from funes' RATIONALE): defer to the reader — keep the raw record intact, resolve obsolescence at read time, no LLM in the ingest path, recall is pulled not pushed.
 

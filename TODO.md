@@ -114,14 +114,31 @@ Phase 2 — provenance/stable output contract + agent ergonomics — **done**:
       convention); MCP `search` description names `get_context` as the
       drill-down.
 
-Phase 3 — safety, idempotency, measurement — pending:
+Phase 3 — safety, idempotency, measurement — **done**:
 
-- [ ] Fail-closed secret scanner (pluggable trait, error-not-clean) gating
-      `import-openwiki` / optionally `observe`.
-- [ ] Idempotent import: content-hash dedup of observations; write-temp-
-      then-rename for import files.
-- [ ] `docs/STORAGE.md` cost model (~bytes/entity = dim*4 + text), like
-      funes' storage.md.
-- [ ] Keep a "tested and abandoned" list for retrieval ideas (MMR,
-      abstention thresholds, reranker) — only keep what beats the labeled
-      benchmark.
+- [x] Fail-closed secret scanner (`scanner.kuki`): pluggable `SecretScanner`
+      interface, offline regex engine by default, error-never-clean contract.
+      Gates `observe` (reports `redacted` count) and `upsert` summaries
+      (covers `import-openwiki`). `MIZUYA_SECRET_SCAN=redact|off`; any other
+      value errors. Tested in `phase3_test.kuki` (detectors, redaction,
+      fail-closed stub, modes, write-path redaction).
+- [x] Idempotent import: `importOpenWiki` extracted as a testable pure
+      function; re-import is a no-op (ON CONFLICT upsert skips the history
+      append on unchanged state, INSERT OR IGNORE edges) — pinned by
+      `TestImportOpenWikiIdempotent`. Write-temp-then-rename is N/A:
+      import only reads the wiki dir (relevant if an export/sync command
+      is ever added).
+- [x] `docs/STORAGE.md` cost model: per-entity = text + FTS copy + 2×dim×4 B
+      vectors (vec1 row + raw side copy) + history per actual change;
+      projection table to 1M entities.
+- [x] "Tested and abandoned" discipline: see below.
+
+### Tested and abandoned / found-and-fixed (retrieval)
+
+- **RRF top-k cut was random map order** — `sort.ByKeyDesc` returns a sorted
+  copy; discarding it left `ids` in map order. Found by `TestLabeledRecall`
+  flapping, fixed in `hybridSearch`. Lesson: bind sort results.
+- Not tried (would need the labeled benchmark to justify): MMR diversity,
+  abstention thresholds, near-duplicate collapse, cross-encoder rerank,
+  trained vec1 index. Only add one if `TestLabeledRecall`/benchmarks say
+  it helps; record the result here either way.
