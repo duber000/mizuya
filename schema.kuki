@@ -2,10 +2,14 @@
 # All DDL statements and initDB. Uses FTS5 with content=entities so the
 # virtual table mirrors the base table row-for-row via triggers.
 #
-# Timestamp contract: every *_at column is stamped datetime('now') —
-# UTC with no offset suffix. Compare against them with plain
-# datetime('now', ...); adding 'localtime' to the threshold but not
-# the stamp skews the window by the local UTC offset (4h in EDT).
+# Timestamp contract: *_at columns are stamped in UTC with no offset
+# suffix. entities/relations use second precision (datetime('now'));
+# observations.at and entity_history.changed_at use millisecond
+# precision (strftime %f) so same-second ordering is exact. The
+# fixed-width formats compare correctly against each other and against
+# plain datetime('now', ...) thresholds — but add 'localtime' to
+# neither side: mixing it into only the threshold skews the window by
+# the local UTC offset (4h in EDT).
 
 petiole main
 
@@ -28,7 +32,24 @@ const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL RE
 # filtered individually. The id default uses uuid(7) for time-ordered
 # UUIDs (better B-tree locality than v4) — requires the uuid extension
 # registered before any INSERT.
-const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (datetime('now')), distilled INTEGER NOT NULL DEFAULT 0)"
+#
+# supersedes links an observation to the earlier observation it corrects
+# or replaces (append-only belief model: the old row stays, the new one
+# points at it, and the reader resolves which is current). ON DELETE SET
+# NULL keeps the log intact if the old row is ever scrubbed.
+const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')), distilled INTEGER NOT NULL DEFAULT 0, supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL)"
+
+# entity_history is the append-only version log for entities. Every
+# upsert appends the post-update state; the entities row remains the
+# fast "current view" but nothing is ever overwritten in the log, so
+# "what did we think before date X" is always answerable. The id
+# default uses uuid(7), same as observations.
+#
+# changed_at uses millisecond precision (strftime %f) so drift detection
+# can tell "entity changed after this observation" apart within the same
+# second; the fixed-width format still compares correctly against the
+# second-precision datetime('now') stamps on other tables.
+const entityHistorySQL = "CREATE TABLE IF NOT EXISTS entity_history (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')))"
 
 # Embeddings live in a vec1 virtual table. The 'flat' index does brute-force
 # scan inside vec1 (no training step) — fine for thousands of entities.
@@ -93,7 +114,15 @@ const idxObsEntity = "CREATE INDEX IF NOT EXISTS idx_observations_entity_at ON o
 # Index for filtering undistilled observations in distillation queries.
 const idxObsDistilled = "CREATE INDEX IF NOT EXISTS idx_observations_distilled ON observations(distilled, at DESC) WHERE distilled = 0"
 
+# Version log lookups: newest-first history per entity, and as-of reads.
+const idxEntityHistoryEntity = "CREATE INDEX IF NOT EXISTS idx_entity_history_entity ON entity_history(entity_id, changed_at DESC)"
+
+# Supersession chains: "which observation supersedes this one" (drift).
+const idxObsSupersedes = "CREATE INDEX IF NOT EXISTS idx_observations_supersedes ON observations(supersedes)"
+
 const migrateObsDistilledSQL = "ALTER TABLE observations ADD COLUMN distilled INTEGER NOT NULL DEFAULT 0"
+
+const migrateObsSupersedesSQL = "ALTER TABLE observations ADD COLUMN supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL"
 
 # --- Spellfix1 fuzzy index over entity ids ---
 # spellfix1 is a virtual table that supports approximate-match lookups
@@ -114,6 +143,7 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, entitiesSQL) onerr return
         db.TxExec(tx, relationsSQL) onerr return
         db.TxExec(tx, observationsSQL) onerr return
+        db.TxExec(tx, entityHistorySQL) onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
         db.TxExec(tx, embeddingsRawSQL) onerr return
         db.TxExec(tx, embeddingsRawCascadeSQL) onerr return
@@ -128,6 +158,8 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, idxEntityUpdated) onerr return
         db.TxExec(tx, idxObsEntity) onerr return
         db.TxExec(tx, idxObsDistilled) onerr return
+        db.TxExec(tx, idxObsSupersedes) onerr return
+        db.TxExec(tx, idxEntityHistoryEntity) onerr return
         db.TxExec(tx, fuzzyIdsSQL) onerr return
         db.TxExec(tx, fuzzyIdsClearSQL) onerr return
         db.TxExec(tx, fuzzyIdsPopulateSQL) onerr return
@@ -135,7 +167,8 @@ func initDB(pool: db.Pool) error
     )
 
     migrateVec1Schema(pool) onerr return
-    migrateObsDistilled(pool)
+    migrateObsDistilled(pool) onerr return
+    migrateObsSupersedes(pool) onerr return
     return empty
 
 # migrateObsDistilled adds the observations.distilled column for databases
@@ -145,6 +178,15 @@ func migrateObsDistilled(pool: db.Pool) error
     if exists
         return empty
     db.Exec(pool, migrateObsDistilledSQL) onerr return
+    return empty
+
+# migrateObsSupersedes adds the observations.supersedes column for
+# databases created before it was folded into the CREATE TABLE statement.
+func migrateObsSupersedes(pool: db.Pool) error
+    exists := sqlite.ColumnExists(pool, "observations", "supersedes") onerr return
+    if exists
+        return empty
+    db.Exec(pool, migrateObsSupersedesSQL) onerr return
     return empty
 
 # --- vec1 schema migration ---

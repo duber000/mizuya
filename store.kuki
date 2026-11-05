@@ -4,11 +4,19 @@
 petiole main
 
 import "stdlib/crypto"
+import "stdlib/datetime"
 import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/slice"
 import "stdlib/sqlite"
 import "stdlib/string" as strpkg
+
+# validDate reports whether s is a real YYYY-MM-DD calendar date (not
+# just the right shape) — used by --since/--until/--as-of so a typo like
+# 2026-13-99 is an error instead of a silent match-nothing filter.
+func validDate(s: string) bool
+    _, err := datetime.Parse(s, datetime.LayoutDate)
+    return err equals empty
 
 # openDB opens (or creates) the SQLite database at the given path.
 func openDB(dbPath: string) (db.Pool, error)
@@ -19,6 +27,13 @@ func openDB(dbPath: string) (db.Pool, error)
 # upsertEntity creates or updates an entity. On update, type/name are replaced
 # and the JSON fields summary/tags are merged into the existing data object,
 # preserving any observations already recorded.
+#
+# Append-only belief model: the entities row stays the fast "current view",
+# but every upsert also appends the post-update state to entity_history in
+# the same transaction, so the previous conception of the entity is never
+# lost — it is resolved at read time (see listEntityHistory / entityStateAt).
+# No-op upserts (state identical to the latest logged version) skip the
+# history append so the log is not spammed with duplicates.
 func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summary: string, tags: list of string) error
     tagsJSON := jsonpkg.Bytes(tags)
 
@@ -31,7 +46,28 @@ func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summar
     })
 
     insertSQL := "INSERT INTO entities (id, type, name, data) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET type = excluded.type, name = excluded.name, data = json_set(json_set(entities.data, '$.summary', ?), '$.tags', json(?)), updated_at = datetime('now')"
-    db.Exec(pool, insertSQL, id, etype, name, initialBytes as string, summary, tagsJSON as string) onerr return
+
+    # Copy the post-update state into the version log, unless it is
+    # identical to the latest logged version (latest = newest changed_at,
+    # tie-broken by uuid7 id).
+    historySQL := "INSERT INTO entity_history (entity_id, type, name, data) SELECT e.id, e.type, e.name, e.data FROM entities e WHERE e.id = ? AND NOT EXISTS (SELECT 1 FROM entity_history h WHERE h.entity_id = e.id AND h.id = (SELECT h2.id FROM entity_history h2 WHERE h2.entity_id = e.id ORDER BY h2.changed_at DESC, h2.id DESC LIMIT 1) AND h.type = e.type AND h.name = e.name AND h.data = e.data)"
+
+    err := db.Transaction(pool, tx =>
+        db.TxExec(
+            tx,
+            insertSQL,
+            id,
+            etype,
+            name,
+            initialBytes as string,
+            summary,
+            tagsJSON as string,
+        ) onerr return
+        db.TxExec(tx, historySQL, id) onerr return
+        return empty
+    )
+    if err isnt empty
+        return err
     return empty
 
 # getEntity fetches an entity by id. Returns an error if no row matches.
@@ -68,27 +104,63 @@ func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, err
 # the entity's updated_at so search ranking notices the new content.
 # The id default (uuid(7)) is filled in by SQLite — uuid extension
 # must be registered before this runs.
-func addObservation(pool: db.Pool, id: string, text: string, source: string) error
+#
+# supersedes optionally names an existing observation on the same entity
+# that this one corrects. The old row is kept (append-only); the link
+# lets readers — and the drift command — tell a deliberate correction
+# apart from staleness. Empty means "corrects nothing".
+func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") error
     exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
     if err isnt empty
         return err
     if not exists
         return error "entity not found: {id}"
+    if supersedes isnt empty
+        ok, serr := db.Exists(pool, "SELECT 1 FROM observations WHERE id = ? AND entity_id = ?", supersedes, id)
+        if serr isnt empty
+            return serr
+        if not ok
+            return error "superseded observation not found on entity {id}: {supersedes}"
 
     db.Exec(
         pool,
-        "INSERT INTO observations (entity_id, text, source) VALUES (?, ?, ?)",
+        "INSERT INTO observations (entity_id, text, source, supersedes) VALUES (?, ?, ?, NULLIF(?, ''))",
         id,
         text,
         source,
+        supersedes,
     ) onerr return
     db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id) onerr return
     return empty
 
 # listObservations returns the observations for an entity, newest first.
 func listObservations(pool: db.Pool, id: string) (list of ObsRow, error)
-    q := "SELECT id, text, source, at FROM observations WHERE entity_id = ? ORDER BY at DESC, id DESC"
-    result := db.Query(pool, q, id) |> db.ScanAll of ObsRow
+    return listObservationsRange(pool, id, "", "")
+
+# listObservationsRange returns the observations for an entity, newest
+# first, optionally bounded by YYYY-MM-DD dates (since = on/after,
+# until = on/before, whole days inclusive). Empty bounds are unbounded.
+func listObservationsRange(pool: db.Pool, id: string, since: string, until: string) (list of ObsRow, error)
+    if since isnt empty and not validDate(since)
+        return empty list of ObsRow, error "--since must be YYYY-MM-DD, got {since}"
+    if until isnt empty and not validDate(until)
+        return empty list of ObsRow, error "--until must be YYYY-MM-DD, got {until}"
+
+    parts := empty list of string
+    parts = append(
+        parts,
+        "SELECT id, text, source, at, COALESCE(supersedes, '') AS supersedes FROM observations WHERE entity_id = ?",
+    )
+    args := list of any{id}
+    if since isnt empty
+        parts = append(parts, "AND at >= datetime(?)")
+        args = append(args, since)
+    if until isnt empty
+        parts = append(parts, "AND at < datetime(?, '+1 day')")
+        args = append(args, until)
+    parts = append(parts, "ORDER BY at DESC, id DESC")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of ObsRow
     return result, empty
 
 # deleteObservation removes a single observation by its uuid7 id.
@@ -164,6 +236,49 @@ func addTag(pool: db.Pool, id: string, tag: string) error
     q := "UPDATE entities SET data = json_set(data, '$.tags[#]', ?), updated_at = datetime('now') WHERE id = ?"
     db.Exec(pool, q, tag, id) onerr return
     return empty
+
+# --- Entity version history (append-only belief log) ---
+
+# listEntityHistory returns the logged versions of an entity, newest
+# first. The current state lives in entities; history holds every prior
+# logged state (plus the initial one), so nothing is ever overwritten.
+func listEntityHistory(pool: db.Pool, id: string, limit: int) (list of HistoryRow, error)
+    if limit <= 0
+        limit = 20
+    q := "SELECT id, entity_id, type, name, json(data) AS data, changed_at FROM entity_history WHERE entity_id = ? ORDER BY changed_at DESC, id DESC LIMIT ?"
+    result := db.Query(pool, q, id, limit) |> db.ScanAll of HistoryRow
+    return result, empty
+
+# entityStateAt returns the entity's state as of the end of the given
+# YYYY-MM-DD date — the latest logged version from before that day
+# ends. Errors when no version existed yet at that point in time.
+func entityStateAt(pool: db.Pool, id: string, at: string) (HistoryRow, error)
+    if not validDate(at)
+        return HistoryRow{}, error "as-of date must be YYYY-MM-DD, got {at}"
+    q := "SELECT id, entity_id, type, name, json(data) AS data, changed_at FROM entity_history WHERE entity_id = ? AND changed_at < datetime(?, '+1 day') ORDER BY changed_at DESC, id DESC LIMIT 1"
+    result := db.Query(pool, q, id, at) |> db.ScanOne of HistoryRow
+    return result, empty
+
+# --- Drift ---
+
+# listDrift returns observations whose entity has a logged version newer
+# than the observation — i.e. the entity's conception changed after the
+# observation was recorded (append-only model: the change lives in
+# entity_history, not in an overwritten field). Observations that a newer
+# observation explicitly supersedes are deliberate corrections, not
+# drift, and are excluded unless includeSuperseded is true.
+func listDrift(pool: db.Pool, limit: int, includeSuperseded: bool) (list of DriftRow, error)
+    if limit <= 0
+        limit = 50
+    parts := list of string{
+        "SELECT o.id AS obs_id, o.entity_id AS entity_id, e.name AS entity_name, o.text AS obs_text, o.at AS obs_at, e.updated_at AS entity_updated FROM observations o JOIN entities e ON e.id = o.entity_id WHERE o.distilled = 0 AND EXISTS (SELECT 1 FROM entity_history h WHERE h.entity_id = o.entity_id AND h.changed_at > o.at)",
+    }
+    if not includeSuperseded
+        parts = append(parts, "AND NOT EXISTS (SELECT 1 FROM observations o2 WHERE o2.supersedes = o.id)")
+    parts = append(parts, "ORDER BY e.updated_at DESC LIMIT ?")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, limit) |> db.ScanAll of DriftRow
+    return result, empty
 
 # --- Relations ---
 

@@ -82,3 +82,42 @@ The candidates below are ordered by expected payoff for mizuya specifically.
 
 - [ ] **Drop the `vec_raw` side-copy column** if a future vec1 release lets
   the indexed `vector` column read back as the original BLOB.
+
+## Funes lessons (from huggingface/funes) — adoption tracking
+
+Phase 1 — append-only beliefs, read-time synthesis — **done**:
+
+- [x] `entity_history` append-only version log; every `upsert` appends the
+      post-update state in the same transaction (no-op upserts skip the
+      append). `context --history` / MCP `get_context history=true` expose it.
+- [x] `observations.supersedes` — a correcting observation links to the one
+      it replaces (`observe --supersedes`, MCP `add_observation supersedes`).
+- [x] Time-travel reads: `--since/--until` on `search`/`context`/`similar`
+      (CLI + MCP), `context --as-of YYYY-MM-DD` via `entityStateAt`.
+- [x] `drift` reworked: staleness = a logged entity version newer than the
+      observation; explicitly superseded observations are excluded unless
+      `--include-superseded`.
+- [x] Search hits carry `updated_at` + RRF `score`; ranking stays
+      relevance-first, age on demand (funes' model).
+- [x] Labeled recall benchmark (`bench_test.kuki`: `TestLabeledRecall`,
+      floor recall@5 >= 0.80) + latency benchmarks (`-bench .`). This
+      already caught a real bug: `sort.ByKeyDesc` returns a copy, so the
+      RRF top-k cut was random map order.
+
+Phase 2 — provenance/stable output contract + agent ergonomics — pending:
+
+- [ ] Document the exact `--json` output shape of every command as a stable
+      contract ("don't parse loosely", like funes' agent format).
+- [ ] Drill-down hints on hits (funes' `→ get <session> --from --to` line).
+
+Phase 3 — safety, idempotency, measurement — pending:
+
+- [ ] Fail-closed secret scanner (pluggable trait, error-not-clean) gating
+      `import-openwiki` / optionally `observe`.
+- [ ] Idempotent import: content-hash dedup of observations; write-temp-
+      then-rename for import files.
+- [ ] `docs/STORAGE.md` cost model (~bytes/entity = dim*4 + text), like
+      funes' storage.md.
+- [ ] Keep a "tested and abandoned" list for retrieval ideas (MMR,
+      abstention thresholds, reranker) — only keep what beats the labeled
+      benchmark.

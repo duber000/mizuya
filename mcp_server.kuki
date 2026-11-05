@@ -38,6 +38,7 @@ type addObservationArgs
     EntityId: string as "entity_id"
     Text: string as "text"
     Source: string as "source"
+    Supersedes: string as "supersedes"
 
 type relateArgs
     Src: string as "src"
@@ -47,16 +48,27 @@ type relateArgs
 type searchArgs
     Query: string as "query"
     Limit: int as "limit"
+    Type: string as "type"
+    Tag: string as "tag"
+    Since: string as "since"
+    Until: string as "until"
 
 type getContextArgs
     Id: string as "id"
     Depth: int as "depth"
+    History: bool as "history"
+    Since: string as "since"
+    Until: string as "until"
 
 type similarArgs
     Id: string as "id"
     Text: string as "text"
     Limit: int as "limit"
     Threshold: int as "threshold"
+    Type: string as "type"
+    Tag: string as "tag"
+    Since: string as "since"
+    Until: string as "until"
 
 # mcpDBPath is the database path used by the MCP server, set from the
 # --db flag before starting the server.
@@ -199,13 +211,18 @@ func registerAddObservation(server: reference mcp.Server)
         jsonschema.Prop("entity_id", jsonschema.String, "Entity to observe"),
         jsonschema.Prop("text", jsonschema.String, "The observation text"),
         jsonschema.Prop("source", jsonschema.String, "Source label (default: conversation)"),
+        jsonschema.Prop(
+            "supersedes",
+            jsonschema.String,
+            "Id of an observation on this entity that this one corrects. The old observation is kept (append-only); this link marks it superseded. Omit when correcting nothing.",
+        ),
     })
         |> jsonschema.Required(list of string{"entity_id", "text"})
 
     mcp.ToolWithOpts of addObservationArgs(
         server,
         "add_observation",
-        "Record a fact or note about an entity. Appended to the entity's observation history.",
+        "Record a fact or note about an entity. Appended to the entity's observation history — never overwrites; pass supersedes to correct an earlier observation.",
         schema,
         mcp.ToolOpts{Destructive: true},
         handleAddObservation,
@@ -222,7 +239,7 @@ func handleAddObservation(args: addObservationArgs) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    addObservation(pool, args.EntityId, args.Text, source) onerr return mcp.ErrorResult("observe failed: {error}{suggestionsFor(pool, args.EntityId)}"), empty
+    addObservation(pool, args.EntityId, args.Text, source, args.Supersedes) onerr return mcp.ErrorResult("observe failed: {error}{suggestionsFor(pool, args.EntityId)}"), empty
 
     reEmbed(pool, args.EntityId) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
@@ -269,16 +286,40 @@ func registerSearchTool(server: reference mcp.Server)
         jsonschema.Prop(
             "query",
             jsonschema.String,
-            "Search query (keywords for BM25, also used for semantic similarity in hybrid mode)",
+            "Search query (keywords for BM25, also embedded for semantic similarity in hybrid mode)",
         ),
-        jsonschema.Prop("limit", jsonschema.Integer, "Maximum results (default: 10)"),
+        jsonschema.Prop(
+            "limit",
+            jsonschema.Integer,
+            "Hits returned (default 10). Each hit is a full entity record, so limit is what this call costs in tokens to read.",
+        ),
+        jsonschema.Prop(
+            "type",
+            jsonschema.String,
+            "Restrict to this entity type (" + validEntityTypes() + "); omit for any",
+        ),
+        jsonschema.Prop(
+            "tag",
+            jsonschema.String,
+            "Restrict to entities carrying this tag; omit for any",
+        ),
+        jsonschema.Prop(
+            "since",
+            jsonschema.String,
+            "Only entities updated on/after this YYYY-MM-DD. Ranking weighs relevance, not age — pass this for the latest word on a topic.",
+        ),
+        jsonschema.Prop(
+            "until",
+            jsonschema.String,
+            "Only entities updated on/before this YYYY-MM-DD (whole day inclusive)",
+        ),
     })
         |> jsonschema.Required(list of string{"query"})
 
     mcp.ToolWithOpts of searchArgs(
         server,
         "search",
-        "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity with RRF merging).",
+        "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity merged by RRF). Each hit carries id, type, name, summary, updated_at, and its RRF score; drill into a hit with get_context.",
         schema,
         mcp.ToolOpts{ReadOnly: true},
         handleSearch,
@@ -292,10 +333,12 @@ func handleSearch(args: searchArgs) (any, error)
     if limit equals 0
         limit = 10
 
+    filter := SearchFilter{Type: args.Type, Tag: args.Tag, Since: args.Since, Until: args.Until}
+
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    hits := hybridSearch(pool, args.Query, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
+    hits := hybridSearch(pool, args.Query, limit, filter) onerr return mcp.ErrorResult("search failed: {error}"), empty
 
     data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
@@ -308,7 +351,18 @@ func registerGetContext(server: reference mcp.Server)
         jsonschema.Prop(
             "depth",
             jsonschema.Integer,
-            "Hops to traverse via the closure vtable (1 = immediate neighbors, default 1)",
+            "Hops to traverse (1 = immediate neighbors, default 1)",
+        ),
+        jsonschema.Prop(
+            "history",
+            jsonschema.Boolean,
+            "Also return the entity's append-only version history (how its conception changed over time, newest first). Default false.",
+        ),
+        jsonschema.Prop("since", jsonschema.String, "Only observations on/after this YYYY-MM-DD"),
+        jsonschema.Prop(
+            "until",
+            jsonschema.String,
+            "Only observations on/before this YYYY-MM-DD (whole day inclusive)",
         ),
     })
         |> jsonschema.Required(list of string{"id"})
@@ -316,7 +370,7 @@ func registerGetContext(server: reference mcp.Server)
     mcp.ToolWithOpts of getContextArgs(
         server,
         "get_context",
-        "Get full context for an entity: its data, observations, and related entities up to N hops (default 1).",
+        "Get full context for an entity: its data, observations (each with id, text, source, at, supersedes), and related entities up to depth hops (default 1). Set history=true to also see how the entity's stored state changed over time.",
         schema,
         mcp.ToolOpts{ReadOnly: true},
         handleGetContext,
@@ -334,7 +388,11 @@ func handleGetContext(args: getContextArgs) (any, error)
     defer db.Close(pool)
 
     e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, args.Id)}"), empty
-    obs := listObservations(pool, args.Id) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+    obs := listObservationsRange(pool, args.Id, args.Since, args.Until) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+
+    hist := empty list of HistoryRow
+    if args.History
+        hist = listEntityHistory(pool, args.Id, 50) onerr return mcp.ErrorResult("cannot read history: {error}"), empty
 
     if depth > 1
         outReach := reachableOutgoing(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read outgoing closure: {error}"), empty
@@ -347,6 +405,8 @@ func handleGetContext(args: getContextArgs) (any, error)
             "incoming": inReach,
             "observations": obs,
         }
+        if args.History
+            payload["history"] = hist
         data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
         return mcp.TextResult(data as string), empty
 
@@ -359,6 +419,8 @@ func handleGetContext(args: getContextArgs) (any, error)
         "incoming": incoming,
         "observations": obs,
     }
+    if args.History
+        payload["history"] = hist
 
     data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
@@ -378,6 +440,22 @@ func registerSimilarTool(server: reference mcp.Server)
             "threshold",
             jsonschema.Integer,
             "Return everything in the closest N percentile of distances (1-100). When set, supersedes limit.",
+        ),
+        jsonschema.Prop("type", jsonschema.String, "Restrict to this entity type; omit for any"),
+        jsonschema.Prop(
+            "tag",
+            jsonschema.String,
+            "Restrict to entities carrying this tag; omit for any",
+        ),
+        jsonschema.Prop(
+            "since",
+            jsonschema.String,
+            "Only entities updated on/after this YYYY-MM-DD",
+        ),
+        jsonschema.Prop(
+            "until",
+            jsonschema.String,
+            "Only entities updated on/before this YYYY-MM-DD (whole day inclusive)",
         ),
     })
 
@@ -407,11 +485,12 @@ func handleSimilar(args: similarArgs) (any, error)
     else
         vec = embedText(args.Text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
+    filter := SearchFilter{Type: args.Type, Tag: args.Tag, Since: args.Since, Until: args.Until}
     hits := empty list of SimilarHit
     if args.Threshold > 0
-        hits = similarByPercentile(pool, vec, args.Threshold) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+        hits = similarByPercentile(pool, vec, args.Threshold, filter) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
     else
-        hits = similar(pool, vec, limit) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+        hits = similar(pool, vec, limit, filter) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
 
     data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty

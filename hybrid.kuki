@@ -18,7 +18,10 @@ const rrfK: int = 60
 # hybridSearch runs FTS5 keyword search and vector similarity search in
 # parallel, then merges results using Reciprocal Rank Fusion. If vector
 # search fails (e.g. no embeddings exist), falls back to FTS5 only.
-func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, error)
+# Results can be narrowed by a SearchFilter (type, tag, since/until).
+# Each returned hit carries its RRF Score and the entity's UpdatedAt —
+# ranking weighs relevance, not age; use the filter for time bounds.
+func hybridSearch(pool: db.Pool, query: string, limit: int, filter: SearchFilter = SearchFilter{}) (list of SearchHit, error)
     if limit <= 0
         limit = 10
 
@@ -27,14 +30,16 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
     fetchLimit := limit * 3
 
     # 1. FTS5 keyword search
-    ftsHits := ftsSearch(pool, query, fetchLimit) onerr return empty, errs.Wrap(error, "FTS search failed")
+    ftsHits, ftsErr := ftsSearch(pool, query, fetchLimit, filter)
+    if ftsErr isnt empty
+        return empty, errs.Wrap(ftsErr, "FTS search failed")
 
     # 2. Vector similarity search — embed the query text and compare.
     vec, embedErr := embedText(query)
     vecHits := empty list of SimilarHit
     vecErr := embedErr
     if embedErr equals empty
-        vecHits, vecErr = similar(pool, vec, fetchLimit)
+        vecHits, vecErr = similar(pool, vec, fetchLimit, filter)
 
     # If vector search fails (no embeddings, etc.), just return FTS results.
     if vecErr isnt empty or (vecHits is empty)
@@ -57,18 +62,27 @@ func hybridSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, 
         # Only add to hitMap if not already present from FTS.
         _, exists := hitMap[sh.Id]
         if not exists
-            hitMap[sh.Id] = SearchHit{Id: sh.Id, Type: sh.Type, Name: sh.Name, Summary: sh.Summary}
+            hitMap[sh.Id] = SearchHit{
+                Id: sh.Id,
+                Type: sh.Type,
+                Name: sh.Name,
+                Summary: sh.Summary,
+                UpdatedAt: sh.UpdatedAt,
+            }
 
     # 4. Collect all candidate IDs and sort by RRF score descending.
-    ids := maps.Keys(scores)
+    # NB: sort.ByKeyDesc returns a sorted copy — bind the result, or the
+    # top-limit cut below iterates random map order.
+    ids := maps.Keys(scores) |> sort.ByKeyDesc(id => scores[id])
 
-    sort.ByKeyDesc(ids, id => scores[id])
-
-    # 5. Build the final result list, capped at limit.
+    # 5. Build the final result list, capped at limit, each hit stamped
+    # with its RRF score so callers can see why it ranked where it did.
     result := make(list of SearchHit, 0, limit)
     for _, id in ids
         if len(result) >= limit
             break
-        result = append(result, hitMap[id])
+        h := hitMap[id]
+        h.Score = scores[id]
+        result = append(result, h)
 
     return result, empty

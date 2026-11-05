@@ -1,0 +1,351 @@
+# mizuya — tests for the append-only belief log (entity_history,
+# observation supersedes), time-bounded reads, and search filters.
+#
+# Internal test package (petiole main) so tests can call the
+# unexported store/search functions directly.
+
+petiole main
+
+import "os"
+import "path/filepath"
+import "stdlib/db"
+import "stdlib/slice"
+import "stdlib/sqlite"
+import "stdlib/test"
+import "testing"
+
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+# openTestPool creates a fresh temp database with all extensions and the
+# full schema. Returns the pool and the temp dir (caller removes it).
+func openTestPool(t: reference testing.T) (db.Pool, string)
+    dir, err := os.MkdirTemp("", "mizuya-test-")
+    if err isnt empty
+        t.Fatalf("mktemp: %v", err)
+        return db.Pool{}, ""
+    path := filepath.Join(dir, "test.db")
+    pool, oerr := sqlite.OpenWithExtensions(
+        path,
+        map of string to string{"journal_mode": "WAL"},
+        vec1ext.Register,
+        regexpext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        statsext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    )
+    if oerr isnt empty
+        t.Fatalf("open: %v", oerr)
+        return db.Pool{}, ""
+    test.AssertNoError(t, initDB(pool))
+    return pool, dir
+
+func closeTestPool(pool: db.Pool, dir: string)
+    db.Close(pool) onerr discard
+    os.RemoveAll(dir) onerr discard
+
+# todayDate returns the current UTC date as YYYY-MM-DD, straight from
+# SQLite so tests and schema share one clock.
+func todayDate(pool: db.Pool) (string, error)
+    return db.QueryRow(pool, "SELECT date('now')") |> db.ScanRow of string
+
+# --- entity_history: append-only versions ---
+
+func TestUpsertAppendsHistory(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(t, upsertEntity(
+        pool,
+        "duck",
+        "concept",
+        "Donald Duck",
+        "v1: kids cartoon",
+        list of string{"disney"},
+    ))
+
+    hist, err := listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 1)
+    test.AssertContains(t, hist[0].Data, "v1")
+
+    # A no-op upsert (identical state) must not spam the log.
+    test.AssertNoError(t, upsertEntity(
+        pool,
+        "duck",
+        "concept",
+        "Donald Duck",
+        "v1: kids cartoon",
+        list of string{"disney"},
+    ))
+    hist, err = listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 1)
+
+    # A real change appends the new state; the old one stays in the log.
+    test.AssertNoError(t, upsertEntity(
+        pool,
+        "duck",
+        "concept",
+        "Donald Duck",
+        "v2: also a meme",
+        list of string{"disney"},
+    ))
+    hist, err = listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 2)
+    # Newest first.
+    test.AssertContains(t, hist[0].Data, "v2")
+    test.AssertContains(t, hist[1].Data, "v1")
+
+    # The live row is the current view; history is the log.
+    e, gerr := getEntity(pool, "duck")
+    test.AssertNoError(t, gerr)
+    test.AssertContains(t, e.Data, "v2")
+
+func TestEntityStateAt(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
+    )
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "v2", empty list of string),
+    )
+
+    # As of today (end of day): the latest version.
+    today, terr := todayDate(pool)
+    test.AssertNoError(t, terr)
+    st, err := entityStateAt(pool, "duck", today)
+    test.AssertNoError(t, err)
+    test.AssertContains(t, st.Data, "v2")
+
+    # As of a far-future date: still the latest.
+    st, err = entityStateAt(pool, "duck", "2999-01-01")
+    test.AssertNoError(t, err)
+    test.AssertContains(t, st.Data, "v2")
+
+    # As of before the entity existed: an error, not a silent empty row.
+    _, err = entityStateAt(pool, "duck", "2000-01-01")
+    test.AssertError(t, err)
+
+    # Malformed date: rejected.
+    _, err = entityStateAt(pool, "duck", "yesterday")
+    test.AssertError(t, err)
+
+# --- observations: supersedes links ---
+
+func TestObservationSupersedes(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "other", "concept", "Other", "s", empty list of string),
+    )
+
+    test.AssertNoError(t, addObservation(pool, "duck", "first belief", "conversation"))
+    obs, err := listObservations(pool, "duck")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 1)
+    first := obs[0]
+    test.AssertEqual(t, first.Supersedes, "")
+
+    # Correcting observation links to the one it corrects.
+    test.AssertNoError(
+        t,
+        addObservation(pool, "duck", "corrected belief", "conversation", first.Id),
+    )
+    obs, err = listObservations(pool, "duck")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 2)
+    test.AssertEqual(t, obs[0].Supersedes, first.Id)
+    test.AssertEqual(t, obs[1].Id, first.Id)
+
+    # Bogus supersedes id: fail-closed error.
+    err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
+    test.AssertError(t, err)
+
+    # Observation on a different entity: also rejected.
+    test.AssertNoError(t, addObservation(pool, "other", "o", "conversation"))
+    otherObs, err := listObservations(pool, "other")
+    test.AssertNoError(t, err)
+    err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
+    test.AssertError(t, err)
+
+func TestListObservationsRange(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    test.AssertNoError(t, addObservation(pool, "duck", "one", "conversation"))
+    test.AssertNoError(t, addObservation(pool, "duck", "two", "conversation"))
+
+    today, terr := todayDate(pool)
+    test.AssertNoError(t, terr)
+    obs, err := listObservationsRange(pool, "duck", today, today)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 2)
+
+    obs, err = listObservationsRange(pool, "duck", "", "2000-01-01")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 0)
+
+    _, err = listObservationsRange(pool, "duck", "01/02/2026", "")
+    test.AssertError(t, err)
+
+# --- search filters ---
+
+func seedSearchEntities(t: reference testing.T, pool: db.Pool)
+    test.AssertNoError(t, upsertEntity(
+        pool,
+        "sqlite",
+        "tool",
+        "SQLite",
+        "Embedded SQL database engine",
+        list of string{"db", "embedded"},
+    ))
+    test.AssertNoError(t, upsertEntity(
+        pool,
+        "kukicha",
+        "project",
+        "Kukicha",
+        "Go superset with pipes and onerr",
+        list of string{"lang"},
+    ))
+    test.AssertNoError(t, upsertEntity(
+        pool,
+        "vec1",
+        "tool",
+        "vec1",
+        "Vector extension for KNN search",
+        list of string{"db", "vector"},
+    ))
+
+func TestSearchFilters(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+    seedSearchEntities(t, pool)
+
+    # Type filter.
+    hits, err := ftsSearch(pool, "database", 10, SearchFilter{Type: "tool"})
+    test.AssertNoError(t, err)
+    for h in hits
+        test.AssertEqual(t, h.Type, "tool")
+    test.AssertTrue(t, hits isnt empty, "expected tool hits")
+
+    # Tag filter.
+    hits, err = ftsSearch(pool, "search", 10, SearchFilter{Tag: "vector"})
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hits), 1)
+    test.AssertEqual(t, hits[0].Id, "vec1")
+
+    # Invalid dates are errors, not silent empty results.
+    _, err = ftsSearch(pool, "database", 10, SearchFilter{Since: "yesterday"})
+    test.AssertError(t, err)
+    _, err = hybridSearch(pool, "database", 10, SearchFilter{Until: "2026-13-99"})
+    test.AssertError(t, err)
+
+func TestHybridSearchHitShape(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+    seedSearchEntities(t, pool)
+    _, rerr := reEmbedIfChanged(pool, "sqlite")
+    test.AssertNoError(t, rerr)
+    _, rerr = reEmbedIfChanged(pool, "kukicha")
+    test.AssertNoError(t, rerr)
+    _, rerr = reEmbedIfChanged(pool, "vec1")
+    test.AssertNoError(t, rerr)
+
+    hits, err := hybridSearch(pool, "embedded database", 10)
+    test.AssertNoError(t, err)
+    test.AssertTrue(t, hits isnt empty, "expected hits")
+    for h in hits
+        # Every hit carries provenance-ish metadata: recency + why it ranked.
+        test.AssertTrue(t, h.UpdatedAt isnt empty, "updated_at must be set")
+        test.AssertTrue(t, h.Score > 0.0, "RRF score must be positive")
+    # Best hit for this query should be sqlite.
+    test.AssertEqual(t, hits[0].Id, "sqlite")
+
+    # since/until threaded through hybrid: far-past until matches nothing.
+    hits, err = hybridSearch(pool, "database", 10, SearchFilter{Until: "2000-01-01"})
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hits), 0)
+
+func TestListDrift(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
+    )
+    test.AssertNoError(t, addObservation(pool, "duck", "stale belief", "conversation"))
+    obs, err := listObservations(pool, "duck")
+    test.AssertNoError(t, err)
+    first := obs[0]
+
+    # No entity change after the observation yet: no drift.
+    rows, err := listDrift(pool, 50, false)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 0)
+
+    # Simulate a later entity change (deterministic future timestamp).
+    db.Exec(
+        pool,
+        "INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', '{}', datetime('now', '+1 second'))",
+    ) onerr discard
+
+    # Now the observation is drifted.
+    rows, err = listDrift(pool, 50, false)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 1)
+    test.AssertEqual(t, rows[0].ObsId, first.Id)
+
+    # A superseding observation makes the old one a deliberate correction:
+    # excluded by default (the new observation is itself drifted by the
+    # simulated change), included with includeSuperseded=true.
+    test.AssertNoError(
+        t,
+        addObservation(pool, "duck", "corrected belief", "conversation", first.Id),
+    )
+    rows, err = listDrift(pool, 50, false)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 1)
+    test.AssertTrue(t, rows[0].ObsId isnt first.Id, "superseded obs must be excluded by default")
+    rows, err = listDrift(pool, 50, true)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 2)
+    ids := rows |> slice.Map(r => r.ObsId)
+    test.AssertContains(t, ids, first.Id)
+
+func TestRegexSearchFilter(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+    seedSearchEntities(t, pool)
+
+    hits, err := regexSearch(pool, '^sqlite$', 10, SearchFilter{Tag: "embedded"})
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hits), 1)
+    test.AssertEqual(t, hits[0].Id, "sqlite")
+
+    hits, err = regexSearch(pool, '^sqlite$', 10, SearchFilter{Tag: "lang"})
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hits), 0)

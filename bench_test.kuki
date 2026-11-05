@@ -1,0 +1,255 @@
+# mizuya — recall benchmark + latency benchmarks.
+#
+# Two things live here, mirroring how funes evaluates retrieval changes
+# against a labeled set before keeping them:
+#
+#   * TestLabeledRecall — a small labeled query set (query → expected
+#     entity ids). Measures recall@k of hybridSearch and fails if the
+#     average drops below the threshold. Extend the set when adding
+#     entities/queries; do not tune the threshold to make it pass.
+#   * BenchmarkHybridSearch / BenchmarkFtsSearch / BenchmarkSimilar —
+#     latency benchmarks over a seeded temp database (hash embeddings,
+#     fully deterministic). Run with: kukicha test . -bench . -benchtime 100x
+#
+# Self-contained (does not rely on helpers from other *_test.kuki files).
+
+petiole main
+
+import "os"
+import "path/filepath"
+import "stdlib/db"
+import "stdlib/slice"
+import "stdlib/sqlite"
+import "stdlib/test"
+import "testing"
+
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+func openBenchPool(tb: testing.TB) (db.Pool, string)
+    dir, err := os.MkdirTemp("", "mizuya-bench-")
+    if err isnt empty
+        tb.Fatalf("mktemp: %v", err)
+        return db.Pool{}, ""
+    path := filepath.Join(dir, "bench.db")
+    pool, oerr := sqlite.OpenWithExtensions(
+        path,
+        map of string to string{"journal_mode": "WAL"},
+        vec1ext.Register,
+        regexpext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        statsext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    )
+    if oerr isnt empty
+        tb.Fatalf("open: %v", oerr)
+        return db.Pool{}, ""
+    if ierr := initDB(pool); ierr isnt empty
+        tb.Fatalf("initDB: %v", ierr)
+    return pool, dir
+
+func closeBenchPool(pool: db.Pool, dir: string)
+    db.Close(pool) onerr discard
+    os.RemoveAll(dir) onerr discard
+
+# benchCorpus is a fixed set of entities with distinctive vocabularies,
+# shared by the labeled recall test and the latency benchmarks.
+type benchEntity
+    id: string
+    etype: string
+    name: string
+    summary: string
+    tags: list of string
+
+func benchCorpus() list of benchEntity
+    return list of benchEntity{
+        {
+            id: "sqlite",
+            etype: "tool",
+            name: "SQLite",
+            summary: "Embedded SQL database engine with FTS5 full text search",
+            tags: list of string{"db", "embedded"},
+        },
+        {
+            id: "vec1",
+            etype: "tool",
+            name: "vec1",
+            summary: "SQLite vector extension for KNN cosine similarity search",
+            tags: list of string{"db", "vector"},
+        },
+        {
+            id: "kukicha",
+            etype: "project",
+            name: "Kukicha",
+            summary: "Go superset language with pipes onerr enums if-expressions",
+            tags: list of string{"lang", "compiler"},
+        },
+        {
+            id: "ollama",
+            etype: "tool",
+            name: "Ollama",
+            summary: "Local LLM inference server for embeddings and chat models",
+            tags: list of string{"llm", "local"},
+        },
+        {
+            id: "postgres",
+            etype: "tool",
+            name: "PostgreSQL",
+            summary: "Relational database with JSON columns and full text search",
+            tags: list of string{"db", "sql"},
+        },
+        {
+            id: "bm25",
+            etype: "concept",
+            name: "BM25",
+            summary: "Term frequency ranking function used by FTS5 for keyword search",
+            tags: list of string{"ranking"},
+        },
+        {
+            id: "rrf",
+            etype: "concept",
+            name: "RRF",
+            summary: "Reciprocal rank fusion merges keyword and vector result lists",
+            tags: list of string{"ranking", "fusion"},
+        },
+        {
+            id: "wal",
+            etype: "concept",
+            name: "WAL",
+            summary: "SQLite write-ahead logging journal mode for concurrent readers",
+            tags: list of string{"sqlite", "storage"},
+        },
+    }
+
+# seedBenchCorpus upserts the corpus and embeds every entity (hash
+# fallback — deterministic, no provider needed).
+func seedBenchCorpus(tb: testing.TB, pool: db.Pool)
+    for e in benchCorpus()
+        if err := upsertEntity(pool, e.id, e.etype, e.name, e.summary, e.tags); err isnt empty
+            tb.Fatalf("upsert %v: %v", e.id, err)
+        if _, err := reEmbedIfChanged(pool, e.id); err isnt empty
+            tb.Fatalf("embed %v: %v", e.id, err)
+
+# --- Labeled recall ---
+
+# labeledQuery is one benchmark question with the entity ids that should
+# be recalled for it.
+type labeledQuery
+    query: string
+    want: list of string
+
+func labeledQueries() list of labeledQuery
+    return list of labeledQuery{
+        {query: "embedded database engine", want: list of string{"sqlite"}},
+        {query: "vector similarity KNN search", want: list of string{"vec1"}},
+        {query: "language with pipes and error propagation", want: list of string{"kukicha"}},
+        {query: "run embedding models locally", want: list of string{"ollama"}},
+        {query: "relational database with JSON columns", want: list of string{"postgres"}},
+        {query: "keyword ranking term frequency", want: list of string{"bm25"}},
+        {query: "merge keyword and vector rankings", want: list of string{"rrf"}},
+        {query: "write ahead logging concurrent readers", want: list of string{"wal"}},
+    }
+
+# recallAt returns the fraction of want ids present in the top k hits.
+func recallAt(hits: list of SearchHit, want: list of string, k: int) float64
+    if k > len(hits)
+        k = len(hits)
+    top := hits[:k] |> slice.Map(h => h.Id)
+    found := 0
+    for w in want
+        if w in top
+            found = found + 1
+    if want is empty
+        return 0.0
+    return found as float64 / len(want) as float64
+
+# minAvgRecall is the floor the labeled set must meet. If a retrieval
+# change drops below it, the change is abandoned (funes' "tested and
+# abandoned" discipline).
+const minAvgRecall: float64 = 0.8
+
+func TestLabeledRecall(t: reference testing.T)
+    pool, dir := openBenchPool(t)
+    defer closeBenchPool(pool, dir)
+    seedBenchCorpus(t, pool)
+
+    k := 5
+    total := 0.0
+    for lq in labeledQueries()
+        hits, err := hybridSearch(pool, lq.query, k)
+        test.AssertNoError(t, err)
+        r := recallAt(hits, lq.want, k)
+        total = total + r
+        topIds := hits |> slice.Map(h => h.Id)
+        t.Logf("query=%q recall@%v=%.2f top=%v", lq.query, k, r, topIds)
+    avg := total / len(labeledQueries()) as float64
+    t.Logf("average recall@%v = %.3f (floor %.2f)", k, avg, minAvgRecall)
+    test.AssertTrue(
+        t,
+        avg >= minAvgRecall,
+        "average recall@5 %.3f below floor %.2f",
+        avg,
+        minAvgRecall,
+    )
+
+# --- Latency benchmarks ---
+
+func seedBenchScale(b: reference testing.B, n: int) (db.Pool, string)
+    pool, dir := openBenchPool(b)
+    vocab := list of string{
+        "database",
+        "search",
+        "index",
+        "vector",
+        "graph",
+        "memory",
+        "agent",
+        "query",
+        "storage",
+        "compiler",
+    }
+    for i from 0 to n
+        id := "bench-{i}"
+        summary := "{vocab[i % len(vocab)]} {vocab[i * 7 % len(vocab)]} entity number {i} for benchmark seeding"
+        if err := upsertEntity(pool, id, "concept", "Bench {i}", summary, list of string{"bench"}); err isnt empty
+            b.Fatalf("upsert: %v", err)
+        if _, err := reEmbedIfChanged(pool, id); err isnt empty
+            b.Fatalf("embed: %v", err)
+    return pool, dir
+
+func BenchmarkHybridSearch(b: reference testing.B)
+    pool, dir := seedBenchScale(b, 500)
+    defer closeBenchPool(pool, dir)
+    b.ResetTimer()
+    for i from 0 to b.N
+        _, err := hybridSearch(pool, "vector database search index", 10)
+        if err isnt empty
+            b.Fatalf("hybrid: %v", err)
+
+func BenchmarkFtsSearch(b: reference testing.B)
+    pool, dir := seedBenchScale(b, 500)
+    defer closeBenchPool(pool, dir)
+    b.ResetTimer()
+    for i from 0 to b.N
+        _, err := ftsSearch(pool, "vector database search index", 10)
+        if err isnt empty
+            b.Fatalf("fts: %v", err)
+
+func BenchmarkSimilar(b: reference testing.B)
+    pool, dir := seedBenchScale(b, 500)
+    defer closeBenchPool(pool, dir)
+    vec, err := embedText("vector database search index")
+    if err isnt empty
+        b.Fatalf("embed: %v", err)
+    b.ResetTimer()
+    for i from 0 to b.N
+        _, serr := similar(pool, vec, 10)
+        if serr isnt empty
+            b.Fatalf("similar: %v", serr)

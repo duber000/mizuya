@@ -35,12 +35,25 @@ type Relation
     Data: string as "data"
     CreatedAt: string as "created_at"
 
-# SearchHit is a single row from an FTS5 search.
+# SearchHit is a single row from an FTS5 / hybrid search. Score is the
+# RRF fusion score for hybrid results (0 for plain FTS rows); UpdatedAt
+# is the entity's last-change timestamp, so callers can reason about
+# recency instead of trusting rank alone.
 type SearchHit
     Id: string as "id"
     Type: string as "type"
     Name: string as "name"
     Summary: string as "summary"
+    UpdatedAt: string as "updated_at"
+    Score: float64 as "score"
+
+# SearchFilter narrows search results. Since/Until are YYYY-MM-DD dates
+# (inclusive, applied to the entity's updated_at); empty means unbounded.
+type SearchFilter
+    Type: string as "type"
+    Tag: string as "tag"
+    Since: string as "since"
+    Until: string as "until"
 
 # ContextRow describes one end of a 1-hop neighbor edge.
 type ContextRow
@@ -62,12 +75,24 @@ type ReachableRow
     Summary: string as "summary"
 
 # ObsRow is a single observation row from the observations table.
-# Id is a uuid7 string assigned by SQLite at INSERT time.
+# Id is a uuid7 string assigned by SQLite at INSERT time. Supersedes
+# names the observation this one corrects (empty when it corrects none).
 type ObsRow
     Id: string as "id"
     Text: string as "text"
     Source: string as "source"
     At: string as "at"
+    Supersedes: string as "supersedes"
+
+# HistoryRow is one version of an entity from the append-only
+# entity_history log. ChangedAt is when that state became current.
+type HistoryRow
+    Id: string as "id"
+    EntityId: string as "entity_id"
+    Type: string as "type"
+    Name: string as "name"
+    Data: string as "data"
+    ChangedAt: string as "changed_at"
 
 # SimilarHit is a single row from a vector similarity search.
 type SimilarHit
@@ -75,7 +100,18 @@ type SimilarHit
     Name: string as "name"
     Type: string as "type"
     Summary: string as "summary"
+    UpdatedAt: string as "updated_at"
     Distance: float64 as "distance"
+
+# DriftRow is one observation whose entity's conception changed after the
+# observation was recorded (used by the drift command / listDrift).
+type DriftRow
+    ObsId: string as "obs_id"
+    EntityId: string as "entity_id"
+    EntityName: string as "entity_name"
+    ObsText: string as "obs_text"
+    ObsAt: string as "obs_at"
+    EntityUpdated: string as "entity_updated"
 
 # hashRow scans the content_hash column for change detection.
 type hashRow

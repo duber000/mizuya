@@ -10,14 +10,55 @@ import "stdlib/db"
 import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 
+# --- Search filters ---
+
+# entityFilterClauses turns a SearchFilter into WHERE fragments (written
+# against the entities alias `e`) plus their bound args. Since/Until are
+# YYYY-MM-DD dates applied to e.updated_at, whole days inclusive; empty
+# bounds are unbounded. Invalid dates are an error, never a silent
+# match-nothing filter.
+func entityFilterClauses(f: SearchFilter) (list of string, list of any, error)
+    clauses := empty list of string
+    args := empty list of any
+    if f.Type isnt empty
+        clauses = append(clauses, "e.type = ?")
+        args = append(args, f.Type)
+    if f.Tag isnt empty
+        clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(e.data, '$.tags') t WHERE t.value = ?)")
+        args = append(args, f.Tag)
+    if f.Since isnt empty
+        if not validDate(f.Since)
+            return empty list of string, empty list of any, error "since must be YYYY-MM-DD, got {f.Since}"
+        clauses = append(clauses, "e.updated_at >= datetime(?)")
+        args = append(args, f.Since)
+    if f.Until isnt empty
+        if not validDate(f.Until)
+            return empty list of string, empty list of any, error "until must be YYYY-MM-DD, got {f.Until}"
+        clauses = append(clauses, "e.updated_at < datetime(?, '+1 day')")
+        args = append(args, f.Until)
+    return clauses, args, empty
+
 # --- FTS5 keyword search ---
 
-# ftsSearch runs a BM25-ranked full-text search over entities.
-func ftsSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, error)
+# ftsSearch runs a BM25-ranked full-text search over entities, optionally
+# narrowed by a SearchFilter (type, tag, since/until on updated_at).
+func ftsSearch(pool: db.Pool, query: string, limit: int, filter: SearchFilter = SearchFilter{}) (list of SearchHit, error)
     if limit <= 0
         limit = 10
-    q := "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? ORDER BY bm25(entities_fts, 10.0, 5.0, 2.0, 1.0) LIMIT ?"
-    result := db.Query(pool, q, query, limit) |> db.ScanAll of SearchHit
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SearchHit, ferr
+    parts := list of string{
+        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ?",
+    }
+    args := list of any{query}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY bm25(entities_fts, 10.0, 5.0, 2.0, 1.0) LIMIT ?")
+    args = append(args, limit)
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SearchHit
     return result, empty
 
 # --- Regex search ---
@@ -27,11 +68,23 @@ func ftsSearch(pool: db.Pool, query: string, limit: int) (list of SearchHit, err
 # github.com/ncruces/go-sqlite3/ext/regexp. Useful for code identifiers,
 # version strings, and other tokens that FTS5's porter stemmer mangles.
 # A row matches if any of the three columns matches the pattern.
-func regexSearch(pool: db.Pool, pattern: string, limit: int) (list of SearchHit, error)
+func regexSearch(pool: db.Pool, pattern: string, limit: int, filter: SearchFilter = SearchFilter{}) (list of SearchHit, error)
     if limit <= 0
         limit = 10
-    q := "SELECT id, type, name, COALESCE(data ->> '$.summary', '') AS summary FROM entities WHERE id REGEXP ? OR name REGEXP ? OR data REGEXP ? ORDER BY updated_at DESC LIMIT ?"
-    result := db.Query(pool, q, pattern, pattern, pattern, limit) |> db.ScanAll of SearchHit
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SearchHit, ferr
+    parts := list of string{
+        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities e WHERE (e.id REGEXP ? OR e.name REGEXP ? OR e.data REGEXP ?)",
+    }
+    args := list of any{pattern, pattern, pattern}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY e.updated_at DESC LIMIT ?")
+    args = append(args, limit)
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SearchHit
     return result, empty
 
 # --- Binary vector serialization ---
@@ -72,14 +125,25 @@ func upsertEmbedding(pool: db.Pool, id: string, vec: list of float64) error
 # similar returns the k entities whose embeddings are closest to the query
 # vector under cosine distance. Uses vec1's KNN function-call syntax —
 # `FROM embeddings_vec(BLOB, '{k:N}')` exposes a hidden `distance` column
-# computed inside the extension.
-func similar(pool: db.Pool, vec: list of float64, k: int) (list of SimilarHit, error)
+# computed inside the extension. Results can be narrowed by a SearchFilter.
+func similar(pool: db.Pool, vec: list of float64, k: int, filter: SearchFilter = SearchFilter{}) (list of SimilarHit, error)
     if k <= 0
         k = 5
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SimilarHit, ferr
     blob := serializeVec(vec)
     knnArg := "\{k: {k}\}"
-    q := "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id ORDER BY v.distance ASC"
-    result := db.Query(pool, q, blob, knnArg) |> db.ScanAll of SimilarHit
+    parts := list of string{
+        "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id",
+    }
+    args := list of any{blob, knnArg}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY v.distance ASC")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SimilarHit
     return result, empty
 
 # similarByPercentile returns entities whose distance to `vec` falls
@@ -88,16 +152,27 @@ func similar(pool: db.Pool, vec: list of float64, k: int) (list of SimilarHit, e
 # everything in the closest 10%, which can be one row or fifty
 # depending on the distribution. Uses the percentile() aggregate from
 # the stats extension.
-func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int) (list of SimilarHit, error)
+func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int, filter: SearchFilter = SearchFilter{}) (list of SimilarHit, error)
     if pct <= 0 or pct > 100
         return empty, error "threshold must be in (0, 100], got {pct}"
     count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
     if count equals 0
         return empty list of SimilarHit, empty
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SimilarHit, ferr
     blob := serializeVec(vec)
     knnArg := "\{k: {count}\}"
-    q := "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists) ORDER BY d.d ASC"
-    result := db.Query(pool, q, blob, knnArg, pct) |> db.ScanAll of SimilarHit
+    parts := list of string{
+        "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists)",
+    }
+    args := list of any{blob, knnArg, pct}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY d.d ASC")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SimilarHit
     return result, empty
 
 # getEmbedding fetches the stored embedding for an entity (for the

@@ -95,6 +95,7 @@ func makeObserveCmd() reference cli.Command
         |> .StringFlag("id", "Entity id", "")
         |> .StringFlag("text", "Observation text", "")
         |> .StringFlag("source", "Observation source", "conversation")
+        |> .StringFlag("supersedes", "Id of an observation on this entity that this one corrects", "")
         |> .ActionE(doObserve)
 
 func makeRelateCmd() reference cli.Command
@@ -105,16 +106,27 @@ func makeRelateCmd() reference cli.Command
         |> .ActionE(doRelate)
 
 func makeSearchCmd() reference cli.Command
-    return cli.NewCommand("search", "BM25 full-text search across entities (or regex with --regex)")
+    return cli.NewCommand(
+        "search",
+        "Hybrid search across entities (BM25 + vector RRF, or regex with --regex)",
+    )
         |> .StringFlag("query", "FTS5 query (or regex pattern with --regex)", "")
         |> .IntFlag("limit", "Max results", 10)
         |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
+        |> .StringFlag("type", "Restrict to this entity type", "")
+        |> .StringFlag("tag", "Restrict to entities with this tag", "")
+        |> .StringFlag("since", "Only entities updated on/after this YYYY-MM-DD", "")
+        |> .StringFlag("until", "Only entities updated on/before this YYYY-MM-DD", "")
         |> .ActionE(doSearch)
 
 func makeContextCmd() reference cli.Command
     return cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
         |> .StringFlag("id", "Entity id", "")
         |> .IntFlag("depth", "Hops to traverse via the closure vtable (1 = immediate neighbors)", 1)
+        |> .BoolFlag("history", "Include the entity's append-only version history", false)
+        |> .StringFlag("since", "Only observations on/after this YYYY-MM-DD", "")
+        |> .StringFlag("until", "Only observations on/before this YYYY-MM-DD", "")
+        |> .StringFlag("as-of", "Show the entity's state as of this YYYY-MM-DD instead of current", "")
         |> .ActionE(doContext)
 
 func makeSimilarCmd() reference cli.Command
@@ -127,6 +139,10 @@ func makeSimilarCmd() reference cli.Command
             "Return everything in the closest N percentile of distances (1-100, 0 = use --limit instead)",
             0,
         )
+        |> .StringFlag("type", "Restrict to this entity type", "")
+        |> .StringFlag("tag", "Restrict to entities with this tag", "")
+        |> .StringFlag("since", "Only entities updated on/after this YYYY-MM-DD", "")
+        |> .StringFlag("until", "Only entities updated on/before this YYYY-MM-DD", "")
         |> .ActionE(doSimilar)
 
 func makeListCmd() reference cli.Command
@@ -163,6 +179,11 @@ func makeDriftCmd() reference cli.Command
         "Detect observations whose source entity has changed since they were recorded",
     )
         |> .IntFlag("limit", "Max drift rows to report", 50)
+        |> .BoolFlag(
+            "include-superseded",
+            "Also report observations that a newer observation explicitly supersedes",
+            false,
+        )
         |> .ActionE(doDrift)
 
 # --- Command handlers ---
@@ -210,14 +231,14 @@ func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float6
 
 # observeResolved adds an observation for id; on a miss with an interactive
 # TTY (outside JSON mode), offers fuzzy matches and retries with the pick.
-func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string) error
-    aerr := addObservation(pool, id, text, source)
+func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) error
+    aerr := addObservation(pool, id, text, source, supersedes)
     if aerr equals empty
         return empty
     picked := pickSuggestion(pool, args, id)
     if picked is empty
         return aerr
-    return addObservation(pool, picked, text, source)
+    return addObservation(pool, picked, text, source, supersedes)
 
 # openPool opens the database and registers the vec1 vector extension.
 # vec1 ships native vec1_cos_distance and a virtual-table KNN index, so
@@ -301,12 +322,13 @@ func doObserve(args: cli.Args) error
     if (id is empty) or (text is empty)
         return error "--id and --text are required"
     source := strpkg.Or(cli.GetString(args, "source"), "conversation")
+    supersedes := cli.GetString(args, "supersedes")
 
     pool := openPool(args) onerr explain "cannot open database"
 
     defer db.Close(pool)
 
-    observeResolved(pool, args, id, text, source) onerr
+    observeResolved(pool, args, id, text, source, supersedes) onerr
         return error "cannot add observation: {error:w}{suggestionsFor(pool, id)}"
 
     # Re-embed: observations are part of the entity's text corpus.
@@ -350,11 +372,17 @@ func doSearch(args: cli.Args) error
     defer db.Close(pool)
 
     useRegex := cli.GetBool(args, "regex")
+    filter := SearchFilter{
+        Type: cli.GetString(args, "type"),
+        Tag: cli.GetString(args, "tag"),
+        Since: cli.GetString(args, "since"),
+        Until: cli.GetString(args, "until"),
+    }
     hits := empty list of SearchHit
     if useRegex
-        hits = regexSearch(pool, query, limit) onerr explain "regex search failed"
+        hits = regexSearch(pool, query, limit, filter) onerr explain "regex search failed"
     else
-        hits = hybridSearch(pool, query, limit) onerr explain "search failed"
+        hits = hybridSearch(pool, query, limit, filter) onerr explain "search failed"
 
     if cli.IsJSON(args)
         printJSON(hits)
@@ -378,49 +406,82 @@ func doContext(args: cli.Args) error
     depth := cli.GetIntOr(args, "depth", 1)
     if depth < 1
         depth = 1
+    showHistory := cli.GetBool(args, "history")
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    asOf := cli.GetString(args, "as-of")
 
     e := resolveEntity(pool, args, id) onerr
         return error "{error:w}{suggestionsFor(pool, id)}"
 
-    obs := listObservations(pool, id) onerr explain "cannot read observations"
+    obs := listObservationsRange(pool, id, since, until) onerr explain "cannot read observations"
+
+    hist := empty list of HistoryRow
+    if showHistory
+        hist = listEntityHistory(pool, id, 50) onerr explain "cannot read entity history"
+
+    # --as-of: time-travel. Show the latest logged version from before the
+    # end of that day instead of the current row — the append-only log
+    # makes "what did we think then" answerable.
+    display := e
+    if asOf isnt empty
+        h := entityStateAt(pool, id, asOf) onerr
+            return error "no logged state of {id} as of {asOf}: {error:w}"
+
+        display = Entity{
+            Id: h.EntityId,
+            Type: h.Type,
+            Name: h.Name,
+            Data: h.Data,
+            CreatedAt: "",
+            UpdatedAt: h.ChangedAt,
+        }
 
     if depth > 1
-        renderDeepContext(args, pool, e, id, depth, obs) onerr return
+        renderDeepContext(args, pool, display, id, depth, obs, hist) onerr return
         return
-    renderShallowContext(args, pool, e, id, obs) onerr return
+    renderShallowContext(args, pool, display, id, obs, hist) onerr return
     return empty
 
-func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow) error
+func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow, hist: list of HistoryRow) error
     outgoing := outgoingContext(pool, id) onerr explain "cannot read outgoing"
 
     incoming := incomingContext(pool, id) onerr explain "cannot read incoming"
 
     if cli.IsJSON(args)
-        printJSON(map of string to any{
+        payload := map of string to any{
             "entity": e,
             "outgoing": outgoing,
             "incoming": incoming,
             "observations": obs,
-        })
+        }
+        if hist isnt empty
+            payload["history"] = hist
+        printJSON(payload)
         return
     printContext(e, outgoing, incoming, obs)
+    printHistory(hist)
     return empty
 
-func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow) error
+func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow, hist: list of HistoryRow) error
     outReach := reachableOutgoing(pool, id, depth) onerr explain "cannot read outgoing closure"
 
     inReach := reachableIncoming(pool, id, depth) onerr explain "cannot read incoming closure"
 
     if cli.IsJSON(args)
-        printJSON(map of string to any{
+        payload := map of string to any{
             "entity": e,
             "depth": depth,
             "outgoing": outReach,
             "incoming": inReach,
             "observations": obs,
-        })
+        }
+        if hist isnt empty
+            payload["history"] = hist
+        printJSON(payload)
         return
     printReachableContext(e, depth, outReach, inReach, obs)
+    printHistory(hist)
     return empty
 
 func doSimilar(args: cli.Args) error
@@ -444,11 +505,17 @@ func doSimilar(args: cli.Args) error
     else
         vec = embedText(text) onerr explain "cannot compute embedding"
 
+    filter := SearchFilter{
+        Type: cli.GetString(args, "type"),
+        Tag: cli.GetString(args, "tag"),
+        Since: cli.GetString(args, "since"),
+        Until: cli.GetString(args, "until"),
+    }
     hits := empty list of SimilarHit
     if threshold > 0
-        hits = similarByPercentile(pool, vec, threshold) onerr explain "similarity query failed"
+        hits = similarByPercentile(pool, vec, threshold, filter) onerr explain "similarity query failed"
     else
-        hits = similar(pool, vec, limit) onerr explain "similarity query failed"
+        hits = similar(pool, vec, limit, filter) onerr explain "similarity query failed"
 
     if cli.IsJSON(args)
         printJSON(hits)
@@ -719,31 +786,21 @@ func doDistill(args: cli.Args) error
 
 # --- drift ---
 
-# driftRow is one observation whose entity has been modified since the
-# observation was recorded.
-type driftRow
-    ObsId: string as "obs_id"
-    EntityId: string as "entity_id"
-    EntityName: string as "entity_name"
-    ObsText: string as "obs_text"
-    ObsAt: string as "obs_at"
-    EntityUpdated: string as "entity_updated"
-
-# doDrift finds observations whose entity was modified (updated_at or
-# content_hash changed) after the observation was recorded. These
-# observations may reference stale information and warrant review.
+# doDrift finds observations whose entity has a logged version newer than
+# the observation — i.e. the entity's conception changed after the
+# observation was recorded (append-only model: the change lives in
+# entity_history, not in an overwritten field). Observations that a newer
+# observation explicitly supersedes are deliberate corrections, not
+# drift, and are excluded unless --include-superseded is passed.
 func doDrift(args: cli.Args) error
     limit := cli.GetIntOr(args, "limit", 50)
+    includeSuperseded := cli.GetBool(args, "include-superseded")
 
     pool := openPool(args) onerr explain "cannot open database"
 
     defer db.Close(pool)
 
-    # An observation is "drifted" if its entity's updated_at is newer
-    # than the observation's `at` timestamp — the entity changed after
-    # the observation was recorded.
-    q := "SELECT o.id AS obs_id, o.entity_id AS entity_id, e.name AS entity_name, o.text AS obs_text, o.at AS obs_at, e.updated_at AS entity_updated FROM observations o JOIN entities e ON e.id = o.entity_id WHERE e.updated_at > o.at AND o.distilled = 0 ORDER BY e.updated_at DESC LIMIT ?"
-    rows := db.Query(pool, q, limit) |> db.ScanAll of driftRow onerr explain "drift query failed"
+    rows := listDrift(pool, limit, includeSuperseded) onerr explain "drift query failed"
 
     if rows is empty
         if cli.IsJSON(args)

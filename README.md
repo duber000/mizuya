@@ -37,17 +37,31 @@ binary at ./mizuya
 | Command   | What it does                                                            |
 |-----------|-------------------------------------------------------------------------|
 | `init`    | Create the database file and schema                                     |
-| `upsert`  | Create/update an entity (`--id --type --name --summary --tags`)         |
-| `observe` | Append an observation (`--id --text [--source]`) and re-embed           |
+| `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
+| `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
-| `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit]`)                  |
-| `context` | Entity + outgoing/incoming 1-hop neighbors + observation log (`--id`)   |
-| `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`)            |
+| `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--type] [--tag] [--since] [--until]`) |
+| `context` | Entity + neighbors + observations (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD]`) |
+| `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, same filters as `search`) |
 | `list`    | List entities, optionally filtered by `--type`                          |
+| `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`) |
 | `mcp`     | Start the MCP stdio server for AI agent access                          |
 
 All commands accept the global `--db <path>` (default `.mizuya/mizuya.db`)
 and `--json` for structured output.
+
+## Append-only beliefs (funes-style)
+
+Nothing is silently overwritten. Every `upsert` appends the post-update
+state to the `entity_history` table (the `entities` row stays the fast
+"current view"), and `observe --supersedes <obs-id>` links a correcting
+observation to the one it replaces instead of deleting it. Reads can
+time-travel: `context --as-of 2026-01-01` shows the latest logged state
+from before that date, `--since/--until` bound both `search` and
+`context`, and `drift` reports observations made stale by later entity
+changes (excluding deliberate supersessions). Search hits carry
+`updated_at` and their RRF `score`, so callers can reason about recency
+and ranking instead of trusting rank alone.
 
 ## MCP Server
 
@@ -56,12 +70,12 @@ The `mcp` subcommand starts a Model Context Protocol stdio server with
 
 | MCP Tool         | Description                                               |
 |------------------|-----------------------------------------------------------|
-| `upsert_entity`  | Create or update an entity (id, type, name, summary, tags)|
-| `add_observation`| Append an observation to an entity                        |
+| `upsert_entity`  | Create or update an entity (id, type, name, summary, tags); appends to version history |
+| `add_observation`| Append an observation (entity_id, text, source, supersedes) |
 | `relate`         | Create a typed edge between two entities                  |
-| `search`         | Hybrid search (BM25 + vector RRF)                         |
-| `get_context`    | Entity + 1-hop neighbors + observations                   |
-| `similar`        | Vector similarity search by entity id or text             |
+| `search`         | Hybrid search (BM25 + vector RRF; optional type/tag/since/until) |
+| `get_context`    | Entity + neighbors + observations; optional `history`, `since`, `until` |
+| `similar`        | Vector similarity search by entity id or text; same filters as `search` |
 
 ### Claude Desktop configuration
 
