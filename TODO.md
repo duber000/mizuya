@@ -142,3 +142,18 @@ Phase 3 — safety, idempotency, measurement — **done**:
   abstention thresholds, near-duplicate collapse, cross-encoder rerank,
   trained vec1 index. Only add one if `TestLabeledRecall`/benchmarks say
   it helps; record the result here either way.
+
+## Consumer feedback (foamy/courier) — addressed
+
+- [x] Observation ordering pinned: `context`/`get_context` observations are
+      always newest-first (`at DESC, id DESC`) — documented in
+      docs/output-contract.md, pinned by TestObservationOrderingPinned.
+- [x] Redaction surfaced everywhere: --json `redacted` count, text-mode
+      "(redacted N secret(s))" note, and a stderr WARN log line with detector
+      names (never the secret).
+- [x] History lifecycle: `prune-history --keep N [--before YYYY-MM-DD]
+      [--dry-run]` (newest version per entity always kept; fail-closed with
+      neither flag) + recommended retention policy in docs/STORAGE.md.
+- [x] Superseded observations flagged: ObsRow gains `superseded_by`
+      (contract-pinned); text mode prints "(superseded by <id>)";
+      `context --hide-superseded` / MCP `hide_superseded` filters them out.

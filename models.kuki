@@ -77,12 +77,16 @@ type ReachableRow
 # ObsRow is a single observation row from the observations table.
 # Id is a uuid7 string assigned by SQLite at INSERT time. Supersedes
 # names the observation this one corrects (empty when it corrects none).
+# SupersededBy is the inverse link: the id of the observation that
+# corrects this one (empty when nothing supersedes it) — so readers can
+# see a stale fact is stale without acting on it.
 type ObsRow
     Id: string as "id"
     Text: string as "text"
     Source: string as "source"
     At: string as "at"
     Supersedes: string as "supersedes"
+    SupersededBy: string as "superseded_by"
 
 # HistoryRow is one version of an entity from the append-only
 # entity_history log. ChangedAt is when that state became current.

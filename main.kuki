@@ -74,6 +74,7 @@ func main()
             makeImportOpenWikiCmd(),
             makeDistillCmd(),
             makeDriftCmd(),
+            makePruneHistoryCmd(),
         )
         |> cli.Run()
 
@@ -127,6 +128,11 @@ func makeContextCmd() reference cli.Command
         |> .StringFlag("since", "Only observations on/after this YYYY-MM-DD", "")
         |> .StringFlag("until", "Only observations on/before this YYYY-MM-DD", "")
         |> .StringFlag("as-of", "Show the entity's state as of this YYYY-MM-DD instead of current", "")
+        |> .BoolFlag(
+            "hide-superseded",
+            "Omit observations that a newer observation explicitly supersedes (they stay flagged via superseded_by otherwise)",
+            false,
+        )
         |> .ActionE(doContext)
 
 func makeSimilarCmd() reference cli.Command
@@ -185,6 +191,16 @@ func makeDriftCmd() reference cli.Command
             false,
         )
         |> .ActionE(doDrift)
+
+func makePruneHistoryCmd() reference cli.Command
+    return cli.NewCommand(
+        "prune-history",
+        "Compact the append-only entity_history log (retention/GC): keep the newest N versions per entity and/or drop versions before a date. The newest version per entity is always kept.",
+    )
+        |> .IntFlag("keep", "Keep only the newest N versions per entity (0 = no rank limit)", 0)
+        |> .StringFlag("before", "Also drop versions from before this YYYY-MM-DD (end of day)", "")
+        |> .BoolFlag("dry-run", "Count what would be pruned without deleting", false)
+        |> .ActionE(doPruneHistory)
 
 # --- Command handlers ---
 
@@ -415,11 +431,12 @@ func doContext(args: cli.Args) error
     since := cli.GetString(args, "since")
     until := cli.GetString(args, "until")
     asOf := cli.GetString(args, "as-of")
+    hideSuperseded := cli.GetBool(args, "hide-superseded")
 
     e := resolveEntity(pool, args, id) onerr
         return error "{error:w}{suggestionsFor(pool, id)}"
 
-    obs := listObservationsRange(pool, id, since, until) onerr explain "cannot read observations"
+    obs := listObservationsRange(pool, id, since, until, hideSuperseded) onerr explain "cannot read observations"
 
     hist := empty list of HistoryRow
     if showHistory
@@ -833,6 +850,41 @@ func doDrift(args: cli.Args) error
         for r in rows
             print("  {color.Bold(r.EntityId)}  {color.Dim(r.ObsAt)} -> {r.EntityUpdated}")
             print("    {color.Dim(strpkg.Truncate(r.ObsText, 80))}")
+    return empty
+
+# --- prune-history ---
+
+# doPruneHistory compacts entity_history per the retention policy in
+# docs/STORAGE.md. This is the deliberate-deletion exception to the
+# append-only model: the log is the source of truth for as-of reads, so
+# pruning means as-of dates older than the oldest retained version will
+# error afterwards.
+func doPruneHistory(args: cli.Args) error
+    keep := cli.GetIntOr(args, "keep", 0)
+    before := cli.GetString(args, "before")
+    dryRun := cli.GetBool(args, "dry-run")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer db.Close(pool)
+
+    n, err := pruneHistory(pool, keep, before, dryRun)
+    if err isnt empty
+        return err
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{
+            "status": if dryRun then "dry-run" else "pruned",
+            "keep": keep,
+            "before": before,
+            "versions": n,
+        })
+    else
+        verb := if dryRun then "would prune" else "pruned"
+        beforeLabel := strpkg.Or(before, "-")
+        print(
+            "{color.Green(verb)} {n} entity_history version(s) (keep={keep}, before={beforeLabel})",
+        )
     return empty
 
 # FrontMatter is the OKF front-matter shape the openwiki importer reads.

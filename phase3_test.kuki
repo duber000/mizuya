@@ -70,7 +70,7 @@ func TestRedactSecretsDetectors(t: reference testing.T)
     for c in cases
         findings, err := sc.Scan(c)
         test.AssertNoError(t, err)
-        test.AssertTrue(t, len(findings) > 0, "expected a finding in: {c}")
+        test.AssertTrue(t, findings isnt empty, "expected a finding in: {c}")
         out, redacted, rerr := sc.Redact(c)
         test.AssertNoError(t, rerr)
         test.AssertEqual(t, len(redacted), len(findings))
@@ -87,7 +87,7 @@ func TestRedactSecretsDetectors(t: reference testing.T)
     test.AssertEqual(t, out, clean)
 
 func strContains(s: string, sub: string) bool
-    return len(sub) > 0 and strIndex(s, sub) >= 0
+    return sub isnt empty and strIndex(s, sub) >= 0
 
 func strIndex(s: string, sub: string) int
     for i from 0 to len(s) - len(sub)

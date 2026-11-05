@@ -14,6 +14,11 @@ Stability rules:
   `mizuya context --id <id> --json` (CLI) or the MCP `get_context` tool with
   `id: <hit.id>` returns its observations (each with its own `id`) and,
   with `--history` / `history: true`, its append-only version log.
+- **Ordering pin:** the `observations` array in `context` / `get_context`
+  output is always newest-first — `ORDER BY at DESC, id DESC` — and always
+  includes superseded observations unless `hide_superseded` is set (they are
+  flagged via `superseded_by`). Consumers taking "the last N as most recent"
+  can rely on this order.
 
 ## Shared shapes
 
@@ -23,7 +28,9 @@ Entity      = { "id": string, "type": string, "name": string,
                 "created_at": string /* UTC "YYYY-MM-DD HH:MM:SS" */,
                 "updated_at": string }
 ObsRow      = { "id": string /* uuid7 */, "text": string, "source": string,
-                "at": string /* UTC, millisecond precision */, "supersedes": string /* obs id or "" */ }
+                "at": string /* UTC, millisecond precision */,
+                "supersedes": string /* obs id this one corrects, or "" */,
+                "superseded_by": string /* obs id that corrects this one, or "" — a non-empty value means DO NOT ACT on this fact */ }
 HistoryRow  = { "id": string, "entity_id": string, "type": string, "name": string,
                 "data": string /* JSON-encoded, same shape as Entity.data */,
                 "changed_at": string /* UTC, millisecond precision */ }
@@ -46,7 +53,8 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 | `observe` | `{"status": "observed", "id": string, "text": string, "redacted": number /* secrets redacted by the gate */}` |
 | `relate` | `{"status": "related", "src": string, "rel": string, "dst": string}` |
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
-| `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "history"?: HistoryRow[]}` — with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history` |
+| `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "history"?: HistoryRow[]}` — observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
+| `prune-history` | `{"status": "pruned" \| "dry-run", "keep": number, "before": string, "versions": number}` |
 | `similar` | `SimilarHit[]` |
 | `list` | `Entity[]` |
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |

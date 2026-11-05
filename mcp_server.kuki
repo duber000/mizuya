@@ -59,6 +59,7 @@ type getContextArgs
     History: bool as "history"
     Since: string as "since"
     Until: string as "until"
+    HideSuperseded: bool as "hide_superseded"
 
 type similarArgs
     Id: string as "id"
@@ -367,13 +368,18 @@ func registerGetContext(server: reference mcp.Server)
             jsonschema.String,
             "Only observations on/before this YYYY-MM-DD (whole day inclusive)",
         ),
+        jsonschema.Prop(
+            "hide_superseded",
+            jsonschema.Boolean,
+            "Omit observations that a newer observation supersedes. Default false: superseded observations are included, flagged via their superseded_by field. Observations are always newest-first.",
+        ),
     })
         |> jsonschema.Required(list of string{"id"})
 
     mcp.ToolWithOpts of getContextArgs(
         server,
         "get_context",
-        "Get full context for an entity: its data, observations (each with id, text, source, at, supersedes), and related entities up to depth hops (default 1). Set history=true to also see how the entity's stored state changed over time.",
+        "Get full context for an entity: its data, observations (each with id, text, source, at, supersedes, superseded_by; always newest-first), and related entities up to depth hops (default 1). Set history=true to also see how the entity's stored state changed over time.",
         schema,
         mcp.ToolOpts{ReadOnly: true},
         handleGetContext,
@@ -391,7 +397,7 @@ func handleGetContext(args: getContextArgs) (any, error)
     defer db.Close(pool)
 
     e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, args.Id)}"), empty
-    obs := listObservationsRange(pool, args.Id, args.Since, args.Until) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+    obs := listObservationsRange(pool, args.Id, args.Since, args.Until, args.HideSuperseded) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
 
     hist := empty list of HistoryRow
     if args.History

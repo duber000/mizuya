@@ -64,8 +64,13 @@ func TestObsRowContract(t: reference testing.T)
         Source: "conversation",
         At: "2026-11-05 17:04:18.647",
         Supersedes: "",
+        SupersededBy: "",
     }
-    assertJSONKeys(t, o, list of string{"id", "text", "source", "at", "supersedes"})
+    assertJSONKeys(
+        t,
+        o,
+        list of string{"id", "text", "source", "at", "supersedes", "superseded_by"},
+    )
 
 func TestHistoryRowContract(t: reference testing.T)
     h := HistoryRow{

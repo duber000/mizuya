@@ -202,15 +202,15 @@ func TestListObservationsRange(t: reference testing.T)
 
     today, terr := todayDate(pool)
     test.AssertNoError(t, terr)
-    obs, err := listObservationsRange(pool, "duck", today, today)
+    obs, err := listObservationsRange(pool, "duck", today, today, false)
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 2)
 
-    obs, err = listObservationsRange(pool, "duck", "", "2000-01-01")
+    obs, err = listObservationsRange(pool, "duck", "", "2000-01-01", false)
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 0)
 
-    _, err = listObservationsRange(pool, "duck", "01/02/2026", "")
+    _, err = listObservationsRange(pool, "duck", "01/02/2026", "", false)
     test.AssertError(t, err)
 
 # --- search filters ---
@@ -350,3 +350,152 @@ func TestRegexSearchFilter(t: reference testing.T)
     hits, err = regexSearch(pool, '^sqlite$', 10, SearchFilter{Tag: "lang"})
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(hits), 0)
+
+# --- consumer-contract pins ---
+
+# TestObservationOrderingPinned: context --json observations are always
+# newest-first (at DESC, id DESC) — foamy takes the last 3 as "most recent",
+# so this ordering is contractual, not incidental.
+func TestObservationOrderingPinned(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    _, aerr := addObservation(pool, "duck", "first", "conversation")
+    test.AssertNoError(t, aerr)
+    _, aerr = addObservation(pool, "duck", "second", "conversation")
+    test.AssertNoError(t, aerr)
+    _, aerr = addObservation(pool, "duck", "third", "conversation")
+    test.AssertNoError(t, aerr)
+
+    obs, err := listObservations(pool, "duck")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 3)
+    # Newest first: strictly non-increasing timestamps, and ids DESC on ties.
+    test.AssertEqual(t, obs[0].Text, "third")
+    test.AssertEqual(t, obs[2].Text, "first")
+    for i from 1 to len(obs)
+        test.AssertTrue(t, obs[i - 1].At >= obs[i].At, "at must be non-increasing at index {i}")
+        if obs[i - 1].At equals obs[i].At
+            test.AssertTrue(t, obs[i - 1].Id > obs[i].Id, "id tiebreak must be DESC at index {i}")
+
+# TestSupersededByFlag: context output flags superseded observations via
+# superseded_by, and hideSuperseded drops them.
+func TestSupersededByFlag(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    _, aerr := addObservation(pool, "duck", "stale fact", "conversation")
+    test.AssertNoError(t, aerr)
+    obs, err := listObservations(pool, "duck")
+    test.AssertNoError(t, err)
+    stale := obs[0]
+    test.AssertEqual(t, stale.SupersededBy, "")
+
+    _, aerr = addObservation(pool, "duck", "corrected fact", "conversation", stale.Id)
+    test.AssertNoError(t, aerr)
+
+    obs, err = listObservations(pool, "duck")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 2)
+    # obs[0] = corrected (newest), obs[1] = stale, flagged.
+    test.AssertEqual(t, obs[0].Supersedes, stale.Id)
+    test.AssertEqual(t, obs[0].SupersededBy, "")
+    test.AssertEqual(t, obs[1].Id, stale.Id)
+    test.AssertEqual(t, obs[1].SupersededBy, obs[0].Id)
+
+    # hideSuperseded drops the stale one.
+    obs, err = listObservationsRange(pool, "duck", "", "", true)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(obs), 1)
+    test.AssertEqual(t, obs[0].Text, "corrected fact")
+
+# --- prune-history ---
+
+func TestPruneHistory(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
+    )
+    # Insert 4 more versions with deterministic future timestamps so the
+    # newest-first order is v5, v4, v3, v2, then the real upsert (v1).
+    for i from 2 through 5
+        db.Exec(
+            pool,
+            "INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', ?, ?)",
+            `{"summary":"v${i}"}`,
+            "2027-01-0{i} 10:00:00.000",
+        ) onerr discard
+
+    hist, err := listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 5)
+
+    # dry-run keep=2 counts without deleting.
+    n, perr := pruneHistory(pool, 2, "", true)
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, n, 3)
+    hist, err = listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 5)
+
+    # keep=2 retains the newest 2 (v5, v4).
+    n, perr = pruneHistory(pool, 2, "", false)
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, n, 3)
+    hist, err = listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 2)
+    test.AssertContains(t, hist[0].Data, "v5")
+    test.AssertContains(t, hist[1].Data, "v4")
+
+    # before=2027-01-04 drops versions older than end of that day (v4),
+    # but never the newest (v5).
+    n, perr = pruneHistory(pool, 0, "2027-01-04", false)
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, n, 1)
+    hist, err = listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(hist), 1)
+    test.AssertContains(t, hist[0].Data, "v5")
+
+    # Neither flag: error (fail-closed against accidental full prune).
+    _, perr = pruneHistory(pool, 0, "", false)
+    test.AssertError(t, perr)
+
+    # Bad date: error.
+    _, perr = pruneHistory(pool, 0, "not-a-date", false)
+    test.AssertError(t, perr)
+
+func TestPruneHistoryBeforeKeepsNewest(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
+    )
+    db.Exec(
+        pool,
+        "INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', ?, '2026-01-01 10:00:00.000')",
+        `{"summary":"old"}`,
+    ) onerr discard
+
+    # Pruning "everything before 2999" must still keep the newest row.
+    n, err := pruneHistory(pool, 0, "2999-01-01", false)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, n, 1) # only the old row
+    hist, herr := listEntityHistory(pool, "duck", 50)
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hist), 1)
+    test.AssertContains(t, hist[0].Data, "v1")

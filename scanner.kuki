@@ -16,7 +16,10 @@
 petiole main
 
 import "stdlib/env"
+import "stdlib/log"
 import "stdlib/regex"
+import "stdlib/slice"
+import "stdlib/string" as strpkg
 
 # SecretFinding is one detected secret. Raw is the matched value — never
 # log it; redaction replaces it in the text.
@@ -117,4 +120,15 @@ func redactSecrets(text: string) (string, int, error)
     out, findings, err := sc.Redact(text)
     if err isnt empty
         return "", 0, error "secret scan failed (fail-closed, refusing write): {err:w}"
+    if findings isnt empty
+        # Visible on stderr even when stdout is piped/parsed, so redaction
+        # is never silent. Detector names only — never log Finding.Raw.
+        names := findings |> slice.Map(f => f.Detector) |> strpkg.Join(",")
+        log.Warn(
+            "mizuya: redacted secrets before storing",
+            "count",
+            len(findings),
+            "detectors",
+            names,
+        )
     return out, len(findings), empty

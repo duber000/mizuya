@@ -117,7 +117,8 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
             src := o.Source
             if src is empty
                 src = "conversation"
-            print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
+            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {o.SupersededBy})")}" else ""
+            print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
 
 func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow, incoming: list of ReachableRow, obs: list of ObsRow)
     printEntityHeader(e)
@@ -154,7 +155,8 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
             src := o.Source
             if src is empty
                 src = "conversation"
-            print("  {color.Dim("[{o.At} {src}]")} {o.Text}")
+            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {o.SupersededBy})")}" else ""
+            print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
 
 func printJSON(v: any)
     data := jsonpkg.PrettyBytes(v) onerr

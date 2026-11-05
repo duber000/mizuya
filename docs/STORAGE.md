@@ -55,3 +55,22 @@ TODO.md) trades a little accuracy for speed, not space.
 - `observe`/`upsert` are gated by the fail-closed secret scanner
   (`MIZUYA_SECRET_SCAN`, default `redact`), so stored text never contains
   detected tokens — keep it on before any future export/share feature.
+
+## History retention policy (recommended)
+
+`entity_history` is append-only by design, so long-lived shared graphs need
+a retention policy. Recommended for an aggregate that many consumers read:
+
+```bash
+mizuya prune-history --keep 20 --before 2026-08-01   # keep newest 20 per entity + anything after the date
+mizuya prune-history --keep 20 --before 2026-08-01 --dry-run   # preview first
+```
+
+Semantics: the newest version per entity is **always** kept (current state
+and as-of-today reads keep working); `--keep N` retains the newest N per
+entity; `--before YYYY-MM-DD` additionally drops versions from before the
+end of that day. This is the deliberate-deletion exception to append-only —
+after pruning, `--as-of` dates older than the oldest retained version
+error. Run it on a schedule (e.g. weekly) and `VACUUM` afterwards to
+reclaim the file space. Rule of thumb: with ~1 KB data snapshots, 20
+versions/entity costs ~20 KB/entity — cheap next to the vectors.

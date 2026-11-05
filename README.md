@@ -41,7 +41,8 @@ binary at ./mizuya
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
 | `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--type] [--tag] [--since] [--until]`) |
-| `context` | Entity + neighbors + observations (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD]`) |
+| `context` | Entity + neighbors + observations, always newest-first (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
+| `prune-history` | Compact the append-only version log: `--keep N` and/or `--before YYYY-MM-DD`, `--dry-run`; newest version per entity always kept |
 | `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, same filters as `search`) |
 | `list`    | List entities, optionally filtered by `--type`                          |
 | `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`) |
@@ -64,7 +65,11 @@ generic `key = ...` assignments) are redacted in place as
 write rather than reporting "clean". `observe` reports how many secrets
 were redacted (`redacted` field in `--json`, note in text/MCP output).
 Control with `MIZUYA_SECRET_SCAN=redact` (default) or `=off`; any other
-value is an error. Storage sizing notes: [docs/STORAGE.md](docs/STORAGE.md).
+value is an error. Redactions are surfaced in text mode (`(redacted N
+secret(s))` on the observe line) and as a stderr `WARN` log line with
+detector names (never the secret), so clipping is visible even when stdout
+is piped. Storage sizing + history retention policy:
+[docs/STORAGE.md](docs/STORAGE.md).
 
 ## Append-only beliefs (funes-style)
 
@@ -90,7 +95,7 @@ The `mcp` subcommand starts a Model Context Protocol stdio server with
 | `add_observation`| Append an observation (entity_id, text, source, supersedes) |
 | `relate`         | Create a typed edge between two entities                  |
 | `search`         | Hybrid search (BM25 + vector RRF; optional type/tag/since/until) |
-| `get_context`    | Entity + neighbors + observations; optional `history`, `since`, `until` |
+| `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones); optional `history`, `since`, `until`, `hide_superseded` |
 | `similar`        | Vector similarity search by entity id or text; same filters as `search` |
 
 ### Claude Desktop configuration

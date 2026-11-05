@@ -153,13 +153,16 @@ func addObservation(pool: db.Pool, id: string, text: string, source: string, sup
     return redacted, empty
 
 # listObservations returns the observations for an entity, newest first.
+# Ordering is a pinned contract (docs/output-contract.md): at DESC, id DESC.
 func listObservations(pool: db.Pool, id: string) (list of ObsRow, error)
-    return listObservationsRange(pool, id, "", "")
+    return listObservationsRange(pool, id, "", "", false)
 
 # listObservationsRange returns the observations for an entity, newest
-# first, optionally bounded by YYYY-MM-DD dates (since = on/after,
-# until = on/before, whole days inclusive). Empty bounds are unbounded.
-func listObservationsRange(pool: db.Pool, id: string, since: string, until: string) (list of ObsRow, error)
+# first (at DESC, id DESC — pinned contract), optionally bounded by
+# YYYY-MM-DD dates (since = on/after, until = on/before, whole days
+# inclusive). Empty bounds are unbounded. hideSuperseded drops
+# observations that a newer observation explicitly supersedes.
+func listObservationsRange(pool: db.Pool, id: string, since: string, until: string, hideSuperseded: bool) (list of ObsRow, error)
     if since isnt empty and not validDate(since)
         return empty list of ObsRow, error "--since must be YYYY-MM-DD, got {since}"
     if until isnt empty and not validDate(until)
@@ -168,16 +171,18 @@ func listObservationsRange(pool: db.Pool, id: string, since: string, until: stri
     parts := empty list of string
     parts = append(
         parts,
-        "SELECT id, text, source, at, COALESCE(supersedes, '') AS supersedes FROM observations WHERE entity_id = ?",
+        "SELECT o.id AS id, o.text AS text, o.source AS source, o.at AS at, COALESCE(o.supersedes, '') AS supersedes, COALESCE((SELECT o2.id FROM observations o2 WHERE o2.supersedes = o.id LIMIT 1), '') AS superseded_by FROM observations o WHERE o.entity_id = ?",
     )
     args := list of any{id}
     if since isnt empty
-        parts = append(parts, "AND at >= datetime(?)")
+        parts = append(parts, "AND o.at >= datetime(?)")
         args = append(args, since)
     if until isnt empty
-        parts = append(parts, "AND at < datetime(?, '+1 day')")
+        parts = append(parts, "AND o.at < datetime(?, '+1 day')")
         args = append(args, until)
-    parts = append(parts, "ORDER BY at DESC, id DESC")
+    if hideSuperseded
+        parts = append(parts, "AND NOT EXISTS (SELECT 1 FROM observations o2 WHERE o2.supersedes = o.id)")
+    parts = append(parts, "ORDER BY o.at DESC, o.id DESC")
     q := strpkg.Join(parts, " ")
     result := db.Query(pool, q, many args) |> db.ScanAll of ObsRow
     return result, empty
@@ -277,6 +282,59 @@ func entityStateAt(pool: db.Pool, id: string, at: string) (HistoryRow, error)
     q := "SELECT id, entity_id, type, name, json(data) AS data, changed_at FROM entity_history WHERE entity_id = ? AND changed_at < datetime(?, '+1 day') ORDER BY changed_at DESC, id DESC LIMIT 1"
     result := db.Query(pool, q, id, at) |> db.ScanOne of HistoryRow
     return result, empty
+
+# --- History pruning (the deliberate-deletion exception) ---
+
+# pruneHistory compacts the append-only entity_history log — the one
+# place deletion is intentional (retention/GC), never a silent overwrite.
+# keep > 0 retains only the newest `keep` versions per entity; before
+# (YYYY-MM-DD) additionally removes versions from before the end of that
+# day. The newest version per entity is ALWAYS retained, so the current
+# state and as-of "today" reads keep working; as-of dates older than the
+# oldest retained version will error after pruning. dryRun counts what
+# would be deleted without deleting. Returns the number pruned (or that
+# would be pruned).
+func pruneHistory(pool: db.Pool, keep: int, before: string, dryRun: bool) (int, error)
+    if keep < 0
+        return 0, error "--keep must be >= 0, got {keep}"
+    if before isnt empty and not validDate(before)
+        return 0, error "--before must be YYYY-MM-DD, got {before}"
+    if keep equals 0 and (before is empty)
+        return 0, error "nothing to prune: pass --keep N and/or --before YYYY-MM-DD"
+
+    # ranked assigns rn = 1.. per entity, newest first (uuid7 id breaks
+    # same-millisecond ties). Delete only rows that are BOTH past the
+    # newest (rn > 1) AND (beyond the keep count OR before the cutoff) —
+    # the newest version per entity always stays.
+    args := empty list of any
+    pruneConds := empty list of string
+    if keep > 0
+        pruneConds = append(pruneConds, "rn > ?")
+        args = append(args, keep)
+    if before isnt empty
+        pruneConds = append(pruneConds, "changed_at < datetime(?, '+1 day')")
+        args = append(args, before)
+    where := "rn > 1 AND (" + strpkg.Join(pruneConds, " OR ") + ")"
+
+    inner := "SELECT h.id AS id, h.changed_at AS changed_at, ROW_NUMBER() OVER (PARTITION BY h.entity_id ORDER BY h.changed_at DESC, h.id DESC) AS rn FROM entity_history h"
+    if dryRun
+        q := strpkg.Join(list of string{"SELECT count(*) FROM (", inner, ") ranked WHERE ", where}, "")
+        count, err := db.Count(pool, q, many args)
+        if err isnt empty
+            return 0, err
+        return count as int, empty
+    q := strpkg.Join(list of string{
+        "DELETE FROM entity_history WHERE id IN (SELECT id FROM (",
+        inner,
+        ") ranked WHERE ",
+        where,
+        ")",
+    }, ""
+    )
+    n, err := db.Exec(pool, q, many args)
+    if err isnt empty
+        return 0, err
+    return n as int, empty
 
 # --- Drift ---
 
