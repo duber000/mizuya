@@ -4,7 +4,7 @@ title: AGENTS.md — mizuya repository guide
 description: Guidelines, verification commands, and architecture notes for agents working in mizuya.
 tags: [agents, conventions, kukicha, mcp, memory, vector, sqlite]
 generated: { by: antigravity/gemini-3.8-flash, at: 2026-09-26T12:51:00-04:00 }
-verified:
+verified: 2026-11-05T23:00:00-05:00
 stale_after: 2026-12-26T00:00:00Z
 status: stable
 sources:
@@ -57,6 +57,13 @@ Building with `kukicha build .` produces a local binary (`./mizuya`). Delete the
 ### 3. Append-only belief model (since 18e5f32)
 Never silently overwrite what an entity was. `upsertEntity` appends the post-update state to `entity_history` in the same transaction; observations link corrections via `observations.supersedes` instead of replacing. Reads time-travel with `--since/--until/--as-of`. `observations.at` and `entity_history.changed_at` use millisecond stamps (`strftime('%Y-%m-%d %H:%M:%f','now')`) so same-second ordering is exact; date filters validate real calendar dates via `datetime.Parse(s, datetime.LayoutDate)`. When changing ranking or retrieval, keep `TestLabeledRecall` in `bench_test.kuki` green (floor: recall@5 >= 0.80) and record what was tried and abandoned in TODO.md.
 
+### 4. Consumer-facing contracts (since 2518f4d)
+These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki` / `store_test.kuki` — do not change them without a contract note:
+- `context`/`get_context` observations are ALWAYS newest-first (`at DESC, id DESC`); consumers take the tail as "most recent".
+- Every `ObsRow` carries `supersedes` and `superseded_by`; superseded observations stay visible (flagged) unless `hide_superseded` is passed.
+- `prune-history` is the ONLY deliberate deletion from `entity_history` (retention policy in `docs/STORAGE.md`); it always keeps the newest version per entity and fails closed with neither `--keep` nor `--before`.
+- Secret redaction must stay visible in every mode: `--json` `redacted` count, text-mode note, stderr `WARN` (detector names only — never log `SecretFinding.Raw`).
+
 ## Current work — adopting funes (huggingface/funes) lessons
 
 Tracker lives in [TODO.md](TODO.md) ("Funes lessons" section). Status:
@@ -64,6 +71,7 @@ Tracker lives in [TODO.md](TODO.md) ("Funes lessons" section). Status:
 - **Phase 1 — append-only beliefs, read-time synthesis: DONE** (commit `18e5f32`). `entity_history` version log, `observations.supersedes`, `--since/--until/--as-of`, drift rework, `updated_at`+RRF `score` on hits, tests + labeled recall benchmark. See README "Append-only beliefs".
 - **Phase 2 — stable output contract + agent ergonomics: DONE.** `docs/output-contract.md` pins every command's `--json` shape (additive-only rule); enforced by `contract_test.kuki`. Text-mode search/similar print a ready-to-run `→ context --id <id> --history` drill-down line per hit; a hit's `id` is the stable drill coordinate (MCP: `get_context`). Keep the "defaults + token cost in tool descriptions" convention for new MCP tools.
 - **Phase 3 — safety, idempotency, measurement: DONE.** Fail-closed secret gate in `scanner.kuki` (pluggable `SecretScanner`, regex default, error-never-clean; `MIZUYA_SECRET_SCAN=redact|off`) gating `observe` and upsert summaries (covers import). Idempotent `importOpenWiki` (tested). `docs/STORAGE.md` cost model: per-entity ≈ text + FTS copy + `2×dim×4` B vectors. All three funes phases are now adopted; TODO.md tracks the tested-and-abandoned retrieval list.
+- **Consumer feedback round (foamy/courier): DONE** (commit `2518f4d`) — pinned observation ordering, redaction surfaced in all modes, `prune-history` + retention policy, `superseded_by` flag / `hide_superseded`. See rule 4 above and TODO.md "Consumer feedback".
 
 Design principle behind all of it (from funes' RATIONALE): defer to the reader — keep the raw record intact, resolve obsolescence at read time, no LLM in the ingest path, recall is pulled not pushed.
 
