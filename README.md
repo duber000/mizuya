@@ -14,13 +14,14 @@ place to keep everything you've learned within reach.
 - JSON-in-SQL with `json_set`, `json_object`, `json_each`, and the `$[#]`
   append path for observations and tags
 - BM25 ranking with per-column weights (`bm25(fts, 10, 5, 2, 1)`)
-- 1-hop graph context lookups via the `relations` table
-- `sqlite.CreateBlobFunctionFloat` to register a pure-Kukicha cosine-distance UDF
-  that operates on binary BLOB vectors with zero parse overhead
-- **Binary BLOB vector storage** — compact little-endian float64 encoding
-  (~3× smaller than JSON text arrays, no deserialization in the UDF hot path)
+- N-hop graph context lookups via recursive CTEs over the `relations` table
+- **vec1 virtual table** for vector KNN with cosine distance, plus a plain
+  `embeddings_raw` side store (the vendored vec1 build is write/search-only)
+- **Binary BLOB vector storage** — compact little-endian float32 encoding
 - **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback)
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
+- **Append-only version log** (`entity_history`) + observation supersession
+- **Fail-closed secret redaction** on every write
 - **MCP stdio server** — 6 tools for AI agent integration via `stdlib/mcp`
 
 ## Build and Run
@@ -46,6 +47,8 @@ binary at ./mizuya
 | `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, same filters as `search`) |
 | `list`    | List entities, optionally filtered by `--type`                          |
 | `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`) |
+| `import-openwiki` | Import an OpenWiki corpus (`openwiki/*.md`) into entities + `references` edges; idempotent |
+| `distill` | Feed old high-reuse observations to an `openwiki -p` run (`--dry-run` to preview) |
 | `mcp`     | Start the MCP stdio server for AI agent access                          |
 
 All commands accept the global `--db <path>` (default `.mizuya/mizuya.db`)
@@ -121,7 +124,8 @@ Or if you've built the binary:
       "args": ["mcp", "--db", "/path/to/mizuya.db"],
       "env": {
         "MIZUYA_EMBED_PROVIDER": "ollama",
-        "MIZUYA_EMBED_MODEL": "nomic-embed-text"
+        "MIZUYA_EMBED_MODEL": "nomic-embed-text",
+        "MIZUYA_SECRET_SCAN": "redact"
       }
     }
   }
@@ -135,7 +139,7 @@ dependencies). For real semantic search, configure an embedding provider:
 
 | Variable | Values | Default |
 |----------|--------|---------|
-| `MIZUYA_EMBED_PROVIDER` | `ollama`, `openai`, or empty (hash fallback) | empty |
+| `MIZUYA_EMBED_PROVIDER` | `ollama`, `openai`, `voyage`, `cohere`, or empty (hash fallback) | empty |
 | `MIZUYA_EMBED_URL` | Base URL for the provider | `http://localhost:11434` (ollama), `https://api.openai.com` (openai) |
 | `MIZUYA_EMBED_MODEL` | Model name | `nomic-embed-text` (ollama), `text-embedding-3-small` (openai) |
 | `MIZUYA_EMBED_API_KEY` | API key (required for openai, optional for ollama) | empty |
@@ -162,37 +166,46 @@ export MIZUYA_EMBED_MODEL=text-embedding-3-small
 export MIZUYA_EMBED_API_KEY=sk-...
 ```
 
+## Testing
+
+```bash
+kukicha test . -count=1                          # unit + contract + recall-benchmark tests
+kukicha test . -run=XXX -bench=. -benchtime=200x # latency benchmarks (use -flag=value form)
+```
+
+`bench_test.kuki` also runs `TestLabeledRecall` (floor: recall@5 >= 0.80) —
+keep it green when touching retrieval; record tried-and-abandoned ideas in
+TODO.md.
+
 ## End-to-end walkthrough
 
 ```bash
-kukicha run examples/mizuya/ -- init
+kukicha run . -- init
 
-kukicha run examples/mizuya/ -- upsert \
+kukicha run . -- upsert \
     --id kukicha --type project \
     --name "Kukicha Language" \
     --summary "Go superset with pipes, onerr, and enums" \
     --tags lang,compiler,go
 
-kukicha run examples/mizuya/ -- upsert \
+kukicha run . -- upsert \
     --id sqlite --type tool \
     --name "SQLite" \
     --summary "Embedded SQL database with FTS5 and JSON" \
     --tags db,embedded,fts
 
-kukicha run examples/mizuya/ -- upsert \
-    --id vllm-h100 --type config \
-    --name "vLLM on H100" \
-    --summary "Inference server deployment notes" \
-    --tags ml,gpu,inference
+kukicha run . -- relate --src kukicha --rel uses --dst sqlite
 
-kukicha run examples/mizuya/ -- relate --src kukicha --rel uses --dst sqlite
-
-kukicha run examples/mizuya/ -- observe \
+kukicha run . -- observe \
     --id kukicha --text "Added pipe operator support in v0.0.29"
 
-kukicha run examples/mizuya/ -- search --query "embedded database"
-kukicha run examples/mizuya/ -- context --id kukicha
-kukicha run examples/mizuya/ -- similar --text "fast database engine"
+# change your mind later — the old observation stays, linked:
+kukicha run . -- observe --id kukicha --text "Pipes landed in v0.1.0" \
+    --supersedes <obs-id-from-context-json>
+
+kukicha run . -- search --query "embedded database"
+kukicha run . -- context --id kukicha --history
+kukicha run . -- similar --text "fast database engine"
 ```
 
 Expected: the `search` query ranks `sqlite` first (hybrid RRF boosts it
@@ -204,12 +217,16 @@ of `vllm-h100` for a database query, and vice versa for an ML query.
 
 ```
 main.kuki         — CLI entry point + subcommands (including `mcp`)
-models.kuki       — Type definitions (Entity, Relation, SearchHit, etc.)
-schema.kuki       — DDL constants + initDB
-store.kuki        — Entity/relation/observation CRUD
-search.kuki       — FTS5 search, binary vector storage, cosine distance UDF
-embed.kuki        — Embedding provider abstraction (Ollama, OpenAI, hash fallback)
+models.kuki       — Type definitions (Entity, ObsRow, HistoryRow, SearchHit, ...)
+schema.kuki       — DDL constants + initDB + migrations
+store.kuki        — Entity/relation/observation CRUD, history log, drift, prune
+search.kuki       — FTS5 + regex search, filters, vec1 vector storage
 hybrid.kuki       — Reciprocal Rank Fusion (FTS5 + vector merge)
+embed.kuki        — Embedding provider abstraction (Ollama, OpenAI, ..., hash fallback)
+scanner.kuki      — Fail-closed secret scanner (pluggable SecretScanner, regex default)
 mcp_server.kuki   — MCP stdio server with 6 tool registrations
 format.kuki       — Terminal display formatting
+*_test.kuki       — store_test, bench_test (labeled recall + benchmarks),
+                    contract_test (output contract), phase3_test (scanner/import)
+docs/             — output-contract.md (stable --json shapes), STORAGE.md (cost model + retention)
 ```
