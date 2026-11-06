@@ -119,14 +119,18 @@ Phase 3 — safety, idempotency, measurement — **done**:
 - [x] Fail-closed secret scanner (`scanner.kuki`): pluggable `SecretScanner`
       interface, offline regex engine by default, error-never-clean contract.
       Gates `observe` (reports `redacted` count) and `upsert` summaries
-      (covers `import-openwiki`). `MIZUYA_SECRET_SCAN=redact|off`; any other
+      (covers `import-okf` and the deprecated `import-openwiki` alias).
+      `MIZUYA_SECRET_SCAN=redact|off`; any other
       value errors. Tested in `phase3_test.kuki` (detectors, redaction,
       fail-closed stub, modes, write-path redaction).
-- [x] Idempotent import: `importOpenWiki` extracted as a testable pure
-      function; re-import is a no-op (ON CONFLICT upsert skips the history
-      append on unchanged state, INSERT OR IGNORE edges) — pinned by
+- [x] Idempotent import: `importOKF` extracted as a testable pure function
+      (OKF v0.2 bundle: `index.md`/`log.md` skipped, slug = bundle-relative
+      path, section/type/status tags); `importOpenWiki` is a thin wrapper
+      over it with `--bundle openwiki`. Re-import is a no-op (ON CONFLICT
+      upsert skips the history append on unchanged state, INSERT OR IGNORE
+      edges) — pinned by `TestImportOKFIdempotent` and
       `TestImportOpenWikiIdempotent`. Write-temp-then-rename is N/A:
-      import only reads the wiki dir (relevant if an export/sync command
+      import only reads the bundle dir (relevant if an export/sync command
       is ever added).
 - [x] `docs/STORAGE.md` cost model: per-entity = text + FTS copy + 2×dim×4 B
       vectors (vec1 row + raw side copy) + history per actual change;

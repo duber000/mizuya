@@ -47,7 +47,8 @@ binary at ./mizuya
 | `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, same filters as `search`) |
 | `list`    | List entities, optionally filtered by `--type`                          |
 | `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`) |
-| `import-openwiki` | Import an OpenWiki corpus (`openwiki/*.md`) into entities + `references` edges; idempotent |
+| `import-okf` | Import an OKF knowledge bundle (`--bundle docs`, default: `docs/` with `index.md`/`log.md` skipped per SPEC §8/§9) into entities + `references` edges; idempotent |
+| `import-openwiki` | Deprecated alias for `import-okf --bundle openwiki` |
 | `distill` | Feed old high-reuse observations to an `openwiki -p` run (`--dry-run` to preview) |
 | `mcp`     | Start the MCP stdio server for AI agent access                          |
 

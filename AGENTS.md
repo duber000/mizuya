@@ -4,7 +4,7 @@ title: AGENTS.md — mizuya repository guide
 description: Guidelines, verification commands, and architecture notes for agents working in mizuya.
 tags: [agents, conventions, kukicha, mcp, memory, vector, sqlite]
 generated: { by: antigravity/gemini-3.8-flash, at: 2026-09-26T12:51:00-04:00 }
-verified: 2026-11-05T23:00:00-05:00
+verified: 2026-11-06T01:43:00Z
 stale_after: 2026-12-26T00:00:00Z
 status: stable
 sources:
@@ -70,7 +70,7 @@ Tracker lives in [TODO.md](TODO.md) ("Funes lessons" section). Status:
 
 - **Phase 1 — append-only beliefs, read-time synthesis: DONE** (commit `18e5f32`). `entity_history` version log, `observations.supersedes`, `--since/--until/--as-of`, drift rework, `updated_at`+RRF `score` on hits, tests + labeled recall benchmark. See README "Append-only beliefs".
 - **Phase 2 — stable output contract + agent ergonomics: DONE.** `docs/output-contract.md` pins every command's `--json` shape (additive-only rule); enforced by `contract_test.kuki`. Text-mode search/similar print a ready-to-run `→ context --id <id> --history` drill-down line per hit; a hit's `id` is the stable drill coordinate (MCP: `get_context`). Keep the "defaults + token cost in tool descriptions" convention for new MCP tools.
-- **Phase 3 — safety, idempotency, measurement: DONE.** Fail-closed secret gate in `scanner.kuki` (pluggable `SecretScanner`, regex default, error-never-clean; `MIZUYA_SECRET_SCAN=redact|off`) gating `observe` and upsert summaries (covers import). Idempotent `importOpenWiki` (tested). `docs/STORAGE.md` cost model: per-entity ≈ text + FTS copy + `2×dim×4` B vectors. All three funes phases are now adopted; TODO.md tracks the tested-and-abandoned retrieval list.
+- **Phase 3 — safety, idempotency, measurement: DONE.** Fail-closed secret gate in `scanner.kuki` (pluggable `SecretScanner`, regex default, error-never-clean; `MIZUYA_SECRET_SCAN=redact|off`) gating `observe` and upsert summaries (covers import). Idempotent OKF bundle import: `import-okf <dir> [--bundle docs]` (`importOKF` core, tested; `import-openwiki` kept as a deprecated alias) — one entity per concept doc, slug = bundle-relative path, `index.md`/`log.md` skipped, `references` edges from markdown links. `docs/STORAGE.md` cost model: per-entity ≈ text + FTS copy + `2×dim×4` B vectors. All three funes phases are now adopted; TODO.md tracks the tested-and-abandoned retrieval list.
 - **Consumer feedback round (foamy/courier): DONE** (commit `2518f4d`) — pinned observation ordering, redaction surfaced in all modes, `prune-history` + retention policy, `superseded_by` flag / `hide_superseded`. See rule 4 above and TODO.md "Consumer feedback".
 
 Design principle behind all of it (from funes' RATIONALE): defer to the reader — keep the raw record intact, resolve obsolescence at read time, no LLM in the ingest path, recall is pulled not pushed.

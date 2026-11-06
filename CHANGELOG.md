@@ -3,6 +3,25 @@
 All notable changes to mizuya. Versions are git tags (`vX.Y.Z`); the Docker
 workflow builds images on tag push.
 
+## Unreleased
+
+### OKF bundle import
+- New `import-okf <dir> [--bundle docs]` command imports an OKF v0.2
+  knowledge bundle into entities + `references` edges: one entity per
+  concept doc (slug = bundle-relative path minus `.md`, e.g.
+  `reference/ARCHITECTURE`), root `index.md`/`log.md` skipped per SPEC
+  §8/§9. Idempotent; summaries pass the fail-closed secret gate.
+  `import-openwiki` remains as a deprecated alias (`--bundle openwiki`).
+- Front-matter parsing now binds OKF wire keys natively — the old
+  `entityType as "type"` alias transpiled to a json tag that yaml.v3
+  ignores, so `type:` was silently dropped; `type: Tool` now maps to
+  entity type `tool`.
+- Imported entities are tagged `okf` + front-matter `type` + section dir
+  (`guides`/`reference`/...) + `status:<status>` + front-matter tags.
+- Markdown link resolution uses path cleaning (`../` segments) instead of
+  string stripping. `--json` shape unchanged:
+  `{"status": "imported", "entities": N, "links": N}` (output contract).
+
 ## 0.2.0 — 2026-11-05
 
 First tagged release (0.1.0 was never tagged). Adopts the core lessons from

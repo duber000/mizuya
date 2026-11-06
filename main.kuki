@@ -19,12 +19,13 @@
 petiole main
 
 skill Mizuya
-    description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, mcp."
+    description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, import-okf, mcp."
     version: "0.2.0"
 
 import "context"
 import "os"
 import "os/exec"
+import "path/filepath"
 import "stdlib/cli"
 import "stdlib/color"
 import "stdlib/db"
@@ -71,6 +72,7 @@ func main()
             makeSimilarCmd(),
             makeListCmd(),
             makeMCPCmd(),
+            makeImportOKFCmd(),
             makeImportOpenWikiCmd(),
             makeDistillCmd(),
             makeDriftCmd(),
@@ -161,8 +163,21 @@ func makeMCPCmd() reference cli.Command
     return cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
         |> .ActionE(doMCP)
 
+func makeImportOKFCmd() reference cli.Command
+    return cli.NewCommand(
+        "import-okf",
+        "Import an OKF knowledge bundle (SPEC v0.2: index.md + log.md + concept dirs with OKF front matter) into the knowledge graph",
+    )
+        |> .RestArg("dir", "Path to a directory containing the OKF bundle")
+        |> .StringFlag(
+            "bundle",
+            "Bundle root, relative to <dir> (SPEC §3; index.md/log.md are skipped)",
+            "docs",
+        )
+        |> .ActionE(doImportOKF)
+
 func makeImportOpenWikiCmd() reference cli.Command
-    return cli.NewCommand("import-openwiki", "Import an OpenWiki corpus into the knowledge graph")
+    return cli.NewCommand("import-openwiki", "Deprecated alias for import-okf with --bundle openwiki")
         |> .RestArg("dir", "Path to a directory containing an openwiki/ folder")
         |> .ActionE(doImportOpenWiki)
 
@@ -572,20 +587,51 @@ func doMCP(args: cli.Args) error
     startMCP(dbPath) onerr explain "MCP server error"
     return empty
 
-# OpenWikiDoc holds a parsed wiki page between the two import passes.
-type OpenWikiDoc
+# OKFDoc holds a parsed bundle concept between the two import passes.
+type OKFDoc
     Slug: string
     Body: string
 
-# --- import-openwiki ---
+# --- import-okf ---
 
-# doImportOpenWiki parses an OpenWiki corpus (openwiki/*.md with OKF front
-# matter) into mizuya entities + relations. Each concept doc becomes an
-# entity (id = filename stem, type = concept or from front matter, tagged
-# "openwiki"); each markdown link [text](other.md) becomes a `references`
-# edge. Re-importing is idempotent — upsertEntity is ON CONFLICT, and
+# doImportOKF parses an OKF knowledge bundle (<dir>/<bundle>, default
+# docs/) into mizuya entities + relations. Each concept doc becomes an
+# entity (id = path relative to the bundle root minus .md, e.g.
+# "reference/ARCHITECTURE"; type = concept or from front matter, tagged
+# with the source, the front-matter type/status, and its section dir);
+# each markdown link [text](other.md) becomes a `references` edge.
+# Re-importing is idempotent — upsertEntity is ON CONFLICT, and
 # reEmbedIfChanged short-circuits when the content hash hasn't changed.
+func doImportOKF(args: cli.Args) error
+    rest := cli.GetRest(args, "dir")
+    if rest is empty
+        return error "usage: mizuya import-okf <dir>"
+    baseDir := rest[0]
+    bundle := cli.GetString(args, "bundle")
+    if strpkg.TrimSpace(bundle) is empty
+        bundle = "docs"
+
+    if not files.Exists(files.Join(baseDir, bundle))
+        return error "no {bundle}/ directory found at {baseDir}"
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer db.Close(pool)
+
+    imported, linked, ierr := importOKF(pool, baseDir, bundle, "okf")
+    if ierr isnt empty
+        return ierr
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
+    else
+        print("{color.Green("imported")} {imported} entities, {linked} links")
+    return empty
+
+# doImportOpenWiki is the deprecated pre-OKF entry point; it imports the
+# legacy openwiki/ corpus through the same core.
 func doImportOpenWiki(args: cli.Args) error
+    log.Warn("import-openwiki is deprecated; use import-okf (--bundle docs)")
     rest := cli.GetRest(args, "dir")
     if rest is empty
         return error "usage: mizuya import-openwiki <dir>"
@@ -608,39 +654,43 @@ func doImportOpenWiki(args: cli.Args) error
         print("{color.Green("imported")} {imported} entities, {linked} links")
     return empty
 
-# importOpenWiki is the testable core of doImportOpenWiki: parse the
-# openwiki corpus under baseDir into entities + references edges. It is
-# idempotent — upsertEntity is ON CONFLICT (and skips the history append
-# when the state is unchanged), relate is INSERT OR IGNORE, and summaries
-# pass through the fail-closed secret gate.
-func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
-    openwikiDir := files.Join(baseDir, "openwiki")
-    entries, lErr := files.Walk(openwikiDir)
+# importOKF is the testable core of doImportOKF: parse the OKF bundle at
+# baseDir/bundleDir into entities + references edges. It is idempotent —
+# upsertEntity is ON CONFLICT (and skips the history append when the state
+# is unchanged), relate is INSERT OR IGNORE, and summaries pass through
+# the fail-closed secret gate. sourceTag labels imported entities (e.g.
+# "okf"). The bundle's index.md/log.md (SPEC §8/§9) are metadata, not
+# concepts, and are skipped.
+func importOKF(pool: db.Pool, baseDir: string, bundleDir: string, sourceTag: string) (int, int, error)
+    bundleRoot := files.Join(baseDir, bundleDir)
+    entries, lErr := files.Walk(bundleRoot)
     if lErr isnt empty
-        return 0, 0, errs.Wrap(lErr, "cannot walk openwiki dir")
+        return 0, 0, errs.Wrap(lErr, "cannot walk bundle dir")
 
     imported := 0
     linked := 0
     # First pass: upsert all entities so links can resolve to any doc
     # regardless of Walk order.
-    docs := empty list of OpenWikiDoc
+    docs := empty list of OKFDoc
     for entry in entries
         if entry.IsDir or not strpkg.HasSuffix(entry.Name, ".md")
             continue
-        # slug = path relative to openwiki/ with .md stripped (e.g.
-        # "architecture/overview" for openwiki/architecture/overview.md).
-        relPath := strpkg.TrimPrefix(entry.Path, openwikiDir + "/")
+        # slug = path relative to the bundle root with .md stripped (e.g.
+        # "reference/ARCHITECTURE" for docs/reference/ARCHITECTURE.md).
+        relPath := filepath.ToSlash(strpkg.TrimPrefix(entry.Path, bundleRoot + "/"))
+        if relPath equals "index.md" or relPath equals "log.md"
+            continue
         slug := strpkg.TrimSuffix(relPath, ".md")
         raw := files.ReadString(entry.Path) onerr
-            log.Warn("import-openwiki: skipping unreadable file", "file", entry.Path, "err", error)
+            log.Warn("import-okf: skipping unreadable file", "file", entry.Path, "err", error)
             continue
 
         fmBlock, body := splitFrontMatter(raw)
-        var fm: FrontMatter
+        var fm: OKFFrontMatter
         if fmBlock isnt empty
-            fm = parse.YAML of FrontMatter from fmBlock onerr
+            fm = parse.YAML of OKFFrontMatter from fmBlock onerr
                 log.Warn(
-                    "import-openwiki: skipping file with bad front matter",
+                    "import-okf: skipping file with bad front matter",
                     "file",
                     entry.Path,
                     "err",
@@ -648,28 +698,39 @@ func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
                 )
                 continue
 
-        name := strpkg.Or(fm.title, slug)
-        summary := strpkg.Or(fm.description, firstParagraph(body))
+        name := strpkg.Or(fm.Title, slug)
+        summary := strpkg.Or(fm.Description, firstParagraph(body))
         # Validate through the enum so the accepted set stays in sync
-        # with EntityType; anything outside it (e.g. front-matter
-        # "Reference", "Quickstart") files as a concept, same as before.
-        etype := strpkg.Or(strpkg.ToLower(fm.entityType), "concept")
+        # with EntityType; anything outside it (e.g. OKF front-matter
+        # "Reference", "Guide") files as a concept.
+        etype := strpkg.Or(strpkg.ToLower(fm.Type), "concept")
         if _, perr := ParseEntityType(etype); perr isnt empty
             etype = "concept"
-        tags := list of string{"openwiki"}
-        if fm.entityType isnt empty
-            tags = append(tags, strpkg.ToLower(fm.entityType))
-        for t in fm.tags
+        tags := list of string{sourceTag}
+        if fm.Type isnt empty
+            tags = append(tags, strpkg.ToLower(fm.Type))
+        # The section dir (guides/, reference/, design/, ...) is a tag.
+        if slashIdx := strpkg.Index(slug, "/"); slashIdx > 0
+            tags = append(tags, slug[:slashIdx])
+        if fm.Status isnt empty
+            tags = append(tags, "status:" + strpkg.ToLower(fm.Status))
+        for t in fm.Tags
             t = strpkg.TrimSpace(t)
-            if t isnt empty
+            if t is empty
+                continue
+            dup := false
+            for existing in tags
+                if existing equals t
+                    dup = true
+            if not dup
                 tags = append(tags, t)
 
         upsertEntity(pool, slug, etype, name, summary, tags) onerr
-            log.Warn("import-openwiki: upsert failed", "slug", slug, "err", error)
+            log.Warn("import-okf: upsert failed", "slug", slug, "err", error)
             continue
 
         reEmbedIfChanged(pool, slug) onerr discard
-        docs = append(docs, OpenWikiDoc{Slug: slug, Body: body})
+        docs = append(docs, OKFDoc{Slug: slug, Body: body})
         imported = imported + 1
 
     # Second pass: create references edges now that all entities exist.
@@ -684,10 +745,12 @@ func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
             # Skip external URLs, anchors, absolute paths, and directory links.
             if strpkg.HasPrefix(dst, "http") or strpkg.HasPrefix(dst, "#") or strpkg.HasPrefix(dst, "/") or strpkg.HasSuffix(dst, "/")
                 continue
-            # Resolve relative to the source doc's directory, then strip
-            # ../ prefixes and .md to get the full slug.
-            dstPath := srcDir + dst
-            dstPath = strpkg.ReplaceAll(dstPath, "../", "")
+            # Resolve relative to the source doc's directory (cleaning
+            # ../ segments), then strip .md to get the full slug.
+            dstPath := dst
+            if srcDir isnt empty
+                dstPath = srcDir + dst
+            dstPath = filepath.ToSlash(filepath.Clean(dstPath))
             dstSlug := strpkg.TrimSuffix(dstPath, ".md")
             if dstSlug equals slug
                 continue
@@ -696,20 +759,17 @@ func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
             if dErr isnt empty
                 continue
             relate(pool, slug, "references", dstSlug) onerr
-                log.Warn(
-                    "import-openwiki: relate failed",
-                    "src",
-                    slug,
-                    "dst",
-                    dstSlug,
-                    "err",
-                    error,
-                )
+                log.Warn("import-okf: relate failed", "src", slug, "dst", dstSlug, "err", error)
                 continue
 
             linked = linked + 1
 
     return imported, linked, empty
+
+# importOpenWiki is the legacy openwiki-corpus entry point kept for the
+# deprecated import-openwiki alias; it runs the OKF core over openwiki/.
+func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
+    return importOKF(pool, baseDir, "openwiki", "openwiki")
 
 # --- distill ---
 
@@ -889,13 +949,25 @@ func doPruneHistory(args: cli.Args) error
         )
     return empty
 
-# FrontMatter is the OKF front-matter shape the openwiki importer reads.
-# Unknown keys are ignored; tags accepts both [a, b] and block-list YAML.
-type FrontMatter
-    title: string as "title"
-    description: string as "description"
-    entityType: string as "type"
-    tags: list of string as "tags"
+# OKFGenerated is the OKF SPEC §4 `generated:` block (last change + actor).
+type OKFGenerated
+    By: string
+    At: string
+
+# OKFFrontMatter is the OKF v0.2 concept front-matter shape the importer
+# reads. Unknown keys are ignored; tags accepts both [a, b] and block-list
+# YAML. Field names are chosen so their lowercased forms ARE the OKF wire
+# keys — kukicha's `as "..."` aliases transpile to Go json tags, which
+# yaml.v3 (behind parse.YAML) ignores, so the names must match natively.
+type OKFFrontMatter
+    Type: string
+    Title: string
+    Description: string
+    Resource: string
+    Tags: list of string
+    Status: string
+    Stale_after: string
+    Generated: OKFGenerated
 
 # splitFrontMatter splits raw markdown into the front-matter YAML text
 # (the block between --- delimiters; "" when absent) and the body.

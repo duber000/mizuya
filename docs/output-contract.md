@@ -58,7 +58,8 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 | `similar` | `SimilarHit[]` |
 | `list` | `Entity[]` |
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |
-| `import-openwiki` | `{"status": "imported", "entities": number, "links": number}` |
+| `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |
+| `import-openwiki` | `{"status": "imported", "entities": number, "links": number}` (deprecated alias for `import-okf --bundle openwiki`; shape unchanged) |
 | `distill` | `{"status": "no-candidates"}` or `{"status": "dry-run", "candidates": number, "observations": number, "prompt": string}` or `{"status": "distilled", "candidates": number, "observations": number, "output": string}` |
 | `mcp` | no `--json`; stdio is JSON-RPC (MCP). Logs go to stderr, never stdout |
 

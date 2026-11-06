@@ -248,3 +248,101 @@ func TestImportOpenWikiRedactsSecrets(t: reference testing.T)
         "imported summary must be redacted",
     )
     test.AssertContains(t, e.Data, "[REDACTED:aws-access-key]")
+
+# --- OKF bundle import ---
+
+# writeOKFBundle writes a minimal OKF v0.2 bundle at <base>/docs: index.md
+# + log.md (SPEC §8/§9 metadata) plus two concept docs in different
+# sections that cross-link via ../ relative links.
+func writeOKFBundle(t: reference testing.T, base: string)
+    dir := filepath.Join(base, "docs")
+    test.AssertNoError(t, files.MkDirAll(filepath.Join(dir, "reference")))
+    test.AssertNoError(t, files.MkDirAll(filepath.Join(dir, "guides")))
+    test.AssertNoError(t, files.WriteString(
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle index\n\n* [ARCHITECTURE](reference/ARCHITECTURE.md) - reference/ARCHITECTURE.md\n",
+        filepath.Join(dir, "index.md"),
+    ))
+    test.AssertNoError(t, files.WriteString(
+        "# Directory Update Log\n\n## 2026-11-03\n* **Creation**: Added [ARCHITECTURE](reference/ARCHITECTURE.md).\n",
+        filepath.Join(dir, "log.md"),
+    ))
+    test.AssertNoError(t, files.WriteString(
+        "---\ntype: Reference\ntitle: Architecture\ndescription: System architecture overview\nresource: /docs/reference/ARCHITECTURE.md\ntags: [architecture]\ngenerated: {by: mistral-vibe/mistral, at: 2026-11-03T21:00:00Z}\nstatus: stable\nstale_after: 2027-02-01T00:00:00Z\n---\n\n# Architecture\n\nSee the [install guide](../guides/install.md).\n",
+        filepath.Join(dir, "reference", "ARCHITECTURE.md"),
+    ))
+    test.AssertNoError(t, files.WriteString(
+        "---\ntype: Tool\ntitle: Install\ndescription: How to install the thing\n---\n\n# Install\n\nSee [ARCHITECTURE](../reference/ARCHITECTURE.md).\n",
+        filepath.Join(dir, "guides", "install.md"),
+    ))
+
+func TestImportOKFIdempotent(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    base := filepath.Join(dir, "proj")
+    writeOKFBundle(t, base)
+
+    imported, linked, err := importOKF(pool, base, "docs", "okf")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, imported, 2)
+    test.AssertEqual(t, linked, 2)
+
+    # index.md / log.md are bundle metadata (SPEC §8/§9), not entities.
+    count, cerr := db.Count(pool, "SELECT count(*) FROM entities")
+    test.AssertNoError(t, cerr)
+    test.AssertEqual(t, count as int, 2)
+
+    # Front-matter mapping: OKF type "Reference" is outside the EntityType
+    # enum -> concept; "Tool" binds via the wire key `type` -> tool. The
+    # section dir, front-matter type, and status become tags.
+    arch, aerr := getEntity(pool, "reference/ARCHITECTURE")
+    test.AssertNoError(t, aerr)
+    test.AssertEqual(t, arch.Type, "concept")
+    test.AssertContains(t, arch.Data, "\"okf\"")
+    test.AssertContains(t, arch.Data, "\"reference\"")
+    test.AssertContains(t, arch.Data, "\"status:stable\"")
+    test.AssertContains(t, arch.Data, "\"architecture\"")
+    inst, ierr := getEntity(pool, "guides/install")
+    test.AssertNoError(t, ierr)
+    test.AssertEqual(t, inst.Type, "tool")
+    test.AssertContains(t, inst.Data, "\"guides\"")
+
+    # Re-import the same bundle: same counts, no duplicate edges, and the
+    # no-op upserts must not append duplicate history rows.
+    imported2, linked2, err := importOKF(pool, base, "docs", "okf")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, imported2, 2)
+    test.AssertEqual(t, linked2, 2)
+
+    relCount, cerr := db.Count(pool, "SELECT count(*) FROM relations")
+    test.AssertNoError(t, cerr)
+    test.AssertEqual(t, relCount as int, 2)
+    hist, herr := listEntityHistory(pool, "guides/install", 50)
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hist), 1)
+
+func TestImportOKFRedactsSecrets(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    base := filepath.Join(dir, "proj")
+    wdir := filepath.Join(base, "docs")
+    test.AssertNoError(t, files.MkDirAll(wdir))
+    test.AssertNoError(t, files.WriteString(
+        "---\ntype: Guide\ntitle: Deploy\ndescription: uses key AKIAIOSFODNN7EXAMPLE internally\n---\n\nBody.\n",
+        filepath.Join(wdir, "deploy.md"),
+    ))
+
+    imported, _, err := importOKF(pool, base, "docs", "okf")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, imported, 1)
+    e, gerr := getEntity(pool, "deploy")
+    test.AssertNoError(t, gerr)
+    test.AssertFalse(
+        t,
+        strContains(e.Data, "AKIAIOSFODNN7EXAMPLE"),
+        "imported summary must be redacted",
+    )
+    test.AssertContains(t, e.Data, "[REDACTED:aws-access-key]")
