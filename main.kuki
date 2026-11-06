@@ -20,7 +20,7 @@ petiole main
 
 skill Mizuya
     description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, mcp."
-    version: "0.1.0"
+    version: "0.2.0"
 
 import "context"
 import "os"
@@ -58,7 +58,7 @@ func validEntityTypes() string
 func main()
     cli.New("mizuya")
         |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
-        |> cli.Version("0.1.0")
+        |> cli.Version("0.2.0")
         |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
         |> cli.BoolGlobalFlag("json", "JSON output", false)
         |> cli.WithCommands(

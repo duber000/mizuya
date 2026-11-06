@@ -91,7 +91,7 @@ func startMCP(dbPath: string) error
             |> slice.Map(e => e.Id)
     )
 
-    server := mcp.NewWithCompletion("mizuya", "0.1.0", router.Handler())
+    server := mcp.NewWithCompletion("mizuya", "0.2.0", router.Handler())
     registerTools(server)
     registerResources(server)
     # CPU profiling is opt-in: MIZUYA_CPU_PROFILE names the output path.
