@@ -37,7 +37,7 @@ binary at ./mizuya
 
 | Command   | What it does                                                            |
 |-----------|-------------------------------------------------------------------------|
-| `init`    | Create the database file and schema                                     |
+| `init`    | Create the database file and schema (also implicit: every command self-initializes an uninitialized `--db` path via idempotent `initDB` on open) |
 | `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |

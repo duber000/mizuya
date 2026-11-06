@@ -499,3 +499,49 @@ func TestPruneHistoryBeforeKeepsNewest(t: reference testing.T)
     test.AssertNoError(t, herr)
     test.AssertEqual(t, len(hist), 1)
     test.AssertContains(t, hist[0].Data, "v1")
+
+# --- openPoolAt self-initializes uninitialized paths ---
+
+# TestOpenPoolAtSelfInitializes: opening a path that was never
+# `mizuya init`'d must not fail with "no such table" — initDB runs on open
+# and the fuzzy vtab is populated, so writes and fuzzy suggestions work.
+func TestOpenPoolAtSelfInitializes(t: reference testing.T)
+    dir, err := os.MkdirTemp("", "mizuya-open-")
+    if err isnt empty
+        t.Fatalf("mktemp: %v", err)
+    defer
+        os.RemoveAll(dir) onerr discard
+    path := filepath.Join(dir, "fresh.db")
+
+    pool, oerr := openPoolAt(path)
+    test.AssertNoError(t, oerr)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    _, aerr := addObservation(pool, "duck", "hello", "conversation")
+    test.AssertNoError(t, aerr)
+
+    rows, lerr := listEntities(pool, "", 10)
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(rows), 1)
+
+    # The fuzzy vtab exists (no "no such table" error); it is populated at
+    # open time, so refresh it after the upsert and the id resolves.
+    _, serr := suggestIds(pool, "duck", 3)
+    test.AssertNoError(t, serr)
+    test.AssertNoError(t, refreshFuzzyIds(pool))
+    ids, serr := suggestIds(pool, "duck", 3)
+    test.AssertNoError(t, serr)
+    test.AssertContains(t, ids, "duck")
+
+    db.Close(pool) onerr discard
+
+    # Re-opening the same path is a no-op, not an error.
+    pool2, oerr := openPoolAt(path)
+    test.AssertNoError(t, oerr)
+    defer db.Close(pool2)
+    rows, lerr = listEntities(pool2, "", 10)
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(rows), 1)

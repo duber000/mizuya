@@ -257,11 +257,17 @@ func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, so
         return 0, aerr
     return addObservation(pool, picked, text, source, supersedes)
 
-# openPool opens the database and registers the vec1 vector extension.
-# vec1 ships native vec1_cos_distance and a virtual-table KNN index, so
-# we no longer pin MaxOpenConns=1 to host a Kukicha-side UDF.
+# openPool opens the database named by --db.
 func openPool(args: cli.Args) (db.Pool, error)
-    dbPath := cli.GetString(args, "db")
+    return openPoolAt(cli.GetString(args, "db"))
+
+# openPoolAt opens (or creates) the database at dbPath, registers the
+# extensions, and ensures the schema exists. initDB is idempotent (CREATE
+# IF NOT EXISTS + guarded migrations + spellfix re-population), so a path
+# that was never `mizuya init`'d self-initializes on first use instead of
+# failing later with "no such table: entity_ids_fuzzy" (or entities, ...)
+# while leaving a bare file behind.
+func openPoolAt(dbPath: string) (db.Pool, error)
     files.MkDirAll(files.Dirname(dbPath)) onerr return
     pool := sqlite.OpenWithExtensions(
         dbPath,
@@ -274,11 +280,7 @@ func openPool(args: cli.Args) (db.Pool, error)
         spellfixext.Register,
         unicodeext.Register,
     ) onerr return
-    # Repair databases still on the old vec1 layout (with the vec_raw
-    # BLOB metadata column) before any write touches the vector index.
-    # No-op on current databases.
-    migrateVec1Schema(pool) onerr return
-    refreshFuzzyIds(pool) onerr return
+    initDB(pool) onerr return
     return pool, empty
 
 func doInit(args: cli.Args) error

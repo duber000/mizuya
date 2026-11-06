@@ -521,8 +521,9 @@ func openMCPPool() (db.Pool, error)
         spellfixext.Register,
         regexpext.Register,
     ) onerr return
+    # initDB also re-populates the spellfix vtab, so no separate
+    # refreshFuzzyIds call is needed here.
     initDB(pool) onerr return
-    refreshFuzzyIds(pool) onerr return
     return pool, empty
 
 # reEmbed recomputes and stores the embedding for an entity when its

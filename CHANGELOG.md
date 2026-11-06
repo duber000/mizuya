@@ -45,6 +45,10 @@ huggingface/funes plus consumer (foamy/courier) feedback:
 - `hybridSearch` RRF top-k cut was random map order (`sort.ByKeyDesc`
   returns a copy; result was discarded) — found by the new labeled recall
   benchmark, fixed.
+- Opening a path that was never `mizuya init`'d no longer fails with
+  `no such table: entity_ids_fuzzy` leaving a bare file behind: `openPoolAt`
+  runs the idempotent `initDB` on open, so every command self-initializes
+  (pre-existing, predates 0.2.0).
 
 ### Tests
 - `store_test.kuki`, `contract_test.kuki`, `phase3_test.kuki`,
