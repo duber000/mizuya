@@ -209,9 +209,9 @@ kukicha run . -- similar --text "fast database engine"
 ```
 
 Expected: the `search` query ranks `sqlite` first (hybrid RRF boosts it
-via both keyword and vector match); `context` shows the `uses → sqlite`
-edge and the observation you just recorded; `similar` puts `sqlite` ahead
-of `vllm-h100` for a database query, and vice versa for an ML query.
+via both keyword and vector match); `context --history` shows the
+`uses → sqlite` edge, the observation you just recorded, and the entity's
+version log; `similar` puts `sqlite` first for a database query.
 
 ## Architecture
 
