@@ -21,7 +21,7 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	kukicha.org/stdlib v0.86.6
+	kukicha.org/stdlib v0.86.7
 )
 
 replace kukicha.org/stdlib => ./.kukicha/stdlib
