@@ -13,8 +13,8 @@
 
 petiole main
 
-import "stdlib/env"
 import "stdlib/llm/embeddings"
+import "stdlib/parse"
 
 # EmbedProvider is the closed set of supported embedding backends.
 # ParseEmbedProvider validates the MIZUYA_EMBED_PROVIDER env var.
@@ -32,19 +32,31 @@ type embedConfig
     model: string
     apiKey: string
 
+# EmbedEnv binds the MIZUYA_EMBED_* environment variables via parse.Env.
+# The `as` aliases pin the exact env keys: parse.Env folds each alias to
+# UPPER_SNAKE under the prefix (e.g. "api_key" -> MIZUYA_EMBED_API_KEY).
+type EmbedEnv
+    Provider: string as "provider"
+    URL: string as "url"
+    Model: string as "model"
+    ApiKey: string as "api_key"
+
 # loadEmbedConfig reads embedding settings from environment variables and
 # applies provider-specific defaults.
 func loadEmbedConfig() embedConfig
-    provider := env.GetOr("MIZUYA_EMBED_PROVIDER", "")
-    url := env.GetOr("MIZUYA_EMBED_URL", "")
-    model := env.GetOr("MIZUYA_EMBED_MODEL", "")
-    apiKey := env.GetOr("MIZUYA_EMBED_API_KEY", "")
-
-    if provider equals "ollama" and (model is empty)
-        model = "nomic-embed-text"
-    if provider equals "openai" and (model is empty)
-        model = "text-embedding-3-small"
-    return embedConfig{provider: provider, url: url, model: model, apiKey: apiKey}
+    result := parse.Env of EmbedEnv from "MIZUYA_EMBED"
+    if result is parse.Parsed as r
+        provider := r.Value.Provider
+        model := r.Value.Model
+        if provider equals "ollama" and (model is empty)
+            model = "nomic-embed-text"
+        if provider equals "openai" and (model is empty)
+            model = "text-embedding-3-small"
+        return embedConfig{provider: provider, url: r.Value.URL, model: model, apiKey: r.Value.ApiKey}
+    else
+        # Unreachable: all-string fields never fail to parse. Zero config
+        # matches the previous empty-string defaults.
+        return embedConfig{}
 
 # embedText converts text into a vector using the configured provider.
 # Falls back to hashEmbed when no provider is set.
