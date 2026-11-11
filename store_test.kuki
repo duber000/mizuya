@@ -158,7 +158,7 @@ func TestObservationSupersedes(t: reference testing.T)
         upsertEntity(pool, "other", "concept", "Other", "s", empty list of string),
     )
 
-    _, aerr := addObservation(pool, "duck", "first belief", "conversation")
+    _, _, aerr := addObservation(pool, "duck", "first belief", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
@@ -167,7 +167,7 @@ func TestObservationSupersedes(t: reference testing.T)
     test.AssertEqual(t, first.Supersedes, "")
 
     # Correcting observation links to the one it corrects.
-    _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
+    _, _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
     test.AssertNoError(t, aerr)
     obs, err = listObservations(pool, "duck")
     test.AssertNoError(t, err)
@@ -176,15 +176,15 @@ func TestObservationSupersedes(t: reference testing.T)
     test.AssertEqual(t, obs[1].Id, first.Id)
 
     # Bogus supersedes id: fail-closed error.
-    _, err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
+    _, _, err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
     test.AssertError(t, err)
 
     # Observation on a different entity: also rejected.
-    _, aerr = addObservation(pool, "other", "o", "conversation")
+    _, _, aerr = addObservation(pool, "other", "o", "conversation")
     test.AssertNoError(t, aerr)
     otherObs, err := listObservations(pool, "other")
     test.AssertNoError(t, err)
-    _, err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
+    _, _, err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
     test.AssertError(t, err)
 
 func TestListObservationsRange(t: reference testing.T)
@@ -195,9 +195,9 @@ func TestListObservationsRange(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
     )
-    _, aerr := addObservation(pool, "duck", "one", "conversation")
+    _, _, aerr := addObservation(pool, "duck", "one", "conversation")
     test.AssertNoError(t, aerr)
-    _, aerr = addObservation(pool, "duck", "two", "conversation")
+    _, _, aerr = addObservation(pool, "duck", "two", "conversation")
     test.AssertNoError(t, aerr)
 
     today, terr := todayDate(pool)
@@ -299,7 +299,7 @@ func TestListDrift(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
     )
-    _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
+    _, _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
@@ -325,7 +325,7 @@ func TestListDrift(t: reference testing.T)
     # A superseding observation makes the old one a deliberate correction:
     # excluded by default (the new observation is itself drifted by the
     # simulated change), included with includeSuperseded=true.
-    _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
+    _, _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
     test.AssertNoError(t, aerr)
     rows, err = listDrift(pool, 50, false)
     test.AssertNoError(t, err)
@@ -354,8 +354,8 @@ func TestRegexSearchFilter(t: reference testing.T)
 # --- consumer-contract pins ---
 
 # TestObservationOrderingPinned: context --json observations are always
-# newest-first (at DESC, id DESC) — foamy takes the last 3 as "most recent",
-# so this ordering is contractual, not incidental.
+# newest-first (at DESC, id DESC) — consumers take the first N as "most
+# recent", so this ordering is contractual, not incidental.
 func TestObservationOrderingPinned(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
@@ -364,11 +364,11 @@ func TestObservationOrderingPinned(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
     )
-    _, aerr := addObservation(pool, "duck", "first", "conversation")
+    _, _, aerr := addObservation(pool, "duck", "first", "conversation")
     test.AssertNoError(t, aerr)
-    _, aerr = addObservation(pool, "duck", "second", "conversation")
+    _, _, aerr = addObservation(pool, "duck", "second", "conversation")
     test.AssertNoError(t, aerr)
-    _, aerr = addObservation(pool, "duck", "third", "conversation")
+    _, _, aerr = addObservation(pool, "duck", "third", "conversation")
     test.AssertNoError(t, aerr)
 
     obs, err := listObservations(pool, "duck")
@@ -392,14 +392,14 @@ func TestSupersededByFlag(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
     )
-    _, aerr := addObservation(pool, "duck", "stale fact", "conversation")
+    _, _, aerr := addObservation(pool, "duck", "stale fact", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
     stale := obs[0]
     test.AssertEqual(t, stale.SupersededBy, "")
 
-    _, aerr = addObservation(pool, "duck", "corrected fact", "conversation", stale.Id)
+    _, _, aerr = addObservation(pool, "duck", "corrected fact", "conversation", stale.Id)
     test.AssertNoError(t, aerr)
 
     obs, err = listObservations(pool, "duck")
@@ -500,6 +500,44 @@ func TestPruneHistoryBeforeKeepsNewest(t: reference testing.T)
     test.AssertEqual(t, len(hist), 1)
     test.AssertContains(t, hist[0].Data, "v1")
 
+# TestPruneHistoryKeepAndBeforeUnion: with BOTH --keep and --before set, a
+# version is pruned only when it breaks both bounds — beyond the keep window
+# AND older than the cutoff. A version inside the keep window is kept even
+# when old; a version after the cutoff is kept even when it ranks beyond
+# --keep (union retention). The newest version per entity is always kept.
+func TestPruneHistoryKeepAndBeforeUnion(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
+    )
+    # Two future versions; the upsert's own row stays at rn = 3 (old).
+    # Deterministic: R1 (2030-01-02) is old relative to the 2028 cutoff
+    # but inside keep = 2; the upsert row (2026) is old AND beyond it.
+    db.Exec(
+        pool,
+        `INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', '{"summary":"R1"}', '2030-01-02 10:00:00.000')`,
+    ) onerr discard
+    db.Exec(
+        pool,
+        `INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', '{"summary":"R2"}', '2030-01-09 10:00:00.000')`,
+    ) onerr discard
+
+    # dry-run counts only the rank-3 old row (the union keeps R1).
+    n, perr := pruneHistory(pool, 2, "2028-01-01", true)
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, n, 1)
+
+    # Same count for real; R1 and R2 survive (R1 is old but inside keep=2).
+    n, perr = pruneHistory(pool, 2, "2028-01-01", false)
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, n, 1)
+    hist, herr := listEntityHistory(pool, "duck", 10)
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hist), 2)
+
 # --- openPoolAt self-initializes uninitialized paths ---
 
 # TestOpenPoolAtSelfInitializes: opening a path that was never
@@ -520,7 +558,7 @@ func TestOpenPoolAtSelfInitializes(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
     )
-    _, aerr := addObservation(pool, "duck", "hello", "conversation")
+    _, _, aerr := addObservation(pool, "duck", "hello", "conversation")
     test.AssertNoError(t, aerr)
 
     rows, lerr := listEntities(pool, "", 10)

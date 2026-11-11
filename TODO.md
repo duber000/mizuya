@@ -2,11 +2,13 @@
 
 ## SQLite extension opportunities
 
-mizuya already wires up `vec1` via `stdlib/sqliteext`. The same seam takes any
-`ext/*` package from `github.com/ncruces/go-sqlite3` with one line:
+mizuya already wires up `vec1` via the `github.com/ncruces/go-sqlite3/ext/vec1`
+package (see `sqlite.OpenWithExtensions` in `main.kuki` / `mcp_server.kuki`).
+The same seam takes any `ext/*` package from
+`github.com/ncruces/go-sqlite3` with one array element:
 
 ```kukicha
-sqliteext.Register(pool, theirext.Register) onerr return
+sqlite.OpenWithExtensions(path, pragmas, theirext.Register) onerr return
 ```
 
 The candidates below are ordered by expected payoff for mizuya specifically.
@@ -50,8 +52,9 @@ The candidates below are ordered by expected payoff for mizuya specifically.
 - [x] **`spellfix1` — fuzzy entity-id resolution.** *(wired into the
   CLI error paths for `context`, `observe`, and `similar --id`, plus
   the matching MCP tools. The vtab is rebuilt from `entities.id` on
-  every pool open via `refreshFuzzyIds`; switch to incremental
-  maintenance if entity churn ever makes that hot.)*
+  every pool open by `initDB` (inline `DELETE` + `INSERT`);
+  `refreshFuzzyIds` does the same for the test pools. Switch to
+  incremental maintenance if entity churn ever makes that hot.)*
 
 ### Low value / situational
 

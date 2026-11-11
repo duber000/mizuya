@@ -5,6 +5,48 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+### Safety
+- Secret gate extended to every stored free-text field: entity name,
+  summary, and tags; observation text and its `source` label; relation
+  labels; OKF front-matter fields. A secret detected in the entity id
+  refuses the upsert outright (ids are referential keys — relations,
+  history, FTS, `entity://` URIs — and are never rewritten in place).
+  Scanner errors refuse the write, as before.
+- `observe`/`add_observation` echo the stored (redacted) text instead of
+  the raw input; upserts redact the stored entity (the redacted record
+  is what `--json` returns). stderr `WARN` fires for every redacted
+  field with detector names only.
+- Entity `type` is validated (and lowercased) at the CLI and MCP
+  boundaries — an unknown `--type` / `upsert_entity` `type` fails as a
+  usage error instead of being stored verbatim.
+- `prune-history` with both `--keep` and `--before` now prunes only
+  versions breaking **both** bounds (union retention): a recent version
+  is no longer dropped just because it ranks beyond `--keep`. Pinned by
+  `TestPruneHistoryKeepAndBeforeUnion`; `docs/STORAGE.md` documents the
+  semantics.
+- Invalid `--since`/`--until`/`--as-of`/`--threshold` values are usage
+  errors (exit 2), matching the output contract.
+- Dockerfile pins kukicha `v0.86.9` (was `v0.86.5`), matching the
+  vendored stdlib.
+
+### Removed
+- `distill` — it shelled out to an `openwiki -p` run, and the openwiki
+  tool/ecosystem is gone. The `observations.distilled` column, the
+  `drift` exclusion for `distilled = 1` rows, and the
+  `idx_observations_distilled` index are kept so existing databases
+  behave identically (nothing sets the flag anymore).
+  `--openwiki-cmd` (a dead flag, validated but never used) went with it.
+
+### Housekeeping
+- MCP resources and the completion handler now open the database through
+  the same self-initializing, extension-registering pool as every tool
+  (`openMCPPool`); the bare `sqlite.OpenPath` path is gone. The server
+  also exposes two resources, now documented in the README and
+  `docs/output-contract.md`: `entity://list` (Entity[] snapshot) and
+  `entity://{id}` (the shallow `get_context` payload).
+- Removed unreferenced helpers: `deleteEntity`, `deleteObservation`,
+  `unrelate`, `addTag`, `openDB` (no callers in code, tests, or CLI).
+
 ### OKF bundle import
 - New `import-okf <dir> [--bundle docs]` command imports an OKF v0.2
   knowledge bundle into entities + `references` edges: one entity per

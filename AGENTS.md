@@ -59,10 +59,10 @@ Never silently overwrite what an entity was. `upsertEntity` appends the post-upd
 
 ### 4. Consumer-facing contracts (since 2518f4d)
 These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki` / `store_test.kuki` — do not change them without a contract note:
-- `context`/`get_context` observations are ALWAYS newest-first (`at DESC, id DESC`); consumers take the tail as "most recent".
+- `context`/`get_context` observations are ALWAYS newest-first (`at DESC, id DESC`); consumers take the first N as "most recent".
 - Every `ObsRow` carries `supersedes` and `superseded_by`; superseded observations stay visible (flagged) unless `hide_superseded` is passed.
 - `prune-history` is the ONLY deliberate deletion from `entity_history` (retention policy in `docs/STORAGE.md`); it always keeps the newest version per entity and fails closed with neither `--keep` nor `--before`.
-- Secret redaction must stay visible in every mode: `--json` `redacted` count, text-mode note, stderr `WARN` (detector names only — never log `SecretFinding.Raw`).
+- Secret redaction must stay visible in every mode: observe `--json` `redacted` count and text-mode note, and a stderr `WARN` for *every* redacted field on any write (name, summary, tags, observation text/source, relation labels; detector names only — never log `SecretFinding.Raw`). Upsert echoes the redacted `Entity` it stored.
 
 ## Current work — adopting funes (huggingface/funes) lessons
 

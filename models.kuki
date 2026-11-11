@@ -1,13 +1,14 @@
 # mizuya — model types
 # A SQLite-backed knowledge graph with JSON columns, FTS5 keyword search,
-# 1-hop context lookups, and vector cosine similarity (via a registered
-# custom SQL function).
+# N-hop graph traversal (recursive CTEs over relations), and vector
+# cosine similarity (vec1 extension).
 
 petiole main
 
 # EntityType is the closed set of entity classifications.
-# Stored as text in the entities.type column; ParseEntityType validates
-# at boundaries (CLI flags, MCP tool arguments). AllEntityType() serves
+# Stored lowercase in the entities.type column; ParseEntityType validates
+# at the boundaries (CLI flags, MCP tool arguments) — anything outside
+# the set is rejected rather than stored. AllEntityType() serves
 # the valid-types list for flag help and tool schemas.
 enum EntityType
     Project = "project"
@@ -18,7 +19,8 @@ enum EntityType
     Org = "org"
 
 # Entity is a node in the knowledge graph.
-# The Data field holds a JSON object: {summary, observations, tags}.
+# The Data field holds a JSON object: {summary, tags}. Observations live
+# in their own table and are joined in at read time.
 type Entity
     Id: string as "id"
     Type: string as "type"
@@ -64,9 +66,10 @@ type ContextRow
     Summary: string as "summary"
 
 # ReachableRow describes an entity reached via N-hop graph traversal
-# through the closure virtual table. Depth is the minimum hop count
-# from the root; the relation label isn't carried (closure walks any
-# edge regardless of `rel`).
+# through a recursive CTE over the relations table (the upstream closure
+# extension is hardcoded to integer ids). Depth is the minimum hop count
+# from the root; the relation label isn't carried (the walk counts any
+# edge, regardless of `rel`).
 type ReachableRow
     Depth: int as "depth"
     Other: string as "other"

@@ -9,7 +9,6 @@ import "stdlib/datetime"
 import "stdlib/db"
 import "stdlib/json" as jsonpkg
 import "stdlib/slice"
-import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 
 # validDate reports whether s is a real YYYY-MM-DD calendar date (not
@@ -19,15 +18,19 @@ func validDate(s: string) bool
     _, err := datetime.Parse(s, datetime.LayoutDate)
     return err equals empty
 
-# openDB opens (or creates) the SQLite database at the given path.
-func openDB(dbPath: string) (db.Pool, error)
-    return sqlite.OpenPath(dbPath)
-
 # --- Entity CRUD ---
 
 # upsertEntity creates or updates an entity. On update, type/name are replaced
 # and the JSON fields summary/tags are merged into the existing data object,
 # preserving any observations already recorded.
+#
+# Fail-closed secret gate on every caller-supplied free-text field: the
+# name, summary, and tags are redacted in place. A secret detected in the
+# id refuses the whole upsert — ids are referential keys (relations,
+# history, FTS, entity:// URIs), so rewriting one in place is not an
+# option. Scanner errors refuse the write in all of these cases; the
+# type is a closed enum validated at the CLI/MCP boundaries instead.
+# Redactions are reported via the stderr WARN (detector names only).
 #
 # Append-only belief model: the entities row stays the fast "current view",
 # but every upsert also appends the post-update state to entity_history in
@@ -36,12 +39,26 @@ func openDB(dbPath: string) (db.Pool, error)
 # No-op upserts (state identical to the latest logged version) skip the
 # history append so the log is not spammed with duplicates.
 func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summary: string, tags: list of string) error
-    # Fail-closed secret gate on the stored summary (covers import-openwiki,
-    # whose summaries come from wiki files). A scanner error refuses the write.
-    cleanSummary, _, rerr := redactSecrets(summary)
-    if rerr isnt empty
-        return rerr
+    if rErr := refuseIfSecrets(id, "entity id"); rErr isnt empty
+        return rErr
+    cleanName, _, nErr := redactSecrets(name)
+    if nErr isnt empty
+        return nErr
+    cleanSummary, _, sErr := redactSecrets(summary)
+    if sErr isnt empty
+        return sErr
+    name = cleanName
     summary = cleanSummary
+    cleanTags := empty list of string
+    for t in tags
+        t = strpkg.TrimSpace(t)
+        if t is empty
+            continue
+        c, _, tErr := redactSecrets(t)
+        if tErr isnt empty
+            return tErr
+        cleanTags = append(cleanTags, c)
+    tags = cleanTags
 
     tagsJSON := jsonpkg.Bytes(tags)
 
@@ -84,12 +101,6 @@ func getEntity(pool: db.Pool, id: string) (Entity, error)
     result := db.Query(pool, q, id) |> db.ScanOne of Entity
     return result, empty
 
-# deleteEntity removes an entity and (via ON DELETE CASCADE) its relations
-# and embedding row.
-func deleteEntity(pool: db.Pool, id: string) error
-    db.Exec(pool, "DELETE FROM entities WHERE id = ?", id) onerr return
-    return empty
-
 # listEntities returns all entities, optionally filtered by type.
 func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, error)
     parts := empty list of string
@@ -118,25 +129,31 @@ func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, err
 # lets readers — and the drift command — tell a deliberate correction
 # apart from staleness. Empty means "corrects nothing".
 #
-# The text passes through the fail-closed secret gate (scanner.kuki):
-# secrets are redacted in place and the count is returned; a scanner error
-# refuses the write entirely.
-func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") (int, error)
+# The text and the source label pass through the fail-closed secret gate
+# (scanner.kuki): secrets are redacted in place and the count is returned;
+# a scanner error refuses the write entirely. Returns the number of secrets
+# redacted and the *stored* (redacted) text, so callers can echo what was
+# actually written rather than the raw input.
+func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") (int, string, error)
     exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
     if err isnt empty
-        return 0, err
+        return 0, "", err
     if not exists
-        return 0, error "entity not found: {id}"
+        return 0, "", error "entity not found: {id}"
     if supersedes isnt empty
         ok, serr := db.Exists(pool, "SELECT 1 FROM observations WHERE id = ? AND entity_id = ?", supersedes, id)
         if serr isnt empty
-            return 0, serr
+            return 0, "", serr
         if not ok
-            return 0, error "superseded observation not found on entity {id}: {supersedes}"
+            return 0, "", error "superseded observation not found on entity {id}: {supersedes}"
 
     clean, redacted, rerr := redactSecrets(text)
     if rerr isnt empty
-        return 0, rerr
+        return 0, "", rerr
+    cleanSource, srcRedacted, rerr2 := redactSecrets(source)
+    if rerr2 isnt empty
+        return 0, "", rerr2
+    source = cleanSource
 
     _, ierr := db.Exec(
         pool,
@@ -147,11 +164,11 @@ func addObservation(pool: db.Pool, id: string, text: string, source: string, sup
         supersedes,
     )
     if ierr isnt empty
-        return 0, ierr
+        return 0, "", ierr
     _, uerr := db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id)
     if uerr isnt empty
-        return 0, uerr
-    return redacted, empty
+        return 0, "", uerr
+    return redacted + srcRedacted, clean, empty
 
 # listObservations returns the observations for an entity, newest first.
 # Ordering is a pinned contract (docs/output-contract.md): at DESC, id DESC.
@@ -188,13 +205,8 @@ func listObservationsRange(pool: db.Pool, id: string, since: string, until: stri
     result := db.Query(pool, q, many args) |> db.ScanAll of ObsRow
     return result, empty
 
-# deleteObservation removes a single observation by its uuid7 id.
-func deleteObservation(pool: db.Pool, obsID: string) error
-    db.Exec(pool, "DELETE FROM observations WHERE id = ?", obsID) onerr return
-    return empty
-
 # entityText assembles the concatenated text representation of an entity
-# (name + summary + observations), used as input to the toy embedder.
+# (name + summary + observations), used as input to the configured embedder.
 func entityText(pool: db.Pool, id: string) (string, error)
     e, err := getEntity(pool, id)
     if err isnt empty
@@ -254,14 +266,6 @@ func reEmbedIfChanged(pool: db.Pool, id: string) (bool, error)
     setStoredHash(pool, id, h) onerr return false, error
     return true, empty
 
-# --- Tags ---
-
-# addTag appends a string to the entity's $.tags JSON array.
-func addTag(pool: db.Pool, id: string, tag: string) error
-    q := "UPDATE entities SET data = json_set(data, '$.tags[#]', ?), updated_at = datetime('now') WHERE id = ?"
-    db.Exec(pool, q, tag, id) onerr return
-    return empty
-
 # --- Entity version history (append-only belief log) ---
 
 # listEntityHistory returns the logged versions of an entity, newest
@@ -288,13 +292,16 @@ func entityStateAt(pool: db.Pool, id: string, at: string) (HistoryRow, error)
 
 # pruneHistory compacts the append-only entity_history log — the one
 # place deletion is intentional (retention/GC), never a silent overwrite.
-# keep > 0 retains only the newest `keep` versions per entity; before
-# (YYYY-MM-DD) additionally removes versions from before the end of that
-# day. The newest version per entity is ALWAYS retained, so the current
-# state and as-of "today" reads keep working; as-of dates older than the
-# oldest retained version will error after pruning. dryRun counts what
-# would be deleted without deleting. Returns the number pruned (or that
-# would be pruned).
+# keep > 0 retains the newest `keep` versions per entity; before
+# (YYYY-MM-DD) additionally retains everything recorded on/after the end
+# of that day. When BOTH are given, a version is pruned only when it
+# breaks both bounds — beyond the keep window AND older than the end of
+# the cutoff day — so recent history is never dropped just because it
+# ranks beyond N (union retention). The newest version per entity (rn = 1)
+# is ALWAYS retained, so the current state and as-of "today" reads keep
+# working; as-of dates older than the oldest retained version will error
+# after pruning. dryRun counts what would be deleted without deleting.
+# Returns the number pruned (or that would be pruned).
 func pruneHistory(pool: db.Pool, keep: int, before: string, dryRun: bool) (int, error)
     if keep < 0
         return 0, cli.UsageFail("--keep must be >= 0, got {keep}")
@@ -304,18 +311,21 @@ func pruneHistory(pool: db.Pool, keep: int, before: string, dryRun: bool) (int, 
         return 0, cli.UsageFail("nothing to prune: pass --keep N and/or --before YYYY-MM-DD")
 
     # ranked assigns rn = 1.. per entity, newest first (uuid7 id breaks
-    # same-millisecond ties). Delete only rows that are BOTH past the
-    # newest (rn > 1) AND (beyond the keep count OR before the cutoff) —
-    # the newest version per entity always stays.
+    # same-millisecond ties). Delete only rows that break EVERY given
+    # bound: beyond the keep rank AND older than the cutoff (when both
+    # are set) — the union of "newest N per entity" and "everything from
+    # the cutoff onward" is retained. The newest version per entity is
+    # always retained: rn = 1 satisfies rn > keep only when keep = 0, in
+    # which case the rn > 1 guard exempts it.
     args := empty list of any
-    pruneConds := empty list of string
+    conds := list of string{"rn > 1"}
     if keep > 0
-        pruneConds = append(pruneConds, "rn > ?")
+        conds = append(conds, "rn > ?")
         args = append(args, keep)
     if before isnt empty
-        pruneConds = append(pruneConds, "changed_at < datetime(?, '+1 day')")
+        conds = append(conds, "changed_at < datetime(?, '+1 day')")
         args = append(args, before)
-    where := "rn > 1 AND (" + strpkg.Join(pruneConds, " OR ") + ")"
+    where := strpkg.Join(conds, " AND ")
 
     inner := "SELECT h.id AS id, h.changed_at AS changed_at, ROW_NUMBER() OVER (PARTITION BY h.entity_id ORDER BY h.changed_at DESC, h.id DESC) AS rn FROM entity_history h"
     if dryRun
@@ -361,15 +371,21 @@ func listDrift(pool: db.Pool, limit: int, includeSuperseded: bool) (list of Drif
 # --- Relations ---
 
 # relate creates an edge src --rel--> dst. The primary key on
-# (src, rel, dst) prevents duplicates.
-func relate(pool: db.Pool, src: string, rel: string, dst: string) error
-    db.Exec(pool, "INSERT OR IGNORE INTO relations (src, rel, dst) VALUES (?, ?, ?)", src, rel, dst) onerr return
-    return empty
-
-# unrelate removes a specific edge.
-func unrelate(pool: db.Pool, src: string, rel: string, dst: string) error
-    db.Exec(pool, "DELETE FROM relations WHERE src = ? AND rel = ? AND dst = ?", src, rel, dst) onerr return
-    return empty
+# (src, rel, dst) prevents duplicates. The label passes through the
+# fail-closed secret gate (rel is free text); returns the stored,
+# possibly redacted, rel so callers can echo what was written.
+func relate(pool: db.Pool, src: string, rel: string, dst: string) (string, error)
+    cleanRel, _, rerr := redactSecrets(rel)
+    if rerr isnt empty
+        return "", rerr
+    db.Exec(
+        pool,
+        "INSERT OR IGNORE INTO relations (src, rel, dst) VALUES (?, ?, ?)",
+        src,
+        cleanRel,
+        dst,
+    ) onerr return "", error
+    return cleanRel, empty
 
 # outgoingContext returns every neighbor reachable in one hop from id
 # along an outgoing edge.

@@ -48,13 +48,19 @@ TODO.md) trades a little accuracy for speed, not space.
 
 - WAL mode means a `-wal` file rides alongside the DB; it is checkpointed
   automatically and is transient.
-- Deleting an entity cascades to relations, observations, history, and both
-  embedding stores (triggers + ON DELETE CASCADE), so `delete` reclaims
+- There is no user-facing delete command today (the unused `delete*`
+  helpers were removed). If one is added (or rows are deleted directly),
+  relations, observations, and `entity_history` cascade via `ON DELETE
+  CASCADE` and the embedding stores via triggers, so `delete` reclaims
   space after the next VACUUM — SQLite does not shrink the file on delete
   by itself. Run `VACUUM` occasionally if many deletions/scrubs happen.
-- `observe`/`upsert` are gated by the fail-closed secret scanner
-  (`MIZUYA_SECRET_SCAN`, default `redact`), so stored text never contains
-  detected tokens — keep it on before any future export/share feature.
+- `observe`/`upsert`/`relate`/`import-*` are gated by the fail-closed
+  secret scanner (`MIZUYA_SECRET_SCAN`, default `redact`), which redacts
+  every stored free-text field in place — entity name/summary/tags,
+  observation text/source, relation labels — and refuses the write when a
+  secret appears in an entity id (ids can't be safely rewritten). Stored
+  text therefore never contains detected tokens — keep the gate on before
+  any future export/share feature.
 
 ## History retention policy (recommended)
 
@@ -62,15 +68,19 @@ TODO.md) trades a little accuracy for speed, not space.
 a retention policy. Recommended for an aggregate that many consumers read:
 
 ```bash
-mizuya prune-history --keep 20 --before 2026-08-01   # keep newest 20 per entity + anything after the date
+mizuya prune-history --keep 20 --before 2026-08-01   # keep the newest 20 per entity plus everything recorded on/after 2026-08-01
 mizuya prune-history --keep 20 --before 2026-08-01 --dry-run   # preview first
 ```
 
-Semantics: the newest version per entity is **always** kept (current state
-and as-of-today reads keep working); `--keep N` retains the newest N per
-entity; `--before YYYY-MM-DD` additionally drops versions from before the
-end of that day. This is the deliberate-deletion exception to append-only —
-after pruning, `--as-of` dates older than the oldest retained version
-error. Run it on a schedule (e.g. weekly) and `VACUUM` afterwards to
+Semantics (union retention — recent history is never dropped just because
+it ranks beyond N): `--keep N` retains the newest N versions per entity;
+`--before YYYY-MM-DD` retains everything recorded on/after the end of that
+day. When both are given, a version is pruned only when it breaks **both**
+bounds — beyond the keep window **and** older than the cutoff. With
+`--before` alone, everything older than the cutoff is pruned except the
+newest version per entity; with `--keep` alone, everything beyond rank N is
+pruned. The newest version per entity is **always** kept (current state and
+as-of-today reads keep working); as-of dates older than the oldest retained
+version will error after pruning. Run it on a schedule (e.g. weekly) and `VACUUM` afterwards to
 reclaim the file space. Rule of thumb: with ~1 KB data snapshots, 20
 versions/entity costs ~20 KB/entity — cheap next to the vectors.

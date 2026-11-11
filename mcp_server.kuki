@@ -83,7 +83,8 @@ func startMCP(dbPath: string) error
     router := mcp.NewRouter()
     entityTemplate := 'entity://{id}'
     router.AddResource(entityTemplate, func(argName: string, partial: string, prevArgs: map of string to string) list of string
-        pool := openDB(mcpDBPath) onerr return empty list of string
+        # Self-initializes and registers extensions, like every other pool.
+        pool := openMCPPool() onerr return empty list of string
         defer db.Close(pool)
         entities := listEntities(pool, "", 500) onerr return empty list of string
         return entities
@@ -125,7 +126,7 @@ func registerResources(server: reference mcp.Server)
     )
 
 func listEntitiesResource(uri: string) (string, error)
-    pool := openDB(mcpDBPath) onerr return "", error
+    pool := openMCPPool() onerr return "", error
     defer db.Close(pool)
     entities := listEntities(pool, "", 500) onerr return "", error
     data := jsonpkg.PrettyBytes(entities) onerr return "", error
@@ -191,9 +192,11 @@ func handleUpsertEntity(args: upsertEntityArgs) (any, error)
     if (args.Id is empty) or (args.Name is empty)
         return mcp.ErrorResult("id and name are required"), empty
 
-    etype := args.Type
+    etype := strpkg.ToLower(strpkg.TrimSpace(args.Type))
     if etype is empty
         etype = "concept"
+    if _, perr := ParseEntityType(etype); perr isnt empty
+        return mcp.ErrorResult("invalid type {etype} (valid: {validEntityTypes()})"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
@@ -240,14 +243,14 @@ func handleAddObservation(args: addObservationArgs) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    redacted, oerr := addObservation(pool, args.EntityId, args.Text, source, args.Supersedes)
+    redacted, storedText, oerr := addObservation(pool, args.EntityId, args.Text, source, args.Supersedes)
     if oerr isnt empty
         return mcp.ErrorResult("observe failed: {oerr}{suggestionsFor(pool, args.EntityId)}"), empty
 
     reEmbed(pool, args.EntityId) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
 
     note := if redacted > 0 then " (redacted {redacted} secret(s) before storing)" else ""
-    return mcp.TextResult("observed: {args.Text}{note}"), empty
+    return mcp.TextResult("observed: {storedText}{note}"), empty
 
 # --- Tool: relate ---
 
@@ -279,9 +282,11 @@ func handleRelate(args: relateArgs) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    relate(pool, args.Src, args.Rel, args.Dst) onerr return mcp.ErrorResult("relate failed: {error}"), empty
+    storedRel, rerr := relate(pool, args.Src, args.Rel, args.Dst)
+    if rerr isnt empty
+        return mcp.ErrorResult("relate failed: {rerr}"), empty
 
-    return mcp.TextResult("related: {args.Src} --{args.Rel}--> {args.Dst}"), empty
+    return mcp.TextResult("related: {args.Src} --{storedRel}--> {args.Dst}"), empty
 
 # --- Tool: search ---
 
@@ -337,7 +342,13 @@ func handleSearch(args: searchArgs) (any, error)
     if limit equals 0
         limit = 10
 
-    filter := SearchFilter{Type: args.Type, Tag: args.Tag, Since: args.Since, Until: args.Until}
+    typeFilter, tfErr := mcpTypeFilter(args.Type)
+    if tfErr isnt empty
+        return mcp.ErrorResult("{tfErr}"), empty
+    if dErr := mcpDateFilter(args.Since, args.Until); dErr isnt empty
+        return mcp.ErrorResult("{dErr}"), empty
+
+    filter := SearchFilter{Type: typeFilter, Tag: args.Tag, Since: args.Since, Until: args.Until}
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
@@ -393,6 +404,9 @@ func handleGetContext(args: getContextArgs) (any, error)
     if depth < 1
         depth = 1
 
+    if dErr := mcpDateFilter(args.Since, args.Until); dErr isnt empty
+        return mcp.ErrorResult("{dErr}"), empty
+
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
@@ -404,8 +418,8 @@ func handleGetContext(args: getContextArgs) (any, error)
         hist = listEntityHistory(pool, args.Id, 50) onerr return mcp.ErrorResult("cannot read history: {error}"), empty
 
     if depth > 1
-        outReach := reachableOutgoing(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read outgoing closure: {error}"), empty
-        inReach := reachableIncoming(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read incoming closure: {error}"), empty
+        outReach := reachableOutgoing(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read outgoing neighbors: {error}"), empty
+        inReach := reachableIncoming(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read incoming neighbors: {error}"), empty
 
         payload := ToolArgs{
             "entity": e,
@@ -485,6 +499,14 @@ func handleSimilar(args: similarArgs) (any, error)
     if limit equals 0
         limit = 5
 
+    if args.Threshold < 0 or args.Threshold > 100
+        return mcp.ErrorResult("threshold must be in (0, 100], got {args.Threshold}"), empty
+    typeFilter, tfErr := mcpTypeFilter(args.Type)
+    if tfErr isnt empty
+        return mcp.ErrorResult("{tfErr}"), empty
+    if dErr := mcpDateFilter(args.Since, args.Until); dErr isnt empty
+        return mcp.ErrorResult("{dErr}"), empty
+
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
@@ -494,7 +516,7 @@ func handleSimilar(args: similarArgs) (any, error)
     else
         vec = embedText(args.Text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
 
-    filter := SearchFilter{Type: args.Type, Tag: args.Tag, Since: args.Since, Until: args.Until}
+    filter := SearchFilter{Type: typeFilter, Tag: args.Tag, Since: args.Since, Until: args.Until}
     hits := empty list of SimilarHit
     if args.Threshold > 0
         hits = similarByPercentile(pool, vec, args.Threshold, filter) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
@@ -505,6 +527,27 @@ func handleSimilar(args: similarArgs) (any, error)
     return mcp.TextResult(data as string), empty
 
 # --- Helpers ---
+
+# mcpTypeFilter normalizes and validates an MCP-supplied entity type
+# argument against the enum (lowercased; empty means "no type given").
+# An error return names the bad value and the valid set — the closed-set
+# contract at the tool boundary, same as the CLI flag.
+func mcpTypeFilter(raw: string) (string, error)
+    t := strpkg.ToLower(strpkg.TrimSpace(raw))
+    if t is empty
+        return "", empty
+    if _, perr := ParseEntityType(t); perr isnt empty
+        return "", error "invalid type {raw} (valid: {validEntityTypes()})"
+    return t, empty
+
+# mcpDateFilter validates optional YYYY-MM-DD bounds as real calendar
+# dates. Empty bounds are unbounded.
+func mcpDateFilter(since: string, until: string) error
+    if since isnt empty and not validDate(since)
+        return error "since must be YYYY-MM-DD, got {since}"
+    if until isnt empty and not validDate(until)
+        return error "until must be YYYY-MM-DD, got {until}"
+    return empty
 
 # openMCPPool opens the database, registers the SQLite extensions
 # referenced at runtime (vec1 for embeddings, uuid for observation

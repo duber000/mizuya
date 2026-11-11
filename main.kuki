@@ -1,20 +1,21 @@
 # mizuya — SQLite-backed knowledge graph with FTS5 + cosine similarity.
 #
-# A runnable Kukicha example that demonstrates:
 #   * stdlib/sqlite + stdlib/db for schema, CRUD, and JSON columns
 #   * native SQLite FTS5 (BM25 ranking, content= virtual tables, triggers)
 #   * the vec1 SQLite extension for native cosine-distance KNN vector search
-#   * a toy deterministic embedder so `similar` works with zero external deps
+#   * a deterministic hash embedding fallback so `similar` works offline, plus
+#     real providers (Ollama, OpenAI-compatible, Voyage, Cohere) via
+#     MIZUYA_EMBED_PROVIDER
 #
 # Usage:
-#   kukicha run examples/mizuya/ -- init
-#   kukicha run examples/mizuya/ -- upsert --id kukicha --type project --name "Kukicha Language" --summary "Go superset with pipes and onerr" --tags lang,compiler
-#   kukicha run examples/mizuya/ -- upsert --id sqlite  --type tool    --name "SQLite"            --summary "Embedded SQL database" --tags db,embedded
-#   kukicha run examples/mizuya/ -- relate --src kukicha --rel uses --dst sqlite
-#   kukicha run examples/mizuya/ -- observe --id kukicha --text "Added pipe operator support"
-#   kukicha run examples/mizuya/ -- search --query "embedded database"
-#   kukicha run examples/mizuya/ -- context --id kukicha
-#   kukicha run examples/mizuya/ -- similar --text "fast database"
+#   kukicha run . -- init
+#   kukicha run . -- upsert --id kukicha --type project --name "Kukicha Language" --summary "Go superset with pipes and onerr" --tags lang,compiler
+#   kukicha run . -- upsert --id sqlite  --type tool    --name "SQLite"            --summary "Embedded SQL database" --tags db,embedded
+#   kukicha run . -- relate --src kukicha --rel uses --dst sqlite
+#   kukicha run . -- observe --id kukicha --text "Added pipe operator support"
+#   kukicha run . -- search --query "embedded database"
+#   kukicha run . -- context --id kukicha
+#   kukicha run . -- similar --text "fast database"
 
 petiole main
 
@@ -22,9 +23,7 @@ skill Mizuya
     description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, import-okf, mcp."
     version: "0.2.0"
 
-import "context"
 import "os"
-import "os/exec"
 import "path/filepath"
 import "stdlib/cli"
 import "stdlib/color"
@@ -38,7 +37,6 @@ import "stdlib/regex"
 import "stdlib/sqlite"
 import "stdlib/string" as strpkg
 import "stdlib/term"
-import "time"
 
 import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
 import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
@@ -48,13 +46,37 @@ import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
-# validEntityTypes is surfaced in CLI flag help and MCP tool schemas.
-# Built from AllEntityType() so it stays in sync with the enum declaration.
+# validEntityTypes is surfaced in CLI flag help and MCP tool schemas — the
+# wire values (lowercase), since those are what --type accepts and what is
+# stored. Built from AllEntityType() so it stays in sync with the enum.
 func validEntityTypes() string
     types := empty list of string
     for t in AllEntityType()
-        types = append(types, t.String())
+        types = append(types, strpkg.ToLower(t.String()))
     return strpkg.Join(types, ", ")
+
+# parseTypeFilter reads and validates the --type flag against the entity
+# type enum. Empty means "no filter"; anything else must be a known type
+# (lowercased first, so "Tool" and "tool" are equivalent). Invalid values
+# are usage errors (exit 2).
+func parseTypeFilter(args: cli.Args) (string, error)
+    raw := strpkg.TrimSpace(cli.GetString(args, "type"))
+    if raw is empty
+        return "", empty
+    t := strpkg.ToLower(raw)
+    if _, perr := ParseEntityType(t); perr isnt empty
+        return "", cli.UsageFail("invalid --type {raw} (valid: {validEntityTypes()})")
+    return t, empty
+
+# validateDateFlags checks --since/--until against the calendar (real
+# dates, not just the right shape). Empty bounds are unbounded. Invalid
+# values are usage errors (exit 2).
+func validateDateFlags(since: string, until: string) error
+    if since isnt empty and not validDate(since)
+        return cli.UsageFail("--since must be YYYY-MM-DD, got {since}")
+    if until isnt empty and not validDate(until)
+        return cli.UsageFail("--until must be YYYY-MM-DD, got {until}")
+    return empty
 
 func main()
     cli.New("mizuya")
@@ -74,7 +96,6 @@ func main()
             makeMCPCmd(),
             makeImportOKFCmd(),
             makeImportOpenWikiCmd(),
-            makeDistillCmd(),
             makeDriftCmd(),
             makePruneHistoryCmd(),
         )
@@ -125,7 +146,11 @@ func makeSearchCmd() reference cli.Command
 func makeContextCmd() reference cli.Command
     return cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
         |> .RequiredFlag("id", "Entity id")
-        |> .IntFlag("depth", "Hops to traverse via the closure vtable (1 = immediate neighbors)", 1)
+        |> .IntFlag(
+            "depth",
+            "Hops to traverse via recursive CTEs over relations (1 = immediate neighbors)",
+            1,
+        )
         |> .BoolFlag("history", "Include the entity's append-only version history", false)
         |> .StringFlag("since", "Only observations on/after this YYYY-MM-DD", "")
         |> .StringFlag("until", "Only observations on/before this YYYY-MM-DD", "")
@@ -181,19 +206,6 @@ func makeImportOpenWikiCmd() reference cli.Command
         |> .RestArg("dir", "Path to a directory containing an openwiki/ folder")
         |> .ActionE(doImportOpenWiki)
 
-func makeDistillCmd() reference cli.Command
-    return cli.NewCommand(
-        "distill",
-        "Select high-reuse observations and feed them to openwiki for promotion to docs",
-    )
-        |> .StringFlag("dir", "Project directory (passed to openwiki as cwd)", ".")
-        |> .StringFlag("openwiki-cmd", "OpenWiki CLI binary", "openwiki")
-        |> .IntFlag("min-age-days", "Minimum observation age in days", 7)
-        |> .IntFlag("min-observations", "Minimum observations per entity to qualify", 3)
-        |> .IntFlag("limit", "Max entities to distill in one run", 10)
-        |> .BoolFlag("dry-run", "Print the prompt without calling openwiki", false)
-        |> .ActionE(doDistill)
-
 func makeDriftCmd() reference cli.Command
     return cli.NewCommand(
         "drift",
@@ -210,10 +222,14 @@ func makeDriftCmd() reference cli.Command
 func makePruneHistoryCmd() reference cli.Command
     return cli.NewCommand(
         "prune-history",
-        "Compact the append-only entity_history log (retention/GC): keep the newest N versions per entity and/or drop versions before a date. The newest version per entity is always kept.",
+        "Compact the append-only entity_history log (retention/GC): a version is pruned only when it breaks BOTH the --keep rank limit and the --before date limit. The newest version per entity is always kept.",
     )
         |> .IntFlag("keep", "Keep only the newest N versions per entity (0 = no rank limit)", 0)
-        |> .StringFlag("before", "Also drop versions from before this YYYY-MM-DD (end of day)", "")
+        |> .StringFlag(
+            "before",
+            "Drop versions from before this YYYY-MM-DD (end of day; everything on/after it survives regardless of rank)",
+            "",
+        )
         |> .BoolFlag("dry-run", "Count what would be pruned without deleting", false)
         |> .ActionE(doPruneHistory)
 
@@ -262,14 +278,15 @@ func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float6
 
 # observeResolved adds an observation for id; on a miss with an interactive
 # TTY (outside JSON mode), offers fuzzy matches and retries with the pick.
-# Returns how many secrets the gate redacted from the stored text.
-func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) (int, error)
-    n, aerr := addObservation(pool, id, text, source, supersedes)
+# Returns the number of secrets the gate redacted from the stored text and
+# the stored (redacted) text itself.
+func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) (int, string, error)
+    n, stored, aerr := addObservation(pool, id, text, source, supersedes)
     if aerr equals empty
-        return n, empty
+        return n, stored, empty
     picked := pickSuggestion(pool, args, id)
     if picked is empty
-        return 0, aerr
+        return 0, "", aerr
     return addObservation(pool, picked, text, source, supersedes)
 
 # openPool opens the database named by --db.
@@ -325,7 +342,9 @@ func doInit(args: cli.Args) error
 func doUpsert(args: cli.Args) error
     id := cli.GetString(args, "id")
     name := cli.GetString(args, "name")
-    etype := cli.GetString(args, "type")
+    etype := strpkg.ToLower(strpkg.TrimSpace(cli.GetString(args, "type")))
+    if _, perr := ParseEntityType(etype); perr isnt empty
+        return cli.UsageFail("invalid --type {etype} (valid: {validEntityTypes()})")
     summary := cli.GetString(args, "summary")
     tags := parseTags(cli.GetString(args, "tags"))
 
@@ -356,7 +375,7 @@ func doObserve(args: cli.Args) error
 
     defer db.Close(pool)
 
-    redacted, oerr := observeResolved(pool, args, id, text, source, supersedes)
+    redacted, storedText, oerr := observeResolved(pool, args, id, text, source, supersedes)
     if oerr isnt empty
         return error "cannot add observation: {oerr:w}{suggestionsFor(pool, id)}"
 
@@ -364,12 +383,15 @@ func doObserve(args: cli.Args) error
     reEmbedIfChanged(pool, id) onerr explain "cannot refresh embedding"
 
     if cli.IsJSON(args)
-        printJSON(
-            map of string to any{"status": "observed", "id": id, "text": text, "redacted": redacted},
-        )
+        printJSON(map of string to any{
+            "status": "observed",
+            "id": id,
+            "text": storedText,
+            "redacted": redacted,
+        })
     else
         note := if redacted > 0 then "  {color.Yellow("(redacted {redacted} secret(s))")}" else ""
-        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(text)}{note}")
+        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(storedText)}{note}")
     return empty
 
 func doRelate(args: cli.Args) error
@@ -383,13 +405,15 @@ func doRelate(args: cli.Args) error
 
     defer db.Close(pool)
 
-    relate(pool, src, rel, dst) onerr explain "cannot create relation"
+    storedRel, rerr := relate(pool, src, rel, dst)
+    if rerr isnt empty
+        return error "cannot create relation: {rerr:w}"
 
     if cli.IsJSON(args)
-        printJSON({"status": "related", "src": src, "rel": rel, "dst": dst})
+        printJSON({"status": "related", "src": src, "rel": storedRel, "dst": dst})
     else
         print(
-            "{color.Green("related")} {color.Bold(src)} {color.Dim("--{rel}->")} {color.Bold(dst)}",
+            "{color.Green("related")} {color.Bold(src)} {color.Dim("--{storedRel}->")} {color.Bold(dst)}",
         )
     return empty
 
@@ -397,16 +421,24 @@ func doSearch(args: cli.Args) error
     query := cli.GetString(args, "query")
     limit := cli.GetIntOr(args, "limit", 10)
 
+    typeFilter, tfErr := parseTypeFilter(args)
+    if tfErr isnt empty
+        return tfErr
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    if dErr := validateDateFlags(since, until); dErr isnt empty
+        return dErr
+
     pool := openPool(args) onerr explain "cannot open database"
 
     defer db.Close(pool)
 
     useRegex := cli.GetBool(args, "regex")
     filter := SearchFilter{
-        Type: cli.GetString(args, "type"),
+        Type: typeFilter,
         Tag: cli.GetString(args, "tag"),
-        Since: cli.GetString(args, "since"),
-        Until: cli.GetString(args, "until"),
+        Since: since,
+        Until: until,
     }
     hits := empty list of SearchHit
     if useRegex
@@ -427,6 +459,14 @@ func doSearch(args: cli.Args) error
 func doContext(args: cli.Args) error
     id := cli.GetString(args, "id")
 
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    asOf := cli.GetString(args, "as-of")
+    if dErr := validateDateFlags(since, until); dErr isnt empty
+        return dErr
+    if asOf isnt empty and not validDate(asOf)
+        return cli.UsageFail("--as-of must be YYYY-MM-DD, got {asOf}")
+
     pool := openPool(args) onerr explain "cannot open database"
 
     defer db.Close(pool)
@@ -435,9 +475,6 @@ func doContext(args: cli.Args) error
     if depth < 1
         depth = 1
     showHistory := cli.GetBool(args, "history")
-    since := cli.GetString(args, "since")
-    until := cli.GetString(args, "until")
-    asOf := cli.GetString(args, "as-of")
     hideSuperseded := cli.GetBool(args, "hide-superseded")
 
     e := resolveEntity(pool, args, id) onerr
@@ -493,9 +530,9 @@ func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, 
     return empty
 
 func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow, hist: list of HistoryRow) error
-    outReach := reachableOutgoing(pool, id, depth) onerr explain "cannot read outgoing closure"
+    outReach := reachableOutgoing(pool, id, depth) onerr explain "cannot read outgoing neighbors"
 
-    inReach := reachableIncoming(pool, id, depth) onerr explain "cannot read incoming closure"
+    inReach := reachableIncoming(pool, id, depth) onerr explain "cannot read incoming neighbors"
 
     if cli.IsJSON(args)
         payload := map of string to any{
@@ -521,6 +558,16 @@ func doSimilar(args: cli.Args) error
     limit := cli.GetIntOr(args, "limit", 5)
     threshold := cli.GetIntOr(args, "threshold", 0)
 
+    if threshold < 0 or threshold > 100
+        return cli.UsageFail("--threshold must be in (0, 100], got {threshold}")
+    typeFilter, tfErr := parseTypeFilter(args)
+    if tfErr isnt empty
+        return tfErr
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    if dErr := validateDateFlags(since, until); dErr isnt empty
+        return dErr
+
     pool := openPool(args) onerr explain "cannot open database"
 
     defer db.Close(pool)
@@ -535,10 +582,10 @@ func doSimilar(args: cli.Args) error
         vec = embedText(text) onerr explain "cannot compute embedding"
 
     filter := SearchFilter{
-        Type: cli.GetString(args, "type"),
+        Type: typeFilter,
         Tag: cli.GetString(args, "tag"),
-        Since: cli.GetString(args, "since"),
-        Until: cli.GetString(args, "until"),
+        Since: since,
+        Until: until,
     }
     hits := empty list of SimilarHit
     if threshold > 0
@@ -559,6 +606,11 @@ func doSimilar(args: cli.Args) error
 func doList(args: cli.Args) error
     etype := cli.GetString(args, "type")
     limit := cli.GetIntOr(args, "limit", 50)
+    if etype isnt empty
+        t := strpkg.ToLower(strpkg.TrimSpace(etype))
+        if _, perr := ParseEntityType(t); perr isnt empty
+            return cli.UsageFail("invalid --type {etype} (valid: {validEntityTypes()})")
+        etype = t
 
     pool := openPool(args) onerr explain "cannot open database"
 
@@ -760,115 +812,6 @@ func importOKF(pool: db.Pool, baseDir: string, bundleDir: string, sourceTag: str
 # deprecated import-openwiki alias; it runs the OKF core over openwiki/.
 func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
     return importOKF(pool, baseDir, "openwiki", "openwiki")
-
-# --- distill ---
-
-# distillRow is one entity selected for distillation with its undistilled
-# observations.
-type distillRow
-    Id: string as "id"
-    Name: string as "name"
-    ObsCount: int as "obs_count"
-
-# distillObsRow is an observation selected for distillation.
-type distillObsRow
-    Id: string as "id"
-    Text: string as "text"
-    EntityId: string as "entity_id"
-
-# doDistill selects entities with many old, undistilled observations,
-# assembles a prompt from them, and shells out to `openwiki -p` to
-# incorporate the findings into the wiki. Selected observations are then
-# marked as distilled so they aren't re-selected.
-func doDistill(args: cli.Args) error
-    minAge := cli.GetIntOr(args, "min-age-days", 7)
-    minObs := cli.GetIntOr(args, "min-observations", 3)
-    limit := cli.GetIntOr(args, "limit", 10)
-    dryRun := cli.GetBool(args, "dry-run")
-    dir := cli.GetString(args, "dir")
-    openwikiCmd := cli.GetString(args, "openwiki-cmd")
-
-    pool := openPool(args) onerr explain "cannot open database"
-
-    defer db.Close(pool)
-
-    # Select entities with >= minObs undistilled observations older than
-    # the age threshold, ordered by observation count descending.
-    q := "SELECT e.id AS id, e.name AS name, COUNT(o.id) AS obs_count FROM entities e JOIN observations o ON o.entity_id = e.id WHERE o.distilled = 0 AND o.at < datetime('now', ?) GROUP BY e.id HAVING COUNT(o.id) >= ? ORDER BY obs_count DESC LIMIT ?"
-    candidates := db.Query(pool, q, "-{minAge} days", minObs, limit) |> db.ScanAll of distillRow onerr explain "distill query failed"
-
-    if candidates is empty
-        if cli.IsJSON(args)
-            printJSON({"status": "no-candidates"})
-        else
-            print(color.Dim("no entities meet the distillation threshold"))
-        return
-
-    # Collect the observations for each candidate and build the prompt.
-    promptParts := empty list of string
-    promptParts = append(
-        promptParts,
-        "Incorporate these runtime findings into the project wiki. Each block is an entity followed by observations agents recorded during real sessions. Add relevant details to the appropriate wiki page, preserving technical accuracy.\n",
-    )
-    allObsIds := empty list of string
-    for c in candidates
-        promptParts = append(promptParts, "\n## {c.Name} ({c.Id})\n")
-        obsQ := "SELECT id, text, entity_id FROM observations WHERE entity_id = ? AND distilled = 0 AND at < datetime('now', ?) ORDER BY at DESC"
-        obs := db.Query(pool, obsQ, c.Id, "-{minAge} days") |> db.ScanAll of distillObsRow onerr explain "observations query failed"
-
-        for o in obs
-            promptParts = append(promptParts, "- {o.Text}\n")
-            allObsIds = append(allObsIds, o.Id)
-
-    prompt := strpkg.Join(promptParts, "")
-
-    if dryRun
-        if cli.IsJSON(args)
-            printJSON(map of string to any{
-                "status": "dry-run",
-                "candidates": len(candidates),
-                "observations": len(allObsIds),
-                "prompt": prompt,
-            })
-        else
-            print(
-                color.Bold("dry run — {len(candidates)} entities, {len(allObsIds)} observations"),
-            )
-            print(prompt)
-        return
-
-    if openwikiCmd is empty
-        return cli.UsageFail("--openwiki-cmd is required (or use --dry-run)")
-
-    if openwikiCmd isnt "openwiki"
-        return cli.UsageFail("--openwiki-cmd must be 'openwiki' (got: {openwikiCmd})")
-
-    # Shell out to openwiki with the assembled prompt.
-    ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Minute)
-    defer cancel()
-    cmd := exec.CommandContext(ctx, "openwiki", "-p", prompt)
-    cmd.Dir = dir
-    out, runErr := cmd.CombinedOutput()
-    if runErr isnt empty
-        return error "openwiki distill failed: {runErr:w}\n{out}"
-
-    # Mark the selected observations as distilled.
-    for obsId in allObsIds
-        db.Exec(pool, "UPDATE observations SET distilled = 1 WHERE id = ?", obsId) onerr discard
-
-    if cli.IsJSON(args)
-        printJSON(map of string to any{
-            "status": "distilled",
-            "candidates": len(candidates),
-            "observations": len(allObsIds),
-            "output": strpkg.TrimSpace(out as string),
-        })
-    else
-        print(
-            "{color.Green("distilled")} {len(candidates)} entities, {len(allObsIds)} observations -> {openwikiCmd}",
-        )
-        print(strpkg.TrimSpace(out as string))
-    return empty
 
 # --- drift ---
 

@@ -106,16 +106,27 @@ func Redact on s: RegexScanner(text: string) (string, list of SecretFinding, err
         out = d.pattern.Replace(out, "[REDACTED:{d.name}]")
     return out, findings, empty
 
+# scanMode resolves MIZUYA_SECRET_SCAN into "redact" or "off"; any other
+# value is an error, so both the redaction gate and the id-refusal check
+# honor the same override (and refuse on the same bogus value).
+func scanMode() (string, error)
+    mode := env.GetOr("MIZUYA_SECRET_SCAN", "redact")
+    if mode equals "off"
+        return mode, empty
+    if mode isnt "redact"
+        return "", error "MIZUYA_SECRET_SCAN must be 'redact' or 'off', got '{mode}'"
+    return mode, empty
+
 # redactSecrets applies the configured gate to text. Returns the (possibly
 # redacted) text and how many secrets were redacted. Fail-closed: a scanner
 # error is returned, and the caller must refuse the write. MIZUYA_SECRET_SCAN
 # selects the mode: "redact" (default) or "off"; anything else errors.
 func redactSecrets(text: string) (string, int, error)
-    mode := env.GetOr("MIZUYA_SECRET_SCAN", "redact")
+    mode, mErr := scanMode()
+    if mErr isnt empty
+        return "", 0, mErr
     if mode equals "off"
         return text, 0, empty
-    if mode isnt "redact"
-        return "", 0, error "MIZUYA_SECRET_SCAN must be 'redact' or 'off', got '{mode}'"
     sc := NewRegexScanner()
     out, findings, err := sc.Redact(text)
     if err isnt empty
@@ -132,3 +143,25 @@ func redactSecrets(text: string) (string, int, error)
             names,
         )
     return out, len(findings), empty
+
+# refuseIfSecrets scans a value that cannot safely be rewritten in place
+# (entity ids are referential keys — they appear in relations, history,
+# FTS, and entity:// URIs) and refuses the write when a detector matches.
+# Any other free-text field can be redacted in place; an id cannot, so a
+# detected secret there is an error, not a rewrite. Detector names only
+# in the error — never the matched value. Honors MIZUYA_SECRET_SCAN
+# ("redact"/"off"; anything else errors, same as the redaction gate).
+func refuseIfSecrets(text: string, what: string) error
+    mode, mErr := scanMode()
+    if mErr isnt empty
+        return mErr
+    if mode equals "off"
+        return empty
+    sc := NewRegexScanner()
+    findings, err := sc.Scan(text)
+    if err isnt empty
+        return error "secret scan failed (fail-closed, refusing write): {err:w}"
+    if findings is empty
+        return empty
+    names := findings |> slice.Map(f => f.Detector) |> strpkg.Join(",")
+    return error "refusing to store {what}: possible secret (detectors: {names})"

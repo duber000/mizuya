@@ -2,8 +2,9 @@
 
 A Kukicha knowledge graph server powered by SQLite with **FTS5 full-text
 search**, **vector cosine similarity**, **hybrid RRF ranking**, and an
-**MCP stdio server** for AI agent access — using only `stdlib/sqlite`,
-`stdlib/db`, `stdlib/mcp`, `stdlib/fetch`, and `stdlib/cli`.
+**MCP stdio server** for AI agent access — built on Kukicha's standard
+library (`stdlib/sqlite` + FTS5/vec1 extensions for storage, `stdlib/mcp`
+for the agent stdio surface, `stdlib/llm/embeddings` for real providers).
 No graph engine, no separate vector database, no extension binaries.
 
 The name *mizuya* (水屋) is the preparation room in a tea house; a good
@@ -11,7 +12,7 @@ place to keep everything you've learned within reach.
 
 - `stdlib/sqlite.Open` with WAL + foreign keys via the default pragmas
 - Schema + FTS5 virtual tables + triggers defined with plain DDL constants
-- JSON-in-SQL with `json_set`, `json_object`, `json_each`, and the `$[#]`
+- JSON-in-SQL with `json_set`, `json_each`, and the `$[#]`
   append path for observations and tags
 - BM25 ranking with per-column weights (`bm25(fts, 10, 5, 2, 1)`)
 - N-hop graph context lookups via recursive CTEs over the `relations` table
@@ -21,7 +22,7 @@ place to keep everything you've learned within reach.
 - **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback)
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
 - **Append-only version log** (`entity_history`) + observation supersession
-- **Fail-closed secret redaction** on every write
+- **Fail-closed secret redaction** on every stored free-text field
 - **MCP stdio server** — 6 tools for AI agent integration via `stdlib/mcp`
 
 ## Build and Run
@@ -41,15 +42,14 @@ binary at ./mizuya
 | `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
-| `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--type] [--tag] [--since] [--until]`) |
+| `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--regex] [--type] [--tag] [--since] [--until]`) |
 | `context` | Entity + neighbors + observations, always newest-first (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
-| `prune-history` | Compact the append-only version log: `--keep N` and/or `--before YYYY-MM-DD`, `--dry-run`; newest version per entity always kept |
-| `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, same filters as `search`) |
+| `prune-history` | Compact the append-only version log: `--keep N` and/or `--before YYYY-MM-DD`, `--dry-run`; a version is pruned only when it breaks **both** bounds; newest version per entity always kept |
+| `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, `[--threshold 1-100]`, same filters as `search`) |
 | `list`    | List entities, optionally filtered by `--type`                          |
-| `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`) |
+| `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`); observations already marked `distilled` are skipped |
 | `import-okf` | Import an OKF knowledge bundle (`--bundle docs`, default: `docs/` with `index.md`/`log.md` skipped per SPEC §8/§9) into entities + `references` edges; idempotent |
 | `import-openwiki` | Deprecated alias for `import-okf --bundle openwiki` |
-| `distill` | Feed old high-reuse observations to an `openwiki -p` run (`--dry-run` to preview) |
 | `mcp`     | Start the MCP stdio server for AI agent access                          |
 
 All commands accept the global `--db <path>` (default `.mizuya/mizuya.db`)
@@ -61,19 +61,29 @@ similar print a ready-to-run drill-down line per hit (`→ context --id <id>
 
 ## Secret gate
 
-All writes pass a fail-closed secret scanner (`scanner.kuki`, pluggable
-`SecretScanner` interface, offline regex engine by default): detected
-tokens (AWS/GitHub/OpenAI/Slack/Google keys, private-key headers, JWTs,
-generic `key = ...` assignments) are redacted in place as
-`[REDACTED:<detector>]` before storing, and a scanner error refuses the
-write rather than reporting "clean". `observe` reports how many secrets
-were redacted (`redacted` field in `--json`, note in text/MCP output).
-Control with `MIZUYA_SECRET_SCAN=redact` (default) or `=off`; any other
-value is an error. Redactions are surfaced in text mode (`(redacted N
-secret(s))` on the observe line) and as a stderr `WARN` log line with
-detector names (never the secret), so clipping is visible even when stdout
-is piped. Storage sizing + history retention policy:
-[docs/STORAGE.md](docs/STORAGE.md).
+Every stored free-text field passes a fail-closed secret scanner
+(`scanner.kuki`, pluggable `SecretScanner` interface, offline regex engine
+by default): detected tokens (AWS/GitHub/OpenAI/Slack/Google keys,
+private-key headers, JWTs, generic `key = ...` assignments) are redacted in
+place as `[REDACTED:<detector>]` before storing, and a scanner error refuses
+the write rather than reporting "clean".
+
+Coverage: entity name, summary, and tags; observation text and its `source`
+label; relation labels; imported front-matter fields — all redacted in
+place. Entity type is a closed enum validated (and lowercased) at the
+CLI/MCP boundaries. A secret detected in the **entity id** refuses the
+upsert outright — ids are referential keys (relations, history, FTS,
+`entity://` URIs) and are never rewritten in place. `import-okf` covers its
+summaries and names via the same gate.
+
+`observe`/`add_observation` report how many secrets were redacted
+(`redacted` field in `--json`, note in text/MCP output) and echo the
+*stored* (redacted) text, never the raw input. Upserts redact the stored
+entity (that's what `--json` returns). Every redacted field also triggers
+a stderr `WARN` log line with detector names (never the secret), so clipping
+is visible even when stdout is piped. Control with `MIZUYA_SECRET_SCAN=redact`
+(default) or `=off`; any other value is an error. Storage sizing + history
+retention policy: [docs/STORAGE.md](docs/STORAGE.md).
 
 ## Append-only beliefs (funes-style)
 
@@ -101,6 +111,15 @@ The `mcp` subcommand starts a Model Context Protocol stdio server with
 | `search`         | Hybrid search (BM25 + vector RRF; optional type/tag/since/until) |
 | `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones); optional `history`, `since`, `until`, `hide_superseded` |
 | `similar`        | Vector similarity search by entity id or text; same filters as `search` |
+
+### MCP resources
+
+In addition to the tools, the server exposes two read-only resources:
+
+| Resource | Contents |
+|----------|----------|
+| `entity://list` | Snapshot of all entities (name, type, summary) as JSON — up to 500, newest-updated first |
+| `entity://{id}` | Full context for one entity — same payload as the `get_context` tool (entity, outgoing/incoming relations, observations, newest-first) |
 
 ### Claude Desktop configuration
 

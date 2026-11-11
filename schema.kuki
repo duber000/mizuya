@@ -28,15 +28,20 @@ const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, t
 
 const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (src, rel, dst))"
 
-# Observations are first-class rows so they can be edited, deleted, and
-# filtered individually. The id default uses uuid(7) for time-ordered
-# UUIDs (better B-tree locality than v4) — requires the uuid extension
-# registered before any INSERT.
+# Observations are first-class rows — timestamped, sourced, and linkable
+# to the correction that supersedes them. The id default uses uuid(7) for
+# time-ordered UUIDs (better B-tree locality than v4) — requires the uuid
+# extension registered before any INSERT.
 #
 # supersedes links an observation to the earlier observation it corrects
 # or replaces (append-only belief model: the old row stays, the new one
 # points at it, and the reader resolves which is current). ON DELETE SET
 # NULL keeps the log intact if the old row is ever scrubbed.
+#
+# distilled is a legacy marker (set to 1 by the removed `distill`
+# command, which fed an openwiki -p run). The column is kept so existing
+# databases with distilled=1 rows behave identically — `drift` skips them.
+# Nothing sets it anymore.
 const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')), distilled INTEGER NOT NULL DEFAULT 0, supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL)"
 
 # entity_history is the append-only version log for entities. Every
@@ -111,7 +116,7 @@ const idxEntityUpdated = "CREATE INDEX IF NOT EXISTS idx_entities_updated ON ent
 # composite index serves listObservations without a sort.
 const idxObsEntity = "CREATE INDEX IF NOT EXISTS idx_observations_entity_at ON observations(entity_id, at DESC)"
 
-# Index for filtering undistilled observations in distillation queries.
+# Index for the drift command's distilled = 0 filter.
 const idxObsDistilled = "CREATE INDEX IF NOT EXISTS idx_observations_distilled ON observations(distilled, at DESC) WHERE distilled = 0"
 
 # Version log lookups: newest-first history per entity, and as-of reads.

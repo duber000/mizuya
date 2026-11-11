@@ -143,7 +143,7 @@ func TestObservationRedactedAtWrite(t: reference testing.T)
         t,
         upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
     )
-    n, err := addObservation(pool, "duck", "aws key AKIAIOSFODNN7EXAMPLE was used", "conversation")
+    n, _, err := addObservation(pool, "duck", "aws key AKIAIOSFODNN7EXAMPLE was used", "conversation")
     test.AssertNoError(t, err)
     test.AssertEqual(t, n, 1)
 
@@ -346,3 +346,123 @@ func TestImportOKFRedactsSecrets(t: reference testing.T)
         "imported summary must be redacted",
     )
     test.AssertContains(t, e.Data, "[REDACTED:aws-access-key]")
+
+# --- secret gate scope: every stored free-text field ---
+
+# The name is redacted in place like the summary; tags are redacted
+# element-wise; the raw values never reach the row (or the FTS index,
+# which mirrors the same column).
+func TestUpsertRedactsNameAndTags(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    err := upsertEntity(
+        pool,
+        "deploy",
+        "config",
+        "Deploy key ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
+        "s",
+        list of string{"prod", "aws AKIAIOSFODNN7EXAMPLE"},
+    )
+    test.AssertNoError(t, err)
+    e, gerr := getEntity(pool, "deploy")
+    test.AssertNoError(t, gerr)
+    test.AssertContains(t, e.Name, "[REDACTED:github-token]")
+    test.AssertFalse(
+        t,
+        strContains(e.Name, "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab"),
+        "stored name must not contain the token",
+    )
+    test.AssertContains(t, e.Data, "[REDACTED:aws-access-key]")
+    test.AssertFalse(
+        t,
+        strContains(e.Data, "AKIAIOSFODNN7EXAMPLE"),
+        "stored tag must not contain the aws key",
+    )
+
+# A secret in the entity id cannot be redacted in place (ids are
+# referential keys — relations, history, FTS, entity:// URIs), so the
+# upsert is refused and nothing is stored.
+func TestUpsertRefusesSecretInID(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    err := upsertEntity(
+        pool,
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
+        "concept",
+        "evil",
+        "s",
+        empty list of string,
+    )
+    test.AssertError(t, err)
+    _, gerr := getEntity(pool, "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab")
+    test.AssertError(t, gerr)
+
+# The fail-closed gate honors MIZUYA_SECRET_SCAN=off exactly like the
+# redaction path does — nothing is scanned or refused.
+func TestSecretScanOffAllowsIDSecret(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Set("MIZUYA_SECRET_SCAN", "off") onerr discard
+
+    err := upsertEntity(
+        pool,
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
+        "concept",
+        "ok",
+        "s",
+        empty list of string,
+    )
+    test.AssertNoError(t, err)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+# The observation source label is free text too — it is redacted like
+# the text, and addObservation returns the stored (redacted) text so
+# callers echo what was actually written, never the raw input.
+func TestObservationRedactsSourceAndReturnsStoredText(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    test.AssertNoError(
+        t,
+        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
+    )
+    n, stored, err := addObservation(
+        pool,
+        "duck",
+        "aws key AKIAIOSFODNN7EXAMPLE was used",
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
+    )
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, n, 2)
+    test.AssertContains(t, stored, "[REDACTED:aws-access-key]")
+    test.AssertFalse(
+        t,
+        strContains(stored, "AKIAIOSFODNN7EXAMPLE"),
+        "returned text must be the stored (redacted) text",
+    )
+    obs, lerr := listObservations(pool, "duck")
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(obs), 1)
+    test.AssertContains(t, obs[0].Source, "[REDACTED:github-token]")
+
+# Relation labels are free text as well; the stored (redacted) rel is
+# returned so callers echo what was written.
+func TestRelateRedactsRel(t: reference testing.T)
+    pool, dir := p3Pool(t)
+    defer p3Close(pool, dir)
+    env.Unset("MIZUYA_SECRET_SCAN") onerr discard
+
+    test.AssertNoError(t, upsertEntity(pool, "a", "concept", "A", "s", empty list of string))
+    test.AssertNoError(t, upsertEntity(pool, "b", "concept", "B", "s", empty list of string))
+    rel, rerr := relate(pool, "a", "uses ghp_abcdefghijklmnopqrstuvwxyz0123456789ab", "b")
+    test.AssertNoError(t, rerr)
+    test.AssertContains(t, rel, "[REDACTED:github-token]")
+    outgoing, oerr := outgoingContext(pool, "a")
+    test.AssertNoError(t, oerr)
+    test.AssertEqual(t, len(outgoing), 1)
+    test.AssertContains(t, outgoing[0].Rel, "[REDACTED:github-token]")

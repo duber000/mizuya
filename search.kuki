@@ -189,12 +189,13 @@ func getEmbedding(pool: db.Pool, id: string) (list of float64, error)
         return empty, error "invalid embedding blob for entity {id}"
     return vec, empty
 
-# --- Toy embedding ---
+# --- Hash embedding fallback ---
 
 # hashEmbed maps text to a deterministic L2-normalized vector of the given
 # dimensionality. Tokens are lowercased and split on whitespace; each token
-# bumps v[fnv1a(token) % dim]. Good enough for demo similarity — fast database
-# queries cluster near the sqlite entity, Go tooling clusters near kukicha.
+# bumps v[djb2(token) % dim]. Not semantic — a deterministic offline fallback
+# for when no provider is configured (fast database queries still cluster
+# near the sqlite entity, Go tooling near kukicha).
 func hashEmbed(text: string, dim: int) list of float64
     v := make(list of float64, dim)
     lowered := strpkg.ToLower(text)

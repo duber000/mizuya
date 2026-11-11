@@ -22,7 +22,7 @@ Stability rules:
 - **Ordering pin:** the `observations` array in `context` / `get_context`
   output is always newest-first — `ORDER BY at DESC, id DESC` — and always
   includes superseded observations unless `hide_superseded` is set (they are
-  flagged via `superseded_by`). Consumers taking "the last N as most recent"
+  flagged via `superseded_by`). Consumers taking "the first N as most recent"
   can rely on this order.
 
 ## Shared shapes
@@ -55,7 +55,7 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 |---|---|
 | `init` | `{"status": "initialized", "db": string}` |
 | `upsert` | `Entity` |
-| `observe` | `{"status": "observed", "id": string, "text": string, "redacted": number /* secrets redacted by the gate */}` |
+| `observe` | `{"status": "observed", "id": string, "text": string /* the STORED (redacted) text */, "redacted": number /* secrets redacted by the gate */}` |
 | `relate` | `{"status": "related", "src": string, "rel": string, "dst": string}` |
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
 | `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "history"?: HistoryRow[]}` — observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
@@ -65,7 +65,6 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |
 | `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |
 | `import-openwiki` | `{"status": "imported", "entities": number, "links": number}` (deprecated alias for `import-okf --bundle openwiki`; shape unchanged) |
-| `distill` | `{"status": "no-candidates"}` or `{"status": "dry-run", "candidates": number, "observations": number, "prompt": string}` or `{"status": "distilled", "candidates": number, "observations": number, "output": string}` |
 | `mcp` | no `--json`; stdio is JSON-RPC (MCP). Logs go to stderr, never stdout |
 
 Text mode additionally prints, after each search/similar result table, one
@@ -76,4 +75,15 @@ ready-to-run drill-down line per hit: `→ context --id <id> --history`.
 The MCP equivalents return the same shapes as JSON text: `search` → `SearchHit[]`,
 `get_context` → the `context` payload, `similar` → `SimilarHit[]`,
 `upsert_entity` → `Entity`. `add_observation` / `relate` return short
-confirmation text (`observed: ...`, `related: ...`).
+confirmation text (`observed: ...`, `related: ...`) echoing the *stored*
+(redacted) values — never the raw input.
+
+## MCP resources
+
+Two read-only resources are exposed in addition to the tools. Resource read
+failures surface as MCP resource errors, not as JSON text.
+
+| Resource | Payload |
+|---|---|
+| `entity://list` | `Entity[]` — same shape as `list --json` (capped at 500, newest-updated first) |
+| `entity://{id}` | the shallow `get_context` payload (`entity`, `outgoing`, `incoming`, `observations`) — observations newest-first, same ordering pin as the tool |
