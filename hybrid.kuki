@@ -7,7 +7,6 @@ petiole main
 import "stdlib/db"
 import "stdlib/errors" as errs
 import "stdlib/maps"
-import "stdlib/slice"
 import "stdlib/sort"
 
 # rrfK is the Reciprocal Rank Fusion constant. The standard value of 60

@@ -81,7 +81,7 @@ func startMCP(dbPath: string) error
     mcpDBPath = dbPath
 
     router := mcp.NewRouter()
-    entityTemplate := "entity://" + "{" + "id}"
+    entityTemplate := 'entity://{id}'
     router.AddResource(entityTemplate, func(argName: string, partial: string, prevArgs: map of string to string) list of string
         pool := openDB(mcpDBPath) onerr return empty list of string
         defer db.Close(pool)
@@ -115,7 +115,7 @@ func registerResources(server: reference mcp.Server)
         "All knowledge-graph entities",
         mcp.TextResourceFunc(listEntitiesResource),
     )
-    entityTemplate := "entity://" + "{" + "id}"
+    entityTemplate := 'entity://{id}'
     mcp.TextResourceTemplate(
         server,
         entityTemplate,

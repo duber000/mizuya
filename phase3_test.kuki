@@ -267,7 +267,7 @@ func writeOKFBundle(t: reference testing.T, base: string)
         filepath.Join(dir, "log.md"),
     ))
     test.AssertNoError(t, files.WriteString(
-        "---\ntype: Reference\ntitle: Architecture\ndescription: System architecture overview\nresource: /docs/reference/ARCHITECTURE.md\ntags: [architecture]\ngenerated: {by: mistral-vibe/mistral, at: 2026-11-03T21:00:00Z}\nstatus: stable\nstale_after: 2027-02-01T00:00:00Z\n---\n\n# Architecture\n\nSee the [install guide](../guides/install.md).\n",
+        "---\ntype: Reference\ntitle: Architecture\ndescription: System architecture overview\nresource: /docs/reference/ARCHITECTURE.md\ntags: [architecture]\ngenerated: \{by: mistral-vibe/mistral, at: 2026-11-03T21:00:00Z\}\nstatus: stable\nstale_after: 2027-02-01T00:00:00Z\n---\n\n# Architecture\n\nSee the [install guide](../guides/install.md).\n",
         filepath.Join(dir, "reference", "ARCHITECTURE.md"),
     ))
     test.AssertNoError(t, files.WriteString(

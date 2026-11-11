@@ -9,7 +9,12 @@ Stability rules:
 
 - Field names and types below are frozen. New *optional* fields may be added
   (additive-only); nothing is renamed or removed without a major version bump.
-- Errors in `--json` mode print as `{"error": "<message>"}` with exit code 1.
+- Errors in `--json` mode print as `{"error": "<message>"}`. Runtime failures exit 1;
+  usage mistakes (a missing required flag, an invalid flag combination or value)
+  exit 2 — same JSON shape, different exit code, so a `--json` consumer reads every
+  failure as JSON while distinguishing usage errors from runtime errors. In text mode
+  a runtime failure prints `error: <message>` (exit 1) and a usage mistake prints
+  `usage error: <message>` or the parse failure plus help (exit 2).
 - Drill-down coordinate: any search/similar hit's `id` is the stable handle —
   `mizuya context --id <id> --json` (CLI) or the MCP `get_context` tool with
   `id: <hit.id>` returns its observations (each with its own `id`) and,

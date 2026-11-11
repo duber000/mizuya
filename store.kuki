@@ -3,6 +3,7 @@
 
 petiole main
 
+import "stdlib/cli"
 import "stdlib/crypto"
 import "stdlib/datetime"
 import "stdlib/db"
@@ -296,11 +297,11 @@ func entityStateAt(pool: db.Pool, id: string, at: string) (HistoryRow, error)
 # would be pruned).
 func pruneHistory(pool: db.Pool, keep: int, before: string, dryRun: bool) (int, error)
     if keep < 0
-        return 0, error "--keep must be >= 0, got {keep}"
+        return 0, cli.UsageFail("--keep must be >= 0, got {keep}")
     if before isnt empty and not validDate(before)
-        return 0, error "--before must be YYYY-MM-DD, got {before}"
+        return 0, cli.UsageFail("--before must be YYYY-MM-DD, got {before}")
     if keep equals 0 and (before is empty)
-        return 0, error "nothing to prune: pass --keep N and/or --before YYYY-MM-DD"
+        return 0, cli.UsageFail("nothing to prune: pass --keep N and/or --before YYYY-MM-DD")
 
     # ranked assigns rn = 1.. per entity, newest first (uuid7 id breaks
     # same-millisecond ties). Delete only rows that are BOTH past the

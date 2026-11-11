@@ -51,7 +51,7 @@ func TestEntityContract(t: reference testing.T)
         Id: "duck",
         Type: "concept",
         Name: "Donald Duck",
-        Data: "{\"summary\":\"s\",\"tags\":[]}",
+        Data: '{"summary":"s","tags":[]}',
         CreatedAt: "2026-11-05 17:04:18",
         UpdatedAt: "2026-11-05 17:05:00",
     }

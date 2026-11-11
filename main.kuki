@@ -3,7 +3,7 @@
 # A runnable Kukicha example that demonstrates:
 #   * stdlib/sqlite + stdlib/db for schema, CRUD, and JSON columns
 #   * native SQLite FTS5 (BM25 ranking, content= virtual tables, triggers)
-#   * sqlite.CreateFunction to register a pure-Kukicha cosine-distance UDF
+#   * the vec1 SQLite extension for native cosine-distance KNN vector search
 #   * a toy deterministic embedder so `similar` works with zero external deps
 #
 # Usage:
@@ -86,26 +86,26 @@ func makeInitCmd() reference cli.Command
 
 func makeUpsertCmd() reference cli.Command
     return cli.NewCommand("upsert", "Create or update an entity")
-        |> .StringFlag("id", "Entity id (slug)", "")
+        |> .RequiredFlag("id", "Entity id (slug)")
         |> .StringFlag("type", "Entity type ({validEntityTypes()})", "concept")
-        |> .StringFlag("name", "Human-readable name", "")
+        |> .RequiredFlag("name", "Human-readable name")
         |> .StringFlag("summary", "One-line summary", "")
         |> .StringFlag("tags", "Comma-separated tags", "")
         |> .ActionE(doUpsert)
 
 func makeObserveCmd() reference cli.Command
     return cli.NewCommand("observe", "Append an observation to an entity")
-        |> .StringFlag("id", "Entity id", "")
-        |> .StringFlag("text", "Observation text", "")
+        |> .RequiredFlag("id", "Entity id")
+        |> .RequiredFlag("text", "Observation text")
         |> .StringFlag("source", "Observation source", "conversation")
         |> .StringFlag("supersedes", "Id of an observation on this entity that this one corrects", "")
         |> .ActionE(doObserve)
 
 func makeRelateCmd() reference cli.Command
     return cli.NewCommand("relate", "Create a typed edge between two entities")
-        |> .StringFlag("src", "Source entity id", "")
+        |> .RequiredFlag("src", "Source entity id")
         |> .StringFlag("rel", "Relation label (uses, depends_on, part_of, ...)", "related_to")
-        |> .StringFlag("dst", "Destination entity id", "")
+        |> .RequiredFlag("dst", "Destination entity id")
         |> .ActionE(doRelate)
 
 func makeSearchCmd() reference cli.Command
@@ -113,7 +113,7 @@ func makeSearchCmd() reference cli.Command
         "search",
         "Hybrid search across entities (BM25 + vector RRF, or regex with --regex)",
     )
-        |> .StringFlag("query", "FTS5 query (or regex pattern with --regex)", "")
+        |> .RequiredFlag("query", "FTS5 query (or regex pattern with --regex)")
         |> .IntFlag("limit", "Max results", 10)
         |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
         |> .StringFlag("type", "Restrict to this entity type", "")
@@ -124,7 +124,7 @@ func makeSearchCmd() reference cli.Command
 
 func makeContextCmd() reference cli.Command
     return cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
-        |> .StringFlag("id", "Entity id", "")
+        |> .RequiredFlag("id", "Entity id")
         |> .IntFlag("depth", "Hops to traverse via the closure vtable (1 = immediate neighbors)", 1)
         |> .BoolFlag("history", "Include the entity's append-only version history", false)
         |> .StringFlag("since", "Only observations on/after this YYYY-MM-DD", "")
@@ -324,11 +324,7 @@ func doInit(args: cli.Args) error
 
 func doUpsert(args: cli.Args) error
     id := cli.GetString(args, "id")
-    if id is empty
-        return error "--id is required"
     name := cli.GetString(args, "name")
-    if name is empty
-        return error "--name is required"
     etype := cli.GetString(args, "type")
     summary := cli.GetString(args, "summary")
     tags := parseTags(cli.GetString(args, "tags"))
@@ -353,8 +349,6 @@ func doUpsert(args: cli.Args) error
 func doObserve(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
-    if (id is empty) or (text is empty)
-        return error "--id and --text are required"
     source := strpkg.Or(cli.GetString(args, "source"), "conversation")
     supersedes := cli.GetString(args, "supersedes")
 
@@ -382,8 +376,8 @@ func doRelate(args: cli.Args) error
     src := cli.GetString(args, "src")
     rel := cli.GetString(args, "rel")
     dst := cli.GetString(args, "dst")
-    if (src is empty) or (rel is empty) or (dst is empty)
-        return error "--src, --rel, and --dst are required"
+    if rel is empty
+        return cli.UsageFail("--rel must not be empty")
 
     pool := openPool(args) onerr explain "cannot open database"
 
@@ -401,8 +395,6 @@ func doRelate(args: cli.Args) error
 
 func doSearch(args: cli.Args) error
     query := cli.GetString(args, "query")
-    if query is empty
-        return error "--query is required"
     limit := cli.GetIntOr(args, "limit", 10)
 
     pool := openPool(args) onerr explain "cannot open database"
@@ -434,8 +426,6 @@ func doSearch(args: cli.Args) error
 
 func doContext(args: cli.Args) error
     id := cli.GetString(args, "id")
-    if id is empty
-        return error "--id is required"
 
     pool := openPool(args) onerr explain "cannot open database"
 
@@ -527,7 +517,7 @@ func doSimilar(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
     if (id is empty) and (text is empty)
-        return error "either --id or --text is required"
+        return cli.UsageFail("either --id or --text is required")
     limit := cli.GetIntOr(args, "limit", 5)
     threshold := cli.GetIntOr(args, "threshold", 0)
 
@@ -605,7 +595,7 @@ type OKFDoc
 func doImportOKF(args: cli.Args) error
     rest := cli.GetRest(args, "dir")
     if rest is empty
-        return error "usage: mizuya import-okf <dir>"
+        return cli.UsageFail("import-okf requires a <dir> path argument")
     baseDir := rest[0]
     bundle := cli.GetString(args, "bundle")
     if strpkg.TrimSpace(bundle) is empty
@@ -634,7 +624,7 @@ func doImportOpenWiki(args: cli.Args) error
     log.Warn("import-openwiki is deprecated; use import-okf (--bundle docs)")
     rest := cli.GetRest(args, "dir")
     if rest is empty
-        return error "usage: mizuya import-openwiki <dir>"
+        return cli.UsageFail("import-openwiki requires a <dir> path argument")
     baseDir := rest[0]
 
     if not files.Exists(files.Join(baseDir, "openwiki"))
@@ -848,10 +838,10 @@ func doDistill(args: cli.Args) error
         return
 
     if openwikiCmd is empty
-        return error "--openwiki-cmd is required (or use --dry-run)"
+        return cli.UsageFail("--openwiki-cmd is required (or use --dry-run)")
 
     if openwikiCmd isnt "openwiki"
-        return error "--openwiki-cmd must be 'openwiki' (got: {openwikiCmd})"
+        return cli.UsageFail("--openwiki-cmd must be 'openwiki' (got: {openwikiCmd})")
 
     # Shell out to openwiki with the assembled prompt.
     ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Minute)
