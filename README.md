@@ -190,7 +190,7 @@ export MIZUYA_EMBED_API_KEY=sk-...
 
 ```bash
 kukicha test . -count=1                          # unit + contract + recall-benchmark tests
-kukicha test . -run=XXX -bench=. -benchtime=200x # latency benchmarks (use -flag=value form)
+kukicha test . -run=XXX -bench=. -benchtime=200x # latency benchmarks
 ```
 
 `bench_test.kuki` also runs `TestLabeledRecall` (floor: recall@5 >= 0.80) —

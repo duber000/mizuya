@@ -9,55 +9,16 @@
 #     entities/queries; do not tune the threshold to make it pass.
 #   * BenchmarkHybridSearch / BenchmarkFtsSearch / BenchmarkSimilar —
 #     latency benchmarks over a seeded temp database (hash embeddings,
-#     fully deterministic). Run with: kukicha test . -bench . -benchtime 100x
+#     fully deterministic). Run with: kukicha test . -bench . -benchtime=100x
 #
-# Self-contained (does not rely on helpers from other *_test.kuki files).
+# Shared pool helpers live in testutil_test.kuki.
 
 petiole main
 
-import "os"
-import "path/filepath"
 import "stdlib/db"
 import "stdlib/slice"
-import "stdlib/sqlite"
 import "stdlib/test"
 import "testing"
-
-import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
-import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
-import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
-import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
-import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
-import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
-import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
-
-func openBenchPool(tb: testing.TB) (db.Pool, string)
-    dir, err := os.MkdirTemp("", "mizuya-bench-")
-    if err isnt empty
-        tb.Fatalf("mktemp: %v", err)
-        return db.Pool{}, ""
-    path := filepath.Join(dir, "bench.db")
-    pool, oerr := sqlite.OpenWithExtensions(
-        path,
-        map of string to string{"journal_mode": "WAL"},
-        vec1ext.Register,
-        regexpext.Register,
-        fts5ext.Register,
-        uuidext.Register,
-        statsext.Register,
-        spellfixext.Register,
-        unicodeext.Register,
-    )
-    if oerr isnt empty
-        tb.Fatalf("open: %v", oerr)
-        return db.Pool{}, ""
-    if ierr := initDB(pool); ierr isnt empty
-        tb.Fatalf("initDB: %v", ierr)
-    return pool, dir
-
-func closeBenchPool(pool: db.Pool, dir: string)
-    db.Close(pool) onerr discard
-    os.RemoveAll(dir) onerr discard
 
 # benchCorpus is a fixed set of entities with distinctive vocabularies,
 # shared by the labeled recall test and the latency benchmarks.
@@ -176,8 +137,8 @@ func recallAt(hits: list of SearchHit, want: list of string, k: int) float64
 const minAvgRecall: float64 = 0.8
 
 func TestLabeledRecall(t: reference testing.T)
-    pool, dir := openBenchPool(t)
-    defer closeBenchPool(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     seedBenchCorpus(t, pool)
 
     k := 5
@@ -202,7 +163,7 @@ func TestLabeledRecall(t: reference testing.T)
 # --- Latency benchmarks ---
 
 func seedBenchScale(b: reference testing.B, n: int) (db.Pool, string)
-    pool, dir := openBenchPool(b)
+    pool, dir := openTestPool(b)
     vocab := list of string{
         "database",
         "search",
@@ -226,7 +187,7 @@ func seedBenchScale(b: reference testing.B, n: int) (db.Pool, string)
 
 func BenchmarkHybridSearch(b: reference testing.B)
     pool, dir := seedBenchScale(b, 500)
-    defer closeBenchPool(pool, dir)
+    defer closeTestPool(pool, dir)
     b.ResetTimer()
     for i from 0 to b.N
         _, err := hybridSearch(pool, "vector database search index", 10)
@@ -235,7 +196,7 @@ func BenchmarkHybridSearch(b: reference testing.B)
 
 func BenchmarkFtsSearch(b: reference testing.B)
     pool, dir := seedBenchScale(b, 500)
-    defer closeBenchPool(pool, dir)
+    defer closeTestPool(pool, dir)
     b.ResetTimer()
     for i from 0 to b.N
         _, err := ftsSearch(pool, "vector database search index", 10)
@@ -244,7 +205,7 @@ func BenchmarkFtsSearch(b: reference testing.B)
 
 func BenchmarkSimilar(b: reference testing.B)
     pool, dir := seedBenchScale(b, 500)
-    defer closeBenchPool(pool, dir)
+    defer closeTestPool(pool, dir)
     vec, err := embedText("vector database search index")
     if err isnt empty
         b.Fatalf("embed: %v", err)

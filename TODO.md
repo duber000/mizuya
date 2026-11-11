@@ -83,8 +83,13 @@ The candidates below are ordered by expected payoff for mizuya specifically.
   the rebuild config — same schema, no app changes. Pays off past a few
   thousand entities.
 
-- [ ] **Drop the `vec_raw` side-copy column** if a future vec1 release lets
-  the indexed `vector` column read back as the original BLOB.
+- [ ] **Drop the `embeddings_raw` side store** if a future vec1 release lets
+  the indexed `vector` column read back as the original BLOB. (The vtab
+  carries only `vector, entity_id`; the plain `embeddings_raw` table holds
+  the same bytes plus model/dim provenance — it exists because the vendored
+  vec1 build SIGSEGVs on BLOB metadata and returns shifted bytes on
+  meta-constrained reads. Removing it halves per-entity vector storage:
+  `2×dim×4B` → `dim×4B`.)
 
 ## Funes lessons (from huggingface/funes) — adoption tracking
 
@@ -121,11 +126,15 @@ Phase 3 — safety, idempotency, measurement — **done**:
 
 - [x] Fail-closed secret scanner (`scanner.kuki`): pluggable `SecretScanner`
       interface, offline regex engine by default, error-never-clean contract.
-      Gates `observe` (reports `redacted` count) and `upsert` summaries
-      (covers `import-okf` and the deprecated `import-openwiki` alias).
-      `MIZUYA_SECRET_SCAN=redact|off`; any other
-      value errors. Tested in `phase3_test.kuki` (detectors, redaction,
-      fail-closed stub, modes, write-path redaction).
+      Gates every stored free-text field — entity name/summary/tags,
+      observation text/source, relation labels, imported front-matter
+      fields (covers `import-okf` and the deprecated `import-openwiki`
+      alias) — and refuses the write when a secret appears in the entity
+      id (ids are referential keys; never rewritten in place).
+      `MIZUYA_SECRET_SCAN=redact|off`; any other value errors.
+      Tested in `phase3_test.kuki` (detectors, redaction, fail-closed
+      stub, modes, write-path redaction, and the field-coverage tests:
+      name/tag redaction, source redaction, rel redaction, id refusal).
 - [x] Idempotent import: `importOKF` extracted as a testable pure function
       (OKF v0.2 bundle: `index.md`/`log.md` skipped, slug = bundle-relative
       path, section/type/status tags); `importOpenWiki` is a thin wrapper
@@ -155,9 +164,12 @@ Phase 3 — safety, idempotency, measurement — **done**:
 - [x] Observation ordering pinned: `context`/`get_context` observations are
       always newest-first (`at DESC, id DESC`) — documented in
       docs/output-contract.md, pinned by TestObservationOrderingPinned.
-- [x] Redaction surfaced everywhere: --json `redacted` count, text-mode
-      "(redacted N secret(s))" note, and a stderr WARN log line with detector
-      names (never the secret).
+- [x] Redaction surfaced everywhere: observe `--json` `redacted` count +
+      text-mode "(redacted N secret(s))" note, and a stderr WARN log line
+      (detector names, never the secret) for every redacted field on any
+      write. Upsert echoes the redacted entity it stored — its `--json`
+      returns the redacted `Entity` with no count field (shape is
+      contract-pinned); the stderr WARN is the upsert path's visibility.
 - [x] History lifecycle: `prune-history --keep N [--before YYYY-MM-DD]
       [--dry-run]` (newest version per entity always kept; fail-closed with
       neither flag) + recommended retention policy in docs/STORAGE.md.

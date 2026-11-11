@@ -10,46 +10,8 @@ import "os"
 import "path/filepath"
 import "stdlib/db"
 import "stdlib/slice"
-import "stdlib/sqlite"
 import "stdlib/test"
 import "testing"
-
-import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
-import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
-import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
-import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
-import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
-import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
-import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
-
-# openTestPool creates a fresh temp database with all extensions and the
-# full schema. Returns the pool and the temp dir (caller removes it).
-func openTestPool(t: reference testing.T) (db.Pool, string)
-    dir, err := os.MkdirTemp("", "mizuya-test-")
-    if err isnt empty
-        t.Fatalf("mktemp: %v", err)
-        return db.Pool{}, ""
-    path := filepath.Join(dir, "test.db")
-    pool, oerr := sqlite.OpenWithExtensions(
-        path,
-        map of string to string{"journal_mode": "WAL"},
-        vec1ext.Register,
-        regexpext.Register,
-        fts5ext.Register,
-        uuidext.Register,
-        statsext.Register,
-        spellfixext.Register,
-        unicodeext.Register,
-    )
-    if oerr isnt empty
-        t.Fatalf("open: %v", oerr)
-        return db.Pool{}, ""
-    test.AssertNoError(t, initDB(pool))
-    return pool, dir
-
-func closeTestPool(pool: db.Pool, dir: string)
-    db.Close(pool) onerr discard
-    os.RemoveAll(dir) onerr discard
 
 # todayDate returns the current UTC date as YYYY-MM-DD, straight from
 # SQLite so tests and schema share one clock.

@@ -40,7 +40,7 @@ kukicha build .
 kukicha test . -count=1
 
 # Benchmarks + labeled recall check
-kukicha test . -run=XXX -bench=. -benchtime=200x   # NB: use -flag=value form (see gotchas)
+kukicha test . -run=XXX -bench=. -benchtime=200x   # latency benchmarks
 
 go test ./...   # also works on the transpiled artifacts
 ```
@@ -77,12 +77,12 @@ Design principle behind all of it (from funes' RATIONALE): defer to the reader �
 
 ## Kukicha gotchas observed (2026-11-05, kukicha v0.86.4)
 
-Full write-up with repros: `/tmp/KUKICHA_BUGS.md`.
+Full write-up with repros, and per-item verification on v0.86.9 (2026-11-11): [KUKICHA-BUGS.md](KUKICHA-BUGS.md).
 
-1. **Bug:** `kukicha test . -bench . -benchtime 200x` treats `200x` as a package target (`FAIL 200x [setup failed]`) — space-separated values of *unrecognized* forwarded flags are not forwarded. Use `-benchtime=200x`.
-2. **Bug/edge:** a `*_test.kuki` cannot see helpers from a sibling `*_test.kuki` (`semantic/undefined` at check time), though `go test` merges them. Keep test files self-contained or move shared helpers into a non-test `.kuki` file.
-3. **Footgun:** `sort.By`/`ByKey`/`ByKeyDesc` return a sorted *copy*, they do not sort in place. Always bind: `ids := xs |> sort.ByKeyDesc(f)`. Discarding the result silently keeps map order (this caused nondeterministic RRF ranking in `hybridSearch` until fixed).
-4. **Tests:** `test.AssertEqual` uses `reflect.DeepEqual` — `int64` (from `db.Count` etc.) vs `int` literal fails even when equal; cast (`count as int`). `regex.MustCompile` rejects non-literal patterns (security lint) — use `regex.Compile` for data-driven patterns. `env.Set`/`Unset` return errors — add `onerr discard` in tests.
+1. **Bug (FIXED in v0.86.9, verified 2026-11-11):** `kukicha test . -bench . -benchtime 200x` treated `200x` as a package target (`FAIL 200x [setup failed]`) — space-separated values of *unrecognized* forwarded flags were not forwarded. Exact repro now passes (200 iterations); this repo's docs no longer carry the `-flag=value` workaround.
+2. **Bug/edge (FIXED in v0.86.9, verified 2026-11-11):** a `*_test.kuki` could not see helpers from a sibling `*_test.kuki` (`semantic/undefined` at check time), though `go test` merged them. Scratch-package check passes on v0.86.9; shared helpers are consolidated in `testutil_test.kuki`.
+3. **Footgun (still live on v0.86.9):** `sort.By`/`ByKey`/`ByKeyDesc` return a sorted *copy*, they do not sort in place. Always bind: `ids := xs |> sort.ByKeyDesc(f)`. Discarding the result silently keeps map order (this caused nondeterministic RRF ranking in `hybridSearch` until fixed).
+4. **Tests (still live on v0.86.9):** `test.AssertEqual` uses `reflect.DeepEqual` — `int64` (from `db.Count` etc.) vs `int` literal fails even when equal; cast (`count as int`). `regex.MustCompile` rejects non-literal patterns (security lint) — use `regex.Compile` for data-driven patterns. `env.Set`/`Unset` return errors — add `onerr discard` in tests.
 
 <!-- kukicha:start -->
 # Kukicha

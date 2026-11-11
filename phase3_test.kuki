@@ -1,53 +1,16 @@
 # mizuya — phase 3 tests: fail-closed secret gate + idempotent import.
 #
-# Self-contained on purpose: a *_test.kuki cannot see helpers from a
-# sibling *_test.kuki at check time (kukicha limitation), so this file
-# carries its own pool helper.
+# Shared pool helpers live in testutil_test.kuki (sibling *_test.kuki
+# files can see them on v0.86.9+).
 
 petiole main
 
-import "os"
 import "path/filepath"
 import "stdlib/db"
 import "stdlib/env"
 import "stdlib/files"
-import "stdlib/sqlite"
 import "stdlib/test"
 import "testing"
-
-import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
-import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
-import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
-import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
-import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
-import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
-import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
-
-func p3Pool(t: reference testing.T) (db.Pool, string)
-    dir, err := os.MkdirTemp("", "mizuya-p3-")
-    if err isnt empty
-        t.Fatalf("mktemp: %v", err)
-        return db.Pool{}, ""
-    pool, oerr := sqlite.OpenWithExtensions(
-        filepath.Join(dir, "test.db"),
-        map of string to string{"journal_mode": "WAL"},
-        vec1ext.Register,
-        regexpext.Register,
-        fts5ext.Register,
-        uuidext.Register,
-        statsext.Register,
-        spellfixext.Register,
-        unicodeext.Register,
-    )
-    if oerr isnt empty
-        t.Fatalf("open: %v", oerr)
-        return db.Pool{}, ""
-    test.AssertNoError(t, initDB(pool))
-    return pool, dir
-
-func p3Close(pool: db.Pool, dir: string)
-    db.Close(pool) onerr discard
-    os.RemoveAll(dir) onerr discard
 
 # --- secret scanner ---
 
@@ -135,8 +98,8 @@ func TestRedactSecretsMode(t: reference testing.T)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
 func TestObservationRedactedAtWrite(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     test.AssertNoError(
@@ -158,8 +121,8 @@ func TestObservationRedactedAtWrite(t: reference testing.T)
     )
 
 func TestUpsertRedactsSummary(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     err := upsertEntity(
@@ -195,8 +158,8 @@ func writeWiki(t: reference testing.T, base: string)
     ))
 
 func TestImportOpenWikiIdempotent(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     base := filepath.Join(dir, "wiki")
@@ -225,8 +188,8 @@ func TestImportOpenWikiIdempotent(t: reference testing.T)
     test.AssertEqual(t, len(hist), 1)
 
 func TestImportOpenWikiRedactsSecrets(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     base := filepath.Join(dir, "wiki")
@@ -276,8 +239,8 @@ func writeOKFBundle(t: reference testing.T, base: string)
     ))
 
 func TestImportOKFIdempotent(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     base := filepath.Join(dir, "proj")
@@ -323,8 +286,8 @@ func TestImportOKFIdempotent(t: reference testing.T)
     test.AssertEqual(t, len(hist), 1)
 
 func TestImportOKFRedactsSecrets(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     base := filepath.Join(dir, "proj")
@@ -353,8 +316,8 @@ func TestImportOKFRedactsSecrets(t: reference testing.T)
 # element-wise; the raw values never reach the row (or the FTS index,
 # which mirrors the same column).
 func TestUpsertRedactsNameAndTags(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     err := upsertEntity(
@@ -385,8 +348,8 @@ func TestUpsertRedactsNameAndTags(t: reference testing.T)
 # referential keys — relations, history, FTS, entity:// URIs), so the
 # upsert is refused and nothing is stored.
 func TestUpsertRefusesSecretInID(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     err := upsertEntity(
@@ -404,8 +367,8 @@ func TestUpsertRefusesSecretInID(t: reference testing.T)
 # The fail-closed gate honors MIZUYA_SECRET_SCAN=off exactly like the
 # redaction path does — nothing is scanned or refused.
 func TestSecretScanOffAllowsIDSecret(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Set("MIZUYA_SECRET_SCAN", "off") onerr discard
 
     err := upsertEntity(
@@ -423,8 +386,8 @@ func TestSecretScanOffAllowsIDSecret(t: reference testing.T)
 # the text, and addObservation returns the stored (redacted) text so
 # callers echo what was actually written, never the raw input.
 func TestObservationRedactsSourceAndReturnsStoredText(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     test.AssertNoError(
@@ -453,8 +416,8 @@ func TestObservationRedactsSourceAndReturnsStoredText(t: reference testing.T)
 # Relation labels are free text as well; the stored (redacted) rel is
 # returned so callers echo what was written.
 func TestRelateRedactsRel(t: reference testing.T)
-    pool, dir := p3Pool(t)
-    defer p3Close(pool, dir)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
     test.AssertNoError(t, upsertEntity(pool, "a", "concept", "A", "s", empty list of string))

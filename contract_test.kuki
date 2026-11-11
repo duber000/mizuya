@@ -2,9 +2,8 @@
 #
 # These pin the exact --json shape of every exported row type, so the
 # stability promise in docs/output-contract.md is enforced by CI: a field
-# rename or removal fails here. Self-contained on purpose — a *_test.kuki
-# cannot see helpers from a sibling *_test.kuki (kukicha checker treats
-# each test file in isolation).
+# rename or removal fails here. Shared helpers live in testutil_test.kuki;
+# this file just has no need for them.
 
 petiole main
 
