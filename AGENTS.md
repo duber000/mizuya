@@ -64,26 +64,6 @@ These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki
 - `prune-history` is the ONLY deliberate deletion from `entity_history` (retention policy in `docs/STORAGE.md`); it always keeps the newest version per entity and fails closed with neither `--keep` nor `--before`.
 - Secret redaction must stay visible in every mode: observe `--json` `redacted` count and text-mode note, and a stderr `WARN` for *every* redacted field on any write (name, summary, tags, observation text/source, relation labels; detector names only — never log `SecretFinding.Raw`). Upsert echoes the redacted `Entity` it stored.
 
-## Current work — adopting funes (huggingface/funes) lessons
-
-Tracker lives in [TODO.md](TODO.md) ("Funes lessons" section). Status:
-
-- **Phase 1 — append-only beliefs, read-time synthesis: DONE** (commit `18e5f32`). `entity_history` version log, `observations.supersedes`, `--since/--until/--as-of`, drift rework, `updated_at`+RRF `score` on hits, tests + labeled recall benchmark. See README "Append-only beliefs".
-- **Phase 2 — stable output contract + agent ergonomics: DONE.** `docs/output-contract.md` pins every command's `--json` shape (additive-only rule); enforced by `contract_test.kuki`. Text-mode search/similar print a ready-to-run `→ context --id <id> --history` drill-down line per hit; a hit's `id` is the stable drill coordinate (MCP: `get_context`). Keep the "defaults + token cost in tool descriptions" convention for new MCP tools.
-- **Phase 3 — safety, idempotency, measurement: DONE.** Fail-closed secret gate in `scanner.kuki` (pluggable `SecretScanner`, regex default, error-never-clean; `MIZUYA_SECRET_SCAN=redact|off`) gating `observe` and upsert summaries (covers import). Idempotent OKF bundle import: `import-okf <dir> [--bundle docs]` (`importOKF` core, tested; `import-openwiki` kept as a deprecated alias) — one entity per concept doc, slug = bundle-relative path, `index.md`/`log.md` skipped, `references` edges from markdown links. `docs/STORAGE.md` cost model: per-entity ≈ text + FTS copy + `2×dim×4` B vectors. All three funes phases are now adopted; TODO.md tracks the tested-and-abandoned retrieval list.
-- **Consumer feedback round (foamy/courier): DONE** (commit `2518f4d`) — pinned observation ordering, redaction surfaced in all modes, `prune-history` + retention policy, `superseded_by` flag / `hide_superseded`. See rule 4 above and TODO.md "Consumer feedback".
-
-Design principle behind all of it (from funes' RATIONALE): defer to the reader — keep the raw record intact, resolve obsolescence at read time, no LLM in the ingest path, recall is pulled not pushed.
-
-## Kukicha gotchas observed (2026-11-05, kukicha v0.86.4)
-
-Full write-up with repros, and per-item verification on v0.86.9 (2026-11-11): [KUKICHA-BUGS.md](KUKICHA-BUGS.md).
-
-1. **Bug (FIXED in v0.86.9, verified 2026-11-11):** `kukicha test . -bench . -benchtime 200x` treated `200x` as a package target (`FAIL 200x [setup failed]`) — space-separated values of *unrecognized* forwarded flags were not forwarded. Exact repro now passes (200 iterations); this repo's docs no longer carry the `-flag=value` workaround.
-2. **Bug/edge (FIXED in v0.86.9, verified 2026-11-11):** a `*_test.kuki` could not see helpers from a sibling `*_test.kuki` (`semantic/undefined` at check time), though `go test` merged them. Scratch-package check passes on v0.86.9; shared helpers are consolidated in `testutil_test.kuki`.
-3. **Footgun (still live on v0.86.9):** `sort.By`/`ByKey`/`ByKeyDesc` return a sorted *copy*, they do not sort in place. Always bind: `ids := xs |> sort.ByKeyDesc(f)`. Discarding the result silently keeps map order (this caused nondeterministic RRF ranking in `hybridSearch` until fixed).
-4. **Tests (still live on v0.86.9):** `test.AssertEqual` uses `reflect.DeepEqual` — `int64` (from `db.Count` etc.) vs `int` literal fails even when equal; cast (`count as int`). `regex.MustCompile` rejects non-literal patterns (security lint) — use `regex.Compile` for data-driven patterns. `env.Set`/`Unset` return errors — add `onerr discard` in tests.
-
 <!-- kukicha:start -->
 # Kukicha
 
