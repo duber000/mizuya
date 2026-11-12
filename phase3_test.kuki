@@ -102,10 +102,8 @@ func TestObservationRedactedAtWrite(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
     n, _, err := addObservation(pool, "duck", "aws key AKIAIOSFODNN7EXAMPLE was used", "conversation")
     test.AssertNoError(t, err)
     test.AssertEqual(t, n, 1)
@@ -125,7 +123,7 @@ func TestUpsertRedactsSummary(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
-    err := upsertEntity(
+    redacted, err := upsertEntity(
         pool,
         "deploy",
         "config",
@@ -134,6 +132,7 @@ func TestUpsertRedactsSummary(t: reference testing.T)
         empty list of string,
     )
     test.AssertNoError(t, err)
+    test.AssertEqual(t, redacted, 1)
     e, gerr := getEntity(pool, "deploy")
     test.AssertNoError(t, gerr)
     test.AssertContains(t, e.Data, "[REDACTED:github-token]")
@@ -320,7 +319,7 @@ func TestUpsertRedactsNameAndTags(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
-    err := upsertEntity(
+    redacted, err := upsertEntity(
         pool,
         "deploy",
         "config",
@@ -329,6 +328,7 @@ func TestUpsertRedactsNameAndTags(t: reference testing.T)
         list of string{"prod", "aws AKIAIOSFODNN7EXAMPLE"},
     )
     test.AssertNoError(t, err)
+    test.AssertEqual(t, redacted, 2)
     e, gerr := getEntity(pool, "deploy")
     test.AssertNoError(t, gerr)
     test.AssertContains(t, e.Name, "[REDACTED:github-token]")
@@ -352,7 +352,7 @@ func TestUpsertRefusesSecretInID(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
-    err := upsertEntity(
+    _, err := upsertEntity(
         pool,
         "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
         "concept",
@@ -371,7 +371,7 @@ func TestSecretScanOffAllowsIDSecret(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Set("MIZUYA_SECRET_SCAN", "off") onerr discard
 
-    err := upsertEntity(
+    _, err := upsertEntity(
         pool,
         "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
         "concept",
@@ -390,10 +390,8 @@ func TestObservationRedactsSourceAndReturnsStoredText(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
+    _, uerr2 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr2)
     n, stored, err := addObservation(
         pool,
         "duck",
@@ -420,8 +418,10 @@ func TestRelateRedactsRel(t: reference testing.T)
     defer closeTestPool(pool, dir)
     env.Unset("MIZUYA_SECRET_SCAN") onerr discard
 
-    test.AssertNoError(t, upsertEntity(pool, "a", "concept", "A", "s", empty list of string))
-    test.AssertNoError(t, upsertEntity(pool, "b", "concept", "B", "s", empty list of string))
+    _, uerr3 := upsertEntity(pool, "a", "concept", "A", "s", empty list of string)
+    test.AssertNoError(t, uerr3)
+    _, uerr4 := upsertEntity(pool, "b", "concept", "B", "s", empty list of string)
+    test.AssertNoError(t, uerr4)
     rel, rerr := relate(pool, "a", "uses ghp_abcdefghijklmnopqrstuvwxyz0123456789ab", "b")
     test.AssertNoError(t, rerr)
     test.AssertContains(t, rel, "[REDACTED:github-token]")

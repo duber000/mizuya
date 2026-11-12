@@ -352,17 +352,50 @@ func doUpsert(args: cli.Args) error
 
     defer db.Close(pool)
 
-    upsertEntity(pool, id, etype, name, summary, tags) onerr explain "cannot upsert entity"
+    redacted, uerr := upsertEntity(pool, id, etype, name, summary, tags)
+    if uerr isnt empty
+        return errs.Wrap(uerr, "cannot upsert entity")
 
-    # Regenerate the embedding only if the corpus actually changed.
-    reEmbedIfChanged(pool, id) onerr explain "cannot refresh embedding"
+    # Regenerate the embedding only if the corpus actually changed. A
+    # provider outage must not fail the command — the write committed, and
+    # exit-non-zero would tell a retrying caller its write was lost. The
+    # row keeps its text and gains a vector on a later touch (content_hash
+    # only advances on a successful embed), so report the deferral instead.
+    _, embedErr := reEmbedIfChanged(pool, id)
+    if embedErr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            id,
+            "err",
+            "{embedErr}",
+        )
 
     e := getEntity(pool, id) onerr explain "cannot fetch upserted entity"
 
     if cli.IsJSON(args)
-        printJSON(e)
+        if embedErr isnt empty
+            # Additive-only marker keys on the Entity payload (the contract
+            # allows optional fields): consumers learn the embedding is
+            # deferred instead of reading exit 1 as "write failed".
+            printJSON(map of string to any{
+                "id": e.Id,
+                "type": e.Type,
+                "name": e.Name,
+                "data": e.Data,
+                "created_at": e.CreatedAt,
+                "updated_at": e.UpdatedAt,
+                "embedding": "deferred",
+                "embedding_error": "{embedErr}",
+            })
+        else
+            printJSON(e)
     else
-        print("{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {name}")
+        note := if redacted > 0 then "  {color.Yellow("(redacted {redacted} secret(s))")}" else ""
+        embedNote := if embedErr isnt empty then "  {color.Yellow("(embedding deferred)")}" else ""
+        print(
+            "{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {e.Name}{note}{embedNote}",
+        )
     return empty
 
 func doObserve(args: cli.Args) error
@@ -379,19 +412,39 @@ func doObserve(args: cli.Args) error
     if oerr isnt empty
         return error "cannot add observation: {oerr:w}{suggestionsFor(pool, id)}"
 
-    # Re-embed: observations are part of the entity's text corpus.
-    reEmbedIfChanged(pool, id) onerr explain "cannot refresh embedding"
+    # Re-embed: observations are part of the entity's text corpus. A
+    # provider outage must not fail the command — the write committed, and
+    # exit-non-zero would tell a retrying caller its write was lost (an
+    # append-only store would gain a duplicate observation). The row keeps
+    # its text and gains a vector on a later touch, so report the deferral
+    # instead.
+    _, embedErr := reEmbedIfChanged(pool, id)
+    if embedErr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            id,
+            "err",
+            "{embedErr}",
+        )
 
     if cli.IsJSON(args)
-        printJSON(map of string to any{
+        payload := map of string to any{
             "status": "observed",
             "id": id,
             "text": storedText,
             "redacted": redacted,
-        })
+        }
+        if embedErr isnt empty
+            payload["embedding"] = "deferred"
+            payload["embedding_error"] = "{embedErr}"
+        printJSON(payload)
     else
         note := if redacted > 0 then "  {color.Yellow("(redacted {redacted} secret(s))")}" else ""
-        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(storedText)}{note}")
+        embedNote := if embedErr isnt empty then "  {color.Yellow("(embedding deferred)")}" else ""
+        print(
+            "{color.Green("observed")} {color.Bold(id)}  {color.Dim(storedText)}{note}{embedNote}",
+        )
     return empty
 
 func doRelate(args: cli.Args) error
@@ -767,8 +820,9 @@ func importOKF(pool: db.Pool, baseDir: string, bundleDir: string, sourceTag: str
             if not dup
                 tags = append(tags, t)
 
-        upsertEntity(pool, slug, etype, name, summary, tags) onerr
-            log.Warn("import-okf: upsert failed", "slug", slug, "err", error)
+        _, uerr := upsertEntity(pool, slug, etype, name, summary, tags)
+        if uerr isnt empty
+            log.Warn("import-okf: upsert failed", "slug", slug, "err", "{uerr}")
             continue
 
         reEmbedIfChanged(pool, slug) onerr discard

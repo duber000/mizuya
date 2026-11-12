@@ -24,14 +24,15 @@ func TestUpsertAppendsHistory(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(t, upsertEntity(
+    _, uerr := upsertEntity(
         pool,
         "duck",
         "concept",
         "Donald Duck",
         "v1: kids cartoon",
         list of string{"disney"},
-    ))
+    )
+    test.AssertNoError(t, uerr)
 
     hist, err := listEntityHistory(pool, "duck", 50)
     test.AssertNoError(t, err)
@@ -39,27 +40,29 @@ func TestUpsertAppendsHistory(t: reference testing.T)
     test.AssertContains(t, hist[0].Data, "v1")
 
     # A no-op upsert (identical state) must not spam the log.
-    test.AssertNoError(t, upsertEntity(
+    _, uerr2 := upsertEntity(
         pool,
         "duck",
         "concept",
         "Donald Duck",
         "v1: kids cartoon",
         list of string{"disney"},
-    ))
+    )
+    test.AssertNoError(t, uerr2)
     hist, err = listEntityHistory(pool, "duck", 50)
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(hist), 1)
 
     # A real change appends the new state; the old one stays in the log.
-    test.AssertNoError(t, upsertEntity(
+    _, uerr3 := upsertEntity(
         pool,
         "duck",
         "concept",
         "Donald Duck",
         "v2: also a meme",
         list of string{"disney"},
-    ))
+    )
+    test.AssertNoError(t, uerr3)
     hist, err = listEntityHistory(pool, "duck", 50)
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(hist), 2)
@@ -76,14 +79,10 @@ func TestEntityStateAt(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
-    )
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "v2", empty list of string),
-    )
+    _, uerr4 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
+    test.AssertNoError(t, uerr4)
+    _, uerr5 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v2", empty list of string)
+    test.AssertNoError(t, uerr5)
 
     # As of today (end of day): the latest version.
     today, terr := todayDate(pool)
@@ -111,14 +110,10 @@ func TestObservationSupersedes(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "other", "concept", "Other", "s", empty list of string),
-    )
+    _, uerr6 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr6)
+    _, uerr7 := upsertEntity(pool, "other", "concept", "Other", "s", empty list of string)
+    test.AssertNoError(t, uerr7)
 
     _, _, aerr := addObservation(pool, "duck", "first belief", "conversation")
     test.AssertNoError(t, aerr)
@@ -153,10 +148,8 @@ func TestListObservationsRange(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
+    _, uerr8 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr8)
     _, _, aerr := addObservation(pool, "duck", "one", "conversation")
     test.AssertNoError(t, aerr)
     _, _, aerr = addObservation(pool, "duck", "two", "conversation")
@@ -178,30 +171,33 @@ func TestListObservationsRange(t: reference testing.T)
 # --- search filters ---
 
 func seedSearchEntities(t: reference testing.T, pool: db.Pool)
-    test.AssertNoError(t, upsertEntity(
+    _, uerr9 := upsertEntity(
         pool,
         "sqlite",
         "tool",
         "SQLite",
         "Embedded SQL database engine",
         list of string{"db", "embedded"},
-    ))
-    test.AssertNoError(t, upsertEntity(
+    )
+    test.AssertNoError(t, uerr9)
+    _, uerr10 := upsertEntity(
         pool,
         "kukicha",
         "project",
         "Kukicha",
         "Go superset with pipes and onerr",
         list of string{"lang"},
-    ))
-    test.AssertNoError(t, upsertEntity(
+    )
+    test.AssertNoError(t, uerr10)
+    _, uerr11 := upsertEntity(
         pool,
         "vec1",
         "tool",
         "vec1",
         "Vector extension for KNN search",
         list of string{"db", "vector"},
-    ))
+    )
+    test.AssertNoError(t, uerr11)
 
 func TestSearchFilters(t: reference testing.T)
     pool, dir := openTestPool(t)
@@ -257,10 +253,8 @@ func TestListDrift(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
-    )
+    _, uerr12 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
+    test.AssertNoError(t, uerr12)
     _, _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
@@ -322,10 +316,8 @@ func TestObservationOrderingPinned(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
+    _, uerr13 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr13)
     _, _, aerr := addObservation(pool, "duck", "first", "conversation")
     test.AssertNoError(t, aerr)
     _, _, aerr = addObservation(pool, "duck", "second", "conversation")
@@ -350,10 +342,8 @@ func TestSupersededByFlag(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
+    _, uerr14 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr14)
     _, _, aerr := addObservation(pool, "duck", "stale fact", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
@@ -385,10 +375,8 @@ func TestPruneHistory(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
-    )
+    _, uerr15 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
+    test.AssertNoError(t, uerr15)
     # Insert 4 more versions with deterministic future timestamps so the
     # newest-first order is v5, v4, v3, v2, then the real upsert (v1).
     for i from 2 through 5
@@ -443,10 +431,8 @@ func TestPruneHistoryBeforeKeepsNewest(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
-    )
+    _, uerr16 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
+    test.AssertNoError(t, uerr16)
     db.Exec(
         pool,
         "INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', ?, '2026-01-01 10:00:00.000')",
@@ -471,10 +457,8 @@ func TestPruneHistoryKeepAndBeforeUnion(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string),
-    )
+    _, uerr17 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
+    test.AssertNoError(t, uerr17)
     # Two future versions; the upsert's own row stays at rn = 3 (old).
     # Deterministic: R1 (2030-01-02) is old relative to the 2028 cutoff
     # but inside keep = 2; the upsert row (2026) is old AND beyond it.
@@ -516,10 +500,8 @@ func TestOpenPoolAtSelfInitializes(t: reference testing.T)
     pool, oerr := openPoolAt(path)
     test.AssertNoError(t, oerr)
 
-    test.AssertNoError(
-        t,
-        upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string),
-    )
+    _, uerr18 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr18)
     _, _, aerr := addObservation(pool, "duck", "hello", "conversation")
     test.AssertNoError(t, aerr)
 

@@ -64,6 +64,25 @@ workflow builds images on tag push.
   string stripping. `--json` shape unchanged:
   `{"status": "imported", "entities": N, "links": N}` (output contract).
 
+### Fixes
+- `upsert` text mode echoed the raw `--name` it had just redacted and
+  stored (secret leak onto stdout for anyone piping the confirmation).
+  It now prints the stored (redacted) name, and appends the same
+  `(redacted N secret(s))` suffix `observe` uses. `upsertEntity` returns
+  the redaction count (name + summary + tags), mirroring `addObservation`.
+- `observe`/`upsert` committed the row, then exited 1 when the embedding
+  provider was unreachable (`cannot refresh embedding`) — a retry trap for
+  an append-only store, newly reachable since `MIZUYA_EMBED_*` is bound
+  from the environment. Both commands (and the MCP `add_observation` /
+  `upsert_entity` tools) now report success: exit 0 / non-error tool
+  result, a stderr `WARN`, and — in CLI `--json` — additive
+  `"embedding": "deferred"` / `"embedding_error": string` keys. The write
+  committed, the stored content hash only advances on a successful
+  refresh, and the vector lands on a later touch. The `add_observation`
+  confirmation text appends `(embedding deferred)`; `upsert_entity`
+  returns the plain `Entity` (deferral on stderr only). See
+  `docs/output-contract.md`.
+
 ## 0.2.0 — 2026-11-05
 
 First tagged release (0.1.0 was never tagged). Adopts the core lessons from

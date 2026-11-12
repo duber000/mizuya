@@ -38,15 +38,22 @@ func validDate(s: string) bool
 # lost — it is resolved at read time (see listEntityHistory / entityStateAt).
 # No-op upserts (state identical to the latest logged version) skip the
 # history append so the log is not spammed with duplicates.
-func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summary: string, tags: list of string) error
+#
+# Returns the number of secrets the gate redacted (name + summary + tags
+# combined) so callers can surface redaction visibility the way
+# addObservation does.
+func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summary: string, tags: list of string) (int, error)
     if rErr := refuseIfSecrets(id, "entity id"); rErr isnt empty
-        return rErr
-    cleanName, _, nErr := redactSecrets(name)
+        return 0, rErr
+    redacted := 0
+    cleanName, nName, nErr := redactSecrets(name)
     if nErr isnt empty
-        return nErr
-    cleanSummary, _, sErr := redactSecrets(summary)
+        return 0, nErr
+    redacted = redacted + nName
+    cleanSummary, nSummary, sErr := redactSecrets(summary)
     if sErr isnt empty
-        return sErr
+        return 0, sErr
+    redacted = redacted + nSummary
     name = cleanName
     summary = cleanSummary
     cleanTags := empty list of string
@@ -54,9 +61,10 @@ func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summar
         t = strpkg.TrimSpace(t)
         if t is empty
             continue
-        c, _, tErr := redactSecrets(t)
+        c, nTag, tErr := redactSecrets(t)
         if tErr isnt empty
-            return tErr
+            return 0, tErr
+        redacted = redacted + nTag
         cleanTags = append(cleanTags, c)
     tags = cleanTags
 
@@ -92,8 +100,8 @@ func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summar
         return empty
     )
     if err isnt empty
-        return err
-    return empty
+        return 0, err
+    return redacted, empty
 
 # getEntity fetches an entity by id. Returns an error if no row matches.
 func getEntity(pool: db.Pool, id: string) (Entity, error)

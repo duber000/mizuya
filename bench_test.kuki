@@ -93,7 +93,7 @@ func benchCorpus() list of benchEntity
 # fallback — deterministic, no provider needed).
 func seedBenchCorpus(tb: testing.TB, pool: db.Pool)
     for e in benchCorpus()
-        if err := upsertEntity(pool, e.id, e.etype, e.name, e.summary, e.tags); err isnt empty
+        if _, err := upsertEntity(pool, e.id, e.etype, e.name, e.summary, e.tags); err isnt empty
             tb.Fatalf("upsert %v: %v", e.id, err)
         if _, err := reEmbedIfChanged(pool, e.id); err isnt empty
             tb.Fatalf("embed %v: %v", e.id, err)
@@ -179,7 +179,7 @@ func seedBenchScale(b: reference testing.B, n: int) (db.Pool, string)
     for i from 0 to n
         id := "bench-{i}"
         summary := "{vocab[i % len(vocab)]} {vocab[i * 7 % len(vocab)]} entity number {i} for benchmark seeding"
-        if err := upsertEntity(pool, id, "concept", "Bench {i}", summary, list of string{"bench"}); err isnt empty
+        if _, err := upsertEntity(pool, id, "concept", "Bench {i}", summary, list of string{"bench"}); err isnt empty
             b.Fatalf("upsert: %v", err)
         if _, err := reEmbedIfChanged(pool, id); err isnt empty
             b.Fatalf("embed: %v", err)

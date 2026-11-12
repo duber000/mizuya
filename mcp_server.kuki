@@ -201,9 +201,22 @@ func handleUpsertEntity(args: upsertEntityArgs) (any, error)
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    upsertEntity(pool, args.Id, etype, args.Name, args.Summary, args.Tags) onerr return mcp.ErrorResult("upsert failed: {error}"), empty
+    _, uerr := upsertEntity(pool, args.Id, etype, args.Name, args.Summary, args.Tags)
+    if uerr isnt empty
+        return mcp.ErrorResult("upsert failed: {uerr}"), empty
 
-    reEmbed(pool, args.Id) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+    # The write committed; a provider outage must not report failure —
+    # an agent that retries on failure would append a duplicate. Log the
+    # deferral (stderr) and return the stored entity; the vector refreshes
+    # on a later touch (content_hash only advances on a successful embed).
+    if rerr := reEmbed(pool, args.Id); rerr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            args.Id,
+            "err",
+            "{rerr}",
+        )
 
     e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("fetch failed: {error}"), empty
     return entityJSON(e), empty
@@ -247,10 +260,22 @@ func handleAddObservation(args: addObservationArgs) (any, error)
     if oerr isnt empty
         return mcp.ErrorResult("observe failed: {oerr}{suggestionsFor(pool, args.EntityId)}"), empty
 
-    reEmbed(pool, args.EntityId) onerr return mcp.ErrorResult("embedding failed: {error}"), empty
+    # The write committed; a provider outage must not report failure —
+    # an agent that retries on failure would append a duplicate observation.
+    # Surface the deferral in the result text instead of an error.
+    embedNote := ""
+    if rerr := reEmbed(pool, args.EntityId); rerr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            args.EntityId,
+            "err",
+            "{rerr}",
+        )
+        embedNote = " (embedding deferred)"
 
     note := if redacted > 0 then " (redacted {redacted} secret(s) before storing)" else ""
-    return mcp.TextResult("observed: {storedText}{note}"), empty
+    return mcp.TextResult("observed: {storedText}{note}{embedNote}"), empty
 
 # --- Tool: relate ---
 

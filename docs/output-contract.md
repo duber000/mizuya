@@ -9,6 +9,13 @@ Stability rules:
 
 - Field names and types below are frozen. New *optional* fields may be added
   (additive-only); nothing is renamed or removed without a major version bump.
+  Two such optional fields exist today: `upsert` / `observe` add
+  `"embedding": "deferred"` and `"embedding_error": string` to their
+  `--json` payloads when the write committed but the embedding provider
+  could not be reached. The command still exits 0 — non-zero means the
+  write did not land — and a stderr WARN line reports the deferral in
+  every mode. The row keeps its text and gains a vector on a later touch
+  (the stored content hash only advances on a successful refresh).
 - Errors in `--json` mode print as `{"error": "<message>"}`. Runtime failures exit 1;
   usage mistakes (a missing required flag, an invalid flag combination or value)
   exit 2 — same JSON shape, different exit code, so a `--json` consumer reads every
@@ -54,8 +61,8 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 | Command | Shape |
 |---|---|
 | `init` | `{"status": "initialized", "db": string}` |
-| `upsert` | `Entity` |
-| `observe` | `{"status": "observed", "id": string, "text": string /* the STORED (redacted) text */, "redacted": number /* secrets redacted by the gate */}` |
+| `upsert` | `Entity` — plus two optional additive keys when the post-commit embedding refresh failed: `"embedding": "deferred"` and `"embedding_error": string` (see note below) |
+| `observe` | `{"status": "observed", "id": string, "text": string /* the STORED (redacted) text */, "redacted": number /* secrets redacted by the gate */}` — plus the same two optional `embedding` keys when the refresh failed |
 | `relate` | `{"status": "related", "src": string, "rel": string, "dst": string}` |
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
 | `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "history"?: HistoryRow[]}` — observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
@@ -76,7 +83,12 @@ The MCP equivalents return the same shapes as JSON text: `search` → `SearchHit
 `get_context` → the `context` payload, `similar` → `SimilarHit[]`,
 `upsert_entity` → `Entity`. `add_observation` / `relate` return short
 confirmation text (`observed: ...`, `related: ...`) echoing the *stored*
-(redacted) values — never the raw input.
+(redacted) values — never the raw input. When the embedding provider is
+unreachable but the write committed, both write tools still succeed (never an
+error result — an agent retrying would duplicate the append): they log a
+stderr WARN, `add_observation` appends `(embedding deferred)` to its
+confirmation text, and `upsert_entity` returns the plain `Entity` (deferral
+only on stderr).
 
 ## MCP resources
 
