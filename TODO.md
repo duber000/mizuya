@@ -187,8 +187,17 @@ Phase 3 — safety, idempotency, measurement — **done**:
       --media` now points here on dim mismatch. Verified end-to-end on a
       hash-fallback → embeddinggemma-2:740m migration (store 64→768d);
       TestLabeledRecall recall@5 = 1.00 (floor 0.80) with the new
-      provider. Default stays the offline hash fallback; full
-      multimodal is env-var opt-in.
+      provider.
+- [x] Hard switch: `embeddinggemma-2:740m` via Ollama is now the DEFAULT
+      (no env needed; one shared text/image/audio/video 768-d space).
+      `MIZUYA_EMBED_PROVIDER=hash` is the offline escape hatch;
+      unreachable/missing model degrades to write-commits-with-deferral,
+      never a failed write. Existing hash-dim stores must run
+      `reembed` once after the switch (64→768d; `similar --media`
+      refuses mixed dims and says so). Unit tests pin provider=hash;
+      labeled recall pins hash only when the env doesn't select a
+      provider (measure the default with `MIZUYA_EMBED_PROVIDER=ollama`).
+      Internal users only — the default change is a breaking change.
 - [x] P3 — video: `attach --file clip.mp4` frame-samples with ffmpeg
       (≤10 evenly spaced frames, ~1 fps for short clips) and mean-pools
       into one vector on the attachment (nothing new in the query path,

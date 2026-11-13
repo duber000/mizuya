@@ -41,8 +41,8 @@ func attachArgs(file: string) AttachArgs
     }
 
 func TestAttachMediaNativeCreatesEntity(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -68,8 +68,8 @@ func TestAttachMediaNativeCreatesEntity(t: reference testing.T)
     test.AssertEqual(t, atts[0].Sha256, res.Sha256)
 
 func TestAttachIsIdempotentForSameBytes(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -93,8 +93,8 @@ func TestAttachIsIdempotentForSameBytes(t: reference testing.T)
     test.AssertEqual(t, len(hist), 1)
 
 func TestAttachCaptionRedaction(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -115,8 +115,8 @@ func TestAttachCaptionRedaction(t: reference testing.T)
     test.AssertContains(t, e.Data, "[REDACTED:")
 
 func TestAttachToExistingAndMissingEntity(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -188,8 +188,8 @@ func TestMeanPoolNormalizeEmpty(t: reference testing.T)
     test.AssertEqual(t, len(out), 0)
 
 func TestAttachVideoWithoutFfmpegFailsEarly(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     t.Setenv("PATH", "")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
@@ -204,8 +204,8 @@ func TestAttachVideoWithoutFfmpegFailsEarly(t: reference testing.T)
     test.AssertContains(t, "{err}", "ffmpeg")
 
 func TestAttachVideoEndToEnd(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     if shell.RequireCommand("ffmpeg") isnt empty
         t.Skip("ffmpeg not in PATH")
     pool, dir := openTestPool(t)
@@ -278,8 +278,8 @@ func TestAttachResultContract(t: reference testing.T)
     })
 
 func TestSearchMediaReturnsNearest(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -320,8 +320,8 @@ func TestSearchMediaReturnsNearest(t: reference testing.T)
     test.AssertTrue(t, kindHits is empty)
 
 func TestSearchMediaEmptyStore(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 

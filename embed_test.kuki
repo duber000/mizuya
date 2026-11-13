@@ -1,0 +1,42 @@
+# mizuya — tests for the embedding configuration boundary.
+# The hard default is Ollama serving embeddinggemma-2:740m;
+# MIZUYA_EMBED_PROVIDER=hash is the explicit offline escape hatch.
+# These pin the user-visible defaults so the switch can't silently
+# regress.
+
+petiole main
+
+import "stdlib/test"
+import "testing"
+
+func TestLoadEmbedConfigDefaultIsEmbeddingGemma2(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
+    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_URL", "")
+    t.Setenv("MIZUYA_EMBED_API_KEY", "")
+    cfg := loadEmbedConfig()
+    test.AssertEqual(t, cfg.provider, "ollama")
+    test.AssertEqual(t, cfg.model, "embeddinggemma-2:740m")
+    test.AssertEqual(t, embedModel(), "embeddinggemma-2:740m")
+
+func TestLoadEmbedConfigKeepsColonModelTag(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "ollama")
+    t.Setenv("MIZUYA_EMBED_MODEL", "embeddinggemma-2:740m")
+    cfg := loadEmbedConfig()
+    test.AssertEqual(t, cfg.model, "embeddinggemma-2:740m")
+    test.AssertEqual(t, cfg.provider, "ollama")
+
+func TestLoadEmbedConfigHashHatch(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    cfg := loadEmbedConfig()
+    test.AssertEqual(t, cfg.provider, "hash")
+    test.AssertEqual(t, embedModel(), EmbedModel)
+
+    vec, err := embedText("hello world")
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(vec), EmbedDim)
+
+    _, mErr := embedMedia("image", list of byte{1, 2, 3})
+    test.AssertError(t, mErr)
+    test.AssertContains(t, "{mErr}", "hash")

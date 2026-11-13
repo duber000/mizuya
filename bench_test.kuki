@@ -15,6 +15,7 @@
 
 petiole main
 
+import "os"
 import "stdlib/db"
 import "stdlib/slice"
 import "stdlib/test"
@@ -89,9 +90,14 @@ func benchCorpus() list of benchEntity
         },
     }
 
-# seedBenchCorpus upserts the corpus and embeds every entity (hash
-# fallback — deterministic, no provider needed).
+# seedBenchCorpus upserts the corpus and embeds every entity. Pins the
+# hash provider when the environment doesn't already select one —
+# offline determinism by default; MIZUYA_EMBED_PROVIDER=ollama … opts
+# into measuring the real default path.
 func seedBenchCorpus(tb: testing.TB, pool: db.Pool)
+    if os.Getenv("MIZUYA_EMBED_PROVIDER") is empty
+        tb.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+        tb.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     for e in benchCorpus()
         if _, err := upsertEntity(pool, e.id, e.etype, e.name, e.summary, e.tags); err isnt empty
             tb.Fatalf("upsert %v: %v", e.id, err)
@@ -163,6 +169,9 @@ func TestLabeledRecall(t: reference testing.T)
 # --- Latency benchmarks ---
 
 func seedBenchScale(b: reference testing.B, n: int) (db.Pool, string)
+    if os.Getenv("MIZUYA_EMBED_PROVIDER") is empty
+        b.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+        b.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(b)
     vocab := list of string{
         "database",

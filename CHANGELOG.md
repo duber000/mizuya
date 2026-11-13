@@ -5,6 +5,23 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+### Breaking
+- **The default embedding provider is now Ollama serving
+  `embeddinggemma-2:740m`** — previously the deterministic hash fallback
+  (offline, 64-d). Out-of-box behavior changes: writes now attempt a
+  localhost:11434 embed (a couple of seconds each, cached after first
+  use), multimodal is on by default (`attach`, `similar --media`,
+  `similar-media`/`similar_media` work with zero configuration after one
+  `ollama pull embeddinggemma-2:740m`), and existing vector stores must
+  run `mizuya reembed` once (64→768-d; mixed stores are refused by the
+  dim guards). Unreachable/missing model degrades to writes-commits-with
+  a stderr WARN deferral — never a blocked write. The offline escape
+  hatch is now `MIZUYA_EMBED_PROVIDER=hash` (previously the default).
+  `MIZUYA_EMBED_MODEL` for `ollama` now defaults to
+  `embeddinggemma-2:740m` (was `nomic-embed-text`). Unit tests and the
+  labeled recall harness are hermetic (pin `hash` when the env doesn't
+  override). Internal users only.
+
 ### Safety
 - Secret gate extended to every stored free-text field: entity name,
   summary, and tags; observation text and its `source` label; relation

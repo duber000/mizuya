@@ -39,8 +39,8 @@ type ReembedResult
 func reembedEverything(pool: db.Pool) (ReembedResult, error)
     cfg := loadEmbedConfig()
     providerNote := ""
-    if cfg.provider is empty
-        providerNote = "no provider configured; entity embeddings rebuilt with the hash fallback, media vectors left untouched"
+    if cfg.provider equals "hash"
+        providerNote = "hash provider selected; entity embeddings rebuilt with the deterministic fallback, media vectors left untouched"
     else if not strpkg.Contains(strpkg.ToLower(cfg.model), "embeddinggemma")
         providerNote = "note: media needs a multimodal provider (embeddinggemma-2); a non-multimodal provider fails the media pass — the rebuild aborts before touching the store in that case"
 
@@ -57,7 +57,7 @@ func reembedEverything(pool: db.Pool) (ReembedResult, error)
 
     # Pass 2 — media vectors (skipped entirely on the hash fallback).
     mediaVecs := empty map of string to list of float64
-    if cfg.provider isnt empty
+    if cfg.provider isnt "hash"
         mediaRows := db.Query(pool, "SELECT id, kind, path FROM media") |> db.ScanAll of mediaSlimRow
         for m in mediaRows
             bytes := files.Read(m.Path) onerr return ReembedResult{}, error "cannot read media asset {m.Path} (row {m.Id}): {error:w} (no store was modified)"
@@ -68,7 +68,7 @@ func reembedEverything(pool: db.Pool) (ReembedResult, error)
     if err := rebuildEntityVecTable(pool, entityVecs, dim); err isnt empty
         return ReembedResult{}, error "cannot rebuild entity vector store: {err:w}"
     mediaRebuilt := 0
-    if cfg.provider isnt empty
+    if cfg.provider isnt "hash"
         if err := rebuildMediaVecTable(pool, mediaVecs); err isnt empty
             return ReembedResult{}, error "cannot rebuild media vector store: {err:w}"
         mediaRebuilt = len(mediaVecs)

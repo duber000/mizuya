@@ -28,9 +28,9 @@ A mizuya database is one SQLite file (WAL mode) with:
 - **Text floor**: name + summary + tags ≈ 0.2–1 KB typical; FTS5 index adds
   roughly another copy of the indexed text.
 - **Vector floor**: `2 × dim × 4 B` per entity (vec1 row + raw side copy).
-  With the default hash fallback (dim 64) that's 512 B; with a real model
-  it dominates: nomic-embed-text (768) → 6 KB, text-embedding-3-small
-  (1536) → 12 KB.
+  The default is now `embeddinggemma-2:740m` (768) → 6 KB; the hash
+  fallback (`MIZUYA_EMBED_PROVIDER=hash`, dim 64) is 512 B;
+  text-embedding-3-small (1536) → 12 KB.
 - **History**: a no-op upsert appends nothing (dedup against the latest
   logged version), so history cost is proportional to *actual changes*, not
   writes.

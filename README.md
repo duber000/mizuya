@@ -19,7 +19,7 @@ place to keep everything you've learned within reach.
 - **vec1 virtual table** for vector KNN with cosine distance, plus a plain
   `embeddings_raw` side store (the vendored vec1 build is write/search-only)
 - **Binary BLOB vector storage** — compact little-endian float32 encoding
-- **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback) — including multimodal text/image/audio/video in one shared 768-d space via `embeddinggemma-2`
+- **Real embeddings** via Ollama `embeddinggemma-2:740m` (the default — one shared 768-d text/image/audio/video space) or any OpenAI-compatible API; `MIZUYA_EMBED_PROVIDER=hash` for the offline escape hatch
 - **Media attachments** — images, audio, and frame-sampled video stored sha256-addressed under `<db dir>/assets/`, embedded as 768-d vectors (`attach`); bytes are never secret-scanned and every output says so
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
 - **Append-only version log** (`entity_history`) + observation supersession
@@ -107,16 +107,15 @@ table records entity link, mime, size, and a caption that passes the
 same fail-closed secret gate as observations. Media bytes are **never**
 secret-scanned — every output marks attachments `[bytes unscanned]`.
 
-Embeddings use the configured provider. For the shared text/image/audio/video
-vector space (768-d), use Ollama with EmbeddingGemma 2 — media and text
-retrieval then live in one space:
+Embeddings use the configured provider. The default (Ollama +
+`embeddinggemma-2:740m`) is one shared text/image/audio/video space, so
+no extra configuration is needed — media and text retrieval already live
+in one space:
 
 ```bash
 ollama pull embeddinggemma-2:740m
-MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m \
-  mizuya attach --file screenshot.png --id deploy-console --caption "red modal after rollback"
-MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m \
-  mizuya similar --media screenshot.png --limit 5
+mizuya attach --file screenshot.png --id deploy-console --caption "red modal after rollback"
+mizuya similar --media screenshot.png --limit 5
 ```
 
 One attachment = one 768-d vector in the `media_vec` index; the caption
@@ -197,8 +196,6 @@ Or if you've built the binary:
       "command": "/path/to/mizuya",
       "args": ["mcp", "--db", "/path/to/mizuya.db"],
       "env": {
-        "MIZUYA_EMBED_PROVIDER": "ollama",
-        "MIZUYA_EMBED_MODEL": "nomic-embed-text",
         "MIZUYA_SECRET_SCAN": "redact"
       }
     }
@@ -208,25 +205,35 @@ Or if you've built the binary:
 
 ## Embedding Providers
 
-By default mizuya uses a deterministic hash embedding (works offline, no
-dependencies). For real semantic search, configure an embedding provider:
+By default mizuya uses **Ollama serving `embeddinggemma-2:740m`** — one
+shared 768-d text/image/audio/video space, multimodal out of the box.
+The first run needs the model pulled once:
+
+```bash
+ollama pull embeddinggemma-2:740m
+```
+
+If Ollama is unreachable or the model is missing, **writes still commit** —
+the vector is deferred with a stderr `WARN` and lands on a later touch
+(embedding is never a write-blocking dependency). `MIZUYA_EMBED_PROVIDER=hash`
+is the escape hatch: a deterministic 64-d bag-of-words fallback, no
+semantics — for offline machines without Ollama, not the default.
 
 | Variable | Values | Default |
 |----------|--------|---------|
-| `MIZUYA_EMBED_PROVIDER` | `ollama`, `openai`, `voyage`, `cohere`, or empty (hash fallback) | empty |
+| `MIZUYA_EMBED_PROVIDER` | `ollama`, `openai`, `voyage`, `cohere`, or `hash` (offline hatch) | `ollama` |
 | `MIZUYA_EMBED_URL` | Base URL for the provider | `http://localhost:11434` (ollama), `https://api.openai.com` (openai) |
-| `MIZUYA_EMBED_MODEL` | Model name | `nomic-embed-text` (ollama), `text-embedding-3-small` (openai) |
+| `MIZUYA_EMBED_MODEL` | Model name | `embeddinggemma-2:740m` (ollama), `text-embedding-3-small` (openai) |
 | `MIZUYA_EMBED_API_KEY` | API key (required for openai, optional for ollama) | empty |
 
-### Ollama (recommended for local use)
+Switching providers/models changes the vector dimension — run
+**`mizuya reembed`** after the switch rather than mixing dimensions
+(see above).
+
+### Ollama (the default)
 
 ```bash
-# Pull an embedding model
-ollama pull nomic-embed-text
-
-# Use it with mizuya
-export MIZUYA_EMBED_PROVIDER=ollama
-export MIZUYA_EMBED_MODEL=nomic-embed-text
+ollama pull embeddinggemma-2:740m
 mizuya upsert --id myproject --type project --name "My Project" --summary "..."
 mizuya similar --text "semantic search query"
 ```
@@ -296,7 +303,7 @@ schema.kuki       — DDL constants + initDB + migrations
 store.kuki        — Entity/relation/observation CRUD, history log, drift, prune
 search.kuki       — FTS5 + regex search, filters, vec1 vector storage
 hybrid.kuki       — Reciprocal Rank Fusion (FTS5 + vector merge)
-embed.kuki        — Embedding provider abstraction (Ollama, OpenAI, ..., hash fallback)
+embed.kuki        — Embedding provider abstraction (default ollama+embeddinggemma-2:740m, hash hatch, OpenAI-compatible)
 scanner.kuki      — Fail-closed secret scanner (pluggable SecretScanner, regex default)
 mcp_server.kuki   — MCP stdio server with 6 tool registrations
 format.kuki       — Terminal display formatting

@@ -1,12 +1,19 @@
 # mizuya — embedding provider abstraction.
 #
 # Thin wrapper over stdlib/llm/embeddings. Supports any OpenAI-compatible
-# /v1/embeddings endpoint (OpenAI, Ollama, Voyage, Cohere, Mistral, …) plus
-# a deterministic hash fallback when no provider is configured.
+# /v1/embeddings endpoint (OpenAI, Ollama, Voyage, Cohere, Mistral, …).
+# Default (no MIZUYA_EMBED_* set): Ollama serving embeddinggemma-2:740m —
+# one shared 768-d text/image/audio/video space, multimodal by default.
+# If Ollama is unreachable or the model is missing, every write still
+# commits (the vector is deferred with a stderr WARN and lands on a later
+# touch) — embedding is never a write-blocking dependency.
+# MIZUYA_EMBED_PROVIDER=hash selects the deterministic offline fallback
+# (fixed 64-d bag-of-words, no semantics — the escape hatch for offline
+# operation, not the default).
 #
 # Environment variables:
-#   MIZUYA_EMBED_PROVIDER  — "openai", "ollama", "voyage", "cohere", …
-#                            (default: "" = hash fallback)
+#   MIZUYA_EMBED_PROVIDER  — "ollama", "hash", "openai", "voyage", "cohere", …
+#                            (default: "ollama" with embeddinggemma-2:740m)
 #   MIZUYA_EMBED_URL       — base URL override (default: provider default)
 #   MIZUYA_EMBED_MODEL     — model name (default: provider-appropriate)
 #   MIZUYA_EMBED_API_KEY   — API key (optional for ollama)
@@ -25,8 +32,9 @@ enum EmbedProvider
     Voyage = "voyage"
     Cohere = "cohere"
 
-# embedConfig is the resolved embedding configuration. Empty provider means
-# fall back to hashEmbed and the package-level EmbedDim/EmbedModel constants.
+# embedConfig is the resolved embedding configuration. provider == "hash"
+# selects the deterministic offline fallback (EmbedDim/EmbedModel).
+# Anything else is an OpenAI-compatible endpoint.
 type embedConfig
     provider: string
     url: string
@@ -43,21 +51,24 @@ type EmbedEnv
     ApiKey: string as "api_key"
 
 # loadEmbedConfig reads embedding settings from environment variables and
-# applies provider-specific defaults.
+# applies provider-specific defaults. The hard default is Ollama serving
+# embeddinggemma-2:740m — offline by machine, not by configuration.
+# MIZUYA_EMBED_PROVIDER=hash restores the classic deterministic fallback.
 func loadEmbedConfig() embedConfig
     result := parse.Env of EmbedEnv from "MIZUYA_EMBED"
     if result is parse.Parsed as r
         provider := r.Value.Provider
         model := r.Value.Model
+        if provider is empty
+            provider = "ollama"
         if provider equals "ollama" and (model is empty)
-            model = "nomic-embed-text"
+            model = "embeddinggemma-2:740m"
         if provider equals "openai" and (model is empty)
             model = "text-embedding-3-small"
         return embedConfig{provider: provider, url: r.Value.URL, model: model, apiKey: r.Value.ApiKey}
     else
-        # Unreachable: all-string fields never fail to parse. Zero config
-        # matches the previous empty-string defaults.
-        return embedConfig{}
+        # Unreachable: all-string fields never fail to parse.
+        return embedConfig{provider: "ollama", model: "embeddinggemma-2:740m"}
 
 # embedClient builds the provider client for embed requests. The model
 # name is passed through VERBATIM — never through the "provider:model"
@@ -75,10 +86,10 @@ func embedClient(cfg: embedConfig) embeddings.Client
     return client
 
 # embedText converts text into a vector using the configured provider.
-# Falls back to hashEmbed when no provider is set.
+# Falls back to hashEmbed only when provider == "hash".
 func embedText(text: string) (list of float64, error)
     cfg := loadEmbedConfig()
-    if cfg.provider is empty
+    if cfg.provider equals "hash"
         return hashEmbed(text, EmbedDim), empty
     vec32 := embeddings.EmbedOne(embedClient(cfg), text)
     out := make(list of float64, len(vec32))
@@ -88,21 +99,20 @@ func embedText(text: string) (list of float64, error)
 
 # embedMedia embeds one media item through the configured provider. The
 # input is an OpenAI-compatible multimodal object — Ollama serving
-# embeddinggemma-2 (MIZUYA_EMBED_PROVIDER=ollama,
-# MIZUYA_EMBED_MODEL=embeddinggemma-2:740m) accepts
+# embeddinggemma-2 (the default) accepts
 # {"image": "<base64>"} / {"audio": "<base64>"} and returns a unit-norm
-# 768-dimensional vector in the same shared space as text. (Video has no
-# multimodal key in the API — keyframes are a separate, later ingest
-# path.)
+# 768-dimensional vector in the same shared space as text. (Video is
+# frame-sampled and mean-pooled by the video attach path; the API itself
+# takes no video key.)
 #
-# Fails closed when no provider is configured: the hash fallback has no
-# media path, and silently storing a garbage vector is worse than
-# refusing. Callers treat this as a deferral (the row is committed; the
-# vector lands on a later touch) — same contract as entity embeddings.
+# Fails closed when provider == "hash": the fallback has no media path,
+# and silently storing a garbage vector is worse than refusing. Callers
+# treat this as a deferral (the row is committed; the vector lands on a
+# later touch) — same contract as entity embeddings.
 func embedMedia(kind: string, bytes: list of byte) (list of float64, error)
     cfg := loadEmbedConfig()
-    if cfg.provider is empty
-        return empty, error "media embeddings require a multimodal provider (MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m); none configured"
+    if cfg.provider equals "hash"
+        return empty, error "media embeddings need a multimodal provider (the default is ollama + embeddinggemma-2:740m; provider is hash)"
     input := map of string to string{kind: encoding.Base64Encode(bytes)}
     resp := embeddings.EmbedRaw(embedClient(cfg), input) onerr return empty, error "media embed request failed: {error:w}"
     if resp.Data is empty
@@ -119,8 +129,8 @@ func embedMedia(kind: string, bytes: list of byte) (list of float64, error)
 # path — an N-frame clip costs one round trip, not N.
 func embedMediaBatch(frames: list of list of byte) (list of list of float64, error)
     cfg := loadEmbedConfig()
-    if cfg.provider is empty
-        return empty, error "media embeddings require a multimodal provider (MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m); none configured"
+    if cfg.provider equals "hash"
+        return empty, error "media embeddings need a multimodal provider (the default is ollama + embeddinggemma-2:740m; provider is hash)"
     inputs := empty list of map of string to string
     for f in frames
         inputs = append(inputs, map of string to string{"image": encoding.Base64Encode(f)})
@@ -140,6 +150,6 @@ func embedMediaBatch(frames: list of list of byte) (list of list of float64, err
 # used when storing the model tag alongside the embedding.
 func embedModel() string
     cfg := loadEmbedConfig()
-    if cfg.provider is empty
+    if cfg.provider equals "hash"
         return EmbedModel
     return cfg.model

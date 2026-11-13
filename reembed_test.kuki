@@ -16,8 +16,8 @@ func countRawDim(pool: db.Pool, d: int) (int, error)
     return count as int, empty
 
 func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -53,7 +53,7 @@ func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
     test.AssertEqual(t, res.Status, "reembedded")
     test.AssertEqual(t, res.Entities, 2)
     test.AssertEqual(t, res.Dim, EmbedDim)
-    test.AssertContains(t, res.Note, "hash fallback")
+    test.AssertContains(t, res.Note, "hash provider")
 
     n999, cErr := countRawDim(pool, 999)
     test.AssertNoError(t, cErr)
@@ -70,8 +70,8 @@ func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
     test.AssertTrue(t, hits isnt empty)
 
 func TestReembedEmptyStore(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -82,8 +82,8 @@ func TestReembedEmptyStore(t: reference testing.T)
     test.AssertEqual(t, res.Media, 0)
 
 func TestReembedHashFallbackLeavesMediaUntouched(t: reference testing.T)
-    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
-    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -94,7 +94,7 @@ func TestReembedHashFallbackLeavesMediaUntouched(t: reference testing.T)
     res, eErr := reembedEverything(pool)
     test.AssertNoError(t, eErr)
     test.AssertEqual(t, res.Media, 0)
-    test.AssertContains(t, res.Note, "hash fallback")
+    test.AssertContains(t, res.Note, "hash provider")
 
     # media_raw stays empty — the fallback cannot embed media, and the
     # rebuild must not pretend otherwise.
