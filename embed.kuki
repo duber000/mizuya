@@ -113,6 +113,29 @@ func embedMedia(kind: string, bytes: list of byte) (list of float64, error)
         out[i] = v as float64
     return out, empty
 
+# embedMediaBatch embeds several image frames in ONE request (the
+# embeddings endpoint accepts an array of object inputs) and returns one
+# unit-norm vector per frame, in input order. Used by the video attach
+# path — an N-frame clip costs one round trip, not N.
+func embedMediaBatch(frames: list of list of byte) (list of list of float64, error)
+    cfg := loadEmbedConfig()
+    if cfg.provider is empty
+        return empty, error "media embeddings require a multimodal provider (MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m); none configured"
+    inputs := empty list of map of string to string
+    for f in frames
+        inputs = append(inputs, map of string to string{"image": encoding.Base64Encode(f)})
+    resp := embeddings.EmbedRaw(embedClient(cfg), inputs) onerr return empty, error "media batch embed request failed: {error:w}"
+    out := make(list of list of float64, 0, len(resp.Data))
+    for _, d in resp.Data
+        vec32 := d.Embedding
+        v := make(list of float64, len(vec32))
+        for i, x in vec32
+            v[i] = x as float64
+        out = append(out, v)
+    if out is empty
+        return empty, error "media batch embed returned no vectors"
+    return out, empty
+
 # embedModel returns the model identifier for the current provider,
 # used when storing the model tag alongside the embedding.
 func embedModel() string

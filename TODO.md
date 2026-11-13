@@ -189,9 +189,15 @@ Phase 3 — safety, idempotency, measurement — **done**:
       TestLabeledRecall recall@5 = 1.00 (floor 0.80) with the new
       provider. Default stays the offline hash fallback; full
       multimodal is env-var opt-in.
-- [ ] P3 — video: sampled frames (the multimodal APIs take no video key);
-      keyframe gallery per attachment, or per-segment vectors for long
-      clips. Decide after P2 based on recall measurements.
+- [x] P3 — video: `attach --file clip.mp4` frame-samples with ffmpeg
+      (≤10 evenly spaced frames, ~1 fps for short clips) and mean-pools
+      into one vector on the attachment (nothing new in the query path,
+      nothing new to maintain). `similar --media`/`similar-media` with a
+      video query behave the same way. `reembed` re-derives video
+      vectors via the same extraction (verified end-to-end). ffmpeg/
+      ffprobe required in PATH — deterministic offline test uses
+      `PATH=""` to pin the failure mode; real attach e2e runs when
+      ffmpeg exists (testsrc fixture).
 - [ ] Media-bytes OCR secret scan (tesseract sidecar?) — the one redaction
       gap in an otherwise fail-closed gate; needs an opt-in decision.
 - [x] `similar-media` command + 8th MCP tool `similar_media`: KNN over

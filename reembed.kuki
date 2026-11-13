@@ -61,7 +61,7 @@ func reembedEverything(pool: db.Pool) (ReembedResult, error)
         mediaRows := db.Query(pool, "SELECT id, kind, path FROM media") |> db.ScanAll of mediaSlimRow
         for m in mediaRows
             bytes := files.Read(m.Path) onerr return ReembedResult{}, error "cannot read media asset {m.Path} (row {m.Id}): {error:w} (no store was modified)"
-            vec := embedMedia(m.Kind, bytes) onerr return ReembedResult{}, error "cannot embed media {m.Id} ({m.Path}): {error:w} (no store was modified)"
+            vec := embedStoredMedia(m.Kind, m.Path, bytes) onerr return ReembedResult{}, error "cannot embed media {m.Id} ({m.Path}): {error:w} (no store was modified)"
             mediaVecs[m.Id] = vec
 
     # Pass 3 — swap the stores in one transaction.

@@ -10,6 +10,7 @@ petiole main
 import "path/filepath"
 import "stdlib/encoding"
 import "stdlib/files"
+import "stdlib/shell"
 import "stdlib/string" as strpkg
 import "stdlib/test"
 import "testing"
@@ -138,7 +139,58 @@ func TestAttachToExistingAndMissingEntity(t: reference testing.T)
     _, err2 := attachMediaFile(pool, dbPath, missing)
     test.AssertError(t, err2)
 
-func TestAttachRejectsVideoAndUnknownKind(t: reference testing.T)
+func TestAttachRejectsUnknownKind(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := filepath.Join(dir, "clip.mp4")
+    files.WriteBytes(list of byte{1, 2, 3}, file) onerr
+        t.Fatalf("write fixture: %v", error)
+        return
+
+    args := attachArgs(file)
+    args.Kind = "hologram"
+    _, err2 := attachMediaFile(pool, filepath.Join(dir, "test.db"), args)
+    test.AssertError(t, err2)
+
+func TestMeanPoolNormalize(t: reference testing.T)
+    # Two orthogonal unit vectors: pooled to equal direction components,
+    # re-normalized to unit length.
+    out := meanPoolNormalize(list of list of float64{
+        list of float64{1.0, 0.0, 0.0},
+        list of float64{0.0, 1.0, 0.0},
+    })
+    test.AssertEqual(t, len(out), 3)
+    ss := 0.0
+    for _, x in out
+        ss = ss + x * x
+    test.AssertTrue(t, ss > 0.99 and ss < 1.01)
+    test.AssertTrue(t, out[0] > out[2])
+
+    # Single frame: pooling is identity after normalize.
+    one := meanPoolNormalize(list of list of float64{
+        list of float64{1.0, 2.0, 3.0},
+    })
+    ss2 := 0.0
+    for _, x in one
+        ss2 = ss2 + x * x
+    test.AssertTrue(t, ss2 > 0.99 and ss2 < 1.01)
+
+    # Mismatched dims are skipped rather than producing garbage.
+    mixed := meanPoolNormalize(list of list of float64{
+        list of float64{1.0, 0.0},
+        list of float64{1.0, 0.0, 0.0},
+    })
+    test.AssertEqual(t, len(mixed), 2)
+
+func TestMeanPoolNormalizeEmpty(t: reference testing.T)
+    out := meanPoolNormalize(empty list of list of float64)
+    test.AssertEqual(t, len(out), 0)
+
+func TestAttachVideoWithoutFfmpegFailsEarly(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
+    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    t.Setenv("PATH", "")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
@@ -149,12 +201,41 @@ func TestAttachRejectsVideoAndUnknownKind(t: reference testing.T)
 
     _, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(file))
     test.AssertError(t, err)
-    test.AssertContains(t, "{err}", "video")
+    test.AssertContains(t, "{err}", "ffmpeg")
 
-    args := attachArgs(file)
-    args.Kind = "hologram"
-    _, err2 := attachMediaFile(pool, filepath.Join(dir, "test.db"), args)
-    test.AssertError(t, err2)
+func TestAttachVideoEndToEnd(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
+    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    if shell.RequireCommand("ffmpeg") isnt empty
+        t.Skip("ffmpeg not in PATH")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := filepath.Join(dir, "clip.mp4")
+    cErr := shell.Check(
+        "ffmpeg",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=duration=2:size=64x64:rate=2",
+        "-pix_fmt",
+        "yuv420p",
+        file,
+    )
+    test.AssertNoError(t, cErr)
+
+    res, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(file))
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, res.Kind, "video")
+    test.AssertEqual(t, res.Mime, "video/mp4")
+    # No provider configured: frames extract fine, vector defers.
+    test.AssertEqual(t, res.EmbedDeferred, true)
+
+    atts := listMedia(pool, res.EntityId) onerr return
+    test.AssertEqual(t, len(atts), 1)
+    test.AssertEqual(t, atts[0].Kind, "video")
 
 func TestAttachRejectsEmptyAndOversize(t: reference testing.T)
     pool, dir := openTestPool(t)

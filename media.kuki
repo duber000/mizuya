@@ -1,11 +1,13 @@
 # mizuya — media attachments.
 #
-# Media files (images today in practice; the schema and embed path are
-# audio-ready; video is a later milestone — the multimodal APIs take no
-# video key, so frames must be sampled first) attach to entities or
-# spawn media-native entities (type = media). Bytes are stored once,
+# Media files (images, audio, video) attach to entities or spawn
+# media-native entities (type = media). Bytes are stored once,
 # sha256-addressed under <db dir>/assets/; the media table records the
-# derivation plus a caption.
+# derivation plus a caption. The embedding APIs take no video key, so
+# video is frame-sampled with ffmpeg (≤ maxVideoFrames, ~1 fps for short
+# clips, evenly spaced for long ones) and mean-pooled into a single
+# vector in the same space — approximate, but honest, and no new index
+# semantics.
 #
 # Redaction contract, extended honestly to non-text input:
 #   - caption and source pass the SAME fail-closed secret gate as
@@ -27,17 +29,25 @@
 
 petiole main
 
+import "math"
 import "path/filepath"
 import "stdlib/crypto"
 import "stdlib/db"
 import "stdlib/files"
 import "stdlib/log"
+import "stdlib/shell"
 import "stdlib/string" as strpkg
+import "strconv"
 
 # maxMediaBytes caps an attachment at 10 MB (base64 transport over MCP
 # inflates ~33%; a screenshot or a few minutes of 16 kHz mono audio fits
 # comfortably).
 const maxMediaBytes: int = 10485760
+
+# maxVideoFrames caps keyframe sampling for video attach/query: short
+# clips are sampled at ~1 fps (the model's native rate), long clips get
+# that many EVENLY SPACED frames instead of just the first seconds.
+const maxVideoFrames: int = 10
 
 type AttachArgs
     Id: string
@@ -69,10 +79,8 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
     kind := args.Kind
     if kind isnt empty
         kind = strpkg.ToLower(strpkg.TrimSpace(kind))
-        if kind equals "video"
-            return AttachResult{}, error "video ingest is not supported yet (the embedding API takes no video key); attach sampled frames as images"
-        if kind isnt "image" and kind isnt "audio"
-            return AttachResult{}, error "--kind must be image or audio, got {args.Kind}"
+        if kind isnt "image" and kind isnt "audio" and kind isnt "video"
+            return AttachResult{}, error "--kind must be image, audio, or video, got {args.Kind}"
     else
         inferred, iErr := inferMediaKind(origin, args.Mime)
         if iErr isnt empty
@@ -84,6 +92,16 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
         mime = mimeFor(kind, origin)
 
     sha := crypto.SHA256Hex(bytes)
+
+    # For video, extract keyframes NOW — before any store writes — so a
+    # corrupt or unsupported clip fails the whole attach instead of
+    # committing a row we cannot embed.
+    var frames: list of list of byte
+    if kind equals "video"
+        var fErr: error
+        frames, fErr = videoFramesForAttach(origin, bytes)
+        if fErr isnt empty
+            return AttachResult{}, fErr
 
     # Caption + source pass the same fail-closed gate as observations.
     redacted := 0
@@ -179,7 +197,12 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
 
     # Fail-soft embed, same contract as entity re-embeds.
     embedDeferred := true
-    vec, vErr := embedMedia(kind, bytes)
+    var vec: list of float64
+    var vErr: error
+    if kind equals "video"
+        vec, vErr = embedVideoFrames(frames)
+    else
+        vec, vErr = embedMedia(kind, bytes)
     if vErr is empty
         if mErr := upsertMediaEmbedding(pool, row.Id, vec); mErr is empty
             embedDeferred = false
@@ -253,27 +276,180 @@ func upsertMediaEmbedding(pool: db.Pool, mediaId: string, vec: list of float64) 
     ) onerr return
     return empty
 
+# extractVideoFrames samples up to maxFrames keyframes from a video file
+# with ffmpeg (which, together with ffprobe, is required for video — the
+# multimodal embedding APIs take no video key, so frames are the honest
+# approximation). Short clips sample at ~1 fps (the model's native rate);
+# clips longer than maxFrames seconds get that many evenly spaced frames.
+func extractVideoFrames(file: string, maxFrames: int) (list of list of byte, error)
+    if err := shell.RequireCommand("ffmpeg"); err isnt empty
+        return empty, error "video embedding requires ffmpeg in PATH: {err:w}"
+    if err := shell.RequireCommand("ffprobe"); err isnt empty
+        return empty, error "video embedding requires ffprobe in PATH: {err:w}"
+    fps := "1"
+    probe, pErr := shell.Output(
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        file,
+    )
+    if pErr is empty
+        d, fErr := strconv.ParseFloat(strpkg.TrimSpace(probe), 64)
+        if (fErr is empty) and d > maxFrames as float64
+            fps = strconv.FormatFloat(maxFrames as float64 / d, "f" as byte, 4, 64)
+    dir, tErr := files.TempDir("mizuya-frames-")
+    if tErr isnt empty
+        return empty, error "cannot create temp dir for video frames: {tErr:w}"
+    pattern := filepath.Join(dir, "frame_%03d.jpg")
+    cErr := shell.Check(
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        file,
+        "-vf",
+        "fps={fps}",
+        "-frames:v",
+        "{maxFrames}",
+        pattern,
+    )
+    if cErr isnt empty
+        files.DeleteAll(dir) onerr discard
+        return empty, error "ffmpeg failed on {file}: {cErr:w}"
+    entries := files.ListFiles(dir) onerr
+        files.DeleteAll(dir) onerr as cleanupErr discard
+        return empty, error "cannot list extracted frames: {error:w}"
+
+    frames := empty list of list of byte
+    for _, entry in entries
+        b, bErr := files.Read(filepath.Join(dir, entry))
+        if bErr isnt empty
+            continue
+        frames = append(frames, b)
+    files.DeleteAll(dir) onerr discard
+    if frames is empty
+        return empty, error "ffmpeg extracted no frames from {file} (corrupt or unsupported video?)"
+    return frames, empty
+
+# videoFramesForAttach returns the keyframes for a video attachment.
+# Host files are probed directly; base64/byte input (no usable origin
+# path) is written to a temp file first.
+func videoFramesForAttach(origin: string, bytes: list of byte) (list of list of byte, error)
+    if origin isnt empty and files.Exists(origin)
+        return extractVideoFrames(origin, maxVideoFrames)
+    f, tErr := files.TempFile("mizuya-video-")
+    if tErr isnt empty
+        return empty, error "cannot create temp file for video: {tErr:w}"
+    wErr := files.WriteBytes(bytes, f)
+    if wErr isnt empty
+        files.Delete(f) onerr discard
+        return empty, error "cannot write temp video file: {wErr:w}"
+    frames, eErr := extractVideoFrames(f, maxVideoFrames)
+    files.Delete(f) onerr discard
+    return frames, eErr
+
+# meanPoolNormalize averages embedding vectors and re-normalizes the
+# result to unit length. Used to collapse per-frame vectors of a video
+# into the single vector stored on the attachment.
+func meanPoolNormalize(vecs: list of list of float64) list of float64
+    if vecs is empty
+        return empty list of float64
+    dim := len(vecs[0])
+    out := make(list of float64, dim)
+    count := 0.0
+    for _, v in vecs
+        if len(v) isnt dim
+            continue
+        for i, x in v
+            out[i] = out[i] + x
+        count = count + 1.0
+    if count equals 0.0
+        return out
+    for i from 0 to len(out)
+        out[i] = out[i] / count
+    sum := 0.0
+    for i from 0 to len(out)
+        sum = sum + out[i] * out[i]
+    if sum equals 0.0
+        return out
+    norm := math.Sqrt(sum)
+    for i from 0 to len(out)
+        out[i] = out[i] / norm
+    return out
+
+# embedVideoFrames embeds all frames in one batched request and pools
+# them into the single video attachment vector.
+func embedVideoFrames(frames: list of list of byte) (list of float64, error)
+    if frames is empty
+        return empty, error "no frames to embed"
+    vecs := embedMediaBatch(frames) onerr return empty, error
+    return meanPoolNormalize(vecs), empty
+
+# embedStoredMedia embeds a previously-attached media asset by path
+# (used by reembed): images/audio go through the direct multimodal
+# path, video is frame-sampled and mean-pooled — the SAME derivation as
+# attach, so a migration reproduces exactly what `attach` stores.
+# Falls back to the file's bytes via a temp file when no readable path
+# exists (parity with the attach code path).
+func embedStoredMedia(kind: string, path: string, bytes: list of byte) (list of float64, error)
+    if kind equals "video"
+        var frames: list of list of byte
+        var err: error
+        if path isnt empty and files.Exists(path)
+            frames, err = extractVideoFrames(path, maxVideoFrames)
+        else
+            frames, err = videoFramesForAttach("", bytes)
+        if err isnt empty
+            return empty, err
+        return embedVideoFrames(frames)
+    return embedMedia(kind, bytes)
+
+# embedFileQuery embeds a media file for similarity queries: image/audio
+# go through the direct multimodal path; video is frame-sampled and mean
+# pooled (the same space, same one vector per row). Returns the vector
+# and the detected kind.
+func embedFileQuery(file: string) (list of float64, string, error)
+    kind, kErr := inferMediaKind(file, "")
+    if kErr isnt empty
+        return empty list of float64, "", kErr
+    if kind equals "video"
+        frames, fErr := extractVideoFrames(file, maxVideoFrames)
+        if fErr isnt empty
+            return empty list of float64, "", fErr
+        vec, vErr := embedVideoFrames(frames)
+        if vErr isnt empty
+            return empty list of float64, "", vErr
+        return vec, kind, empty
+    bytes := files.Read(file) onerr return empty list of float64, "", error "cannot read {file}: {error:w}"
+    vec, vErr := embedMedia(kind, bytes)
+    if vErr isnt empty
+        return empty list of float64, "", vErr
+    return vec, kind, empty
+
 # inferMediaKind maps a filename extension — or, for base64 input with no
-# filename, a MIME type — onto image|audio. Video is rejected with a
-# pointer to the keyframe milestone instead of a silent mis-embed.
+# filename, a MIME type — onto image|audio|video.
 func inferMediaKind(origin: string, mime: string) (string, error)
     ext := strpkg.ToLower(extOnly(origin))
     if ext equals ".png" or ext equals ".jpg" or ext equals ".jpeg" or ext equals ".gif" or ext equals ".webp" or ext equals ".bmp"
         return "image", empty
     if ext equals ".wav" or ext equals ".mp3" or ext equals ".m4a" or ext equals ".ogg" or ext equals ".flac" or ext equals ".opus" or ext equals ".aac"
         return "audio", empty
-    if ext equals ".mp4" or ext equals ".mkv" or ext equals ".mov" or ext equals ".webm" or ext equals ".avi"
-        return "", error "video ingest is not supported yet (the embedding API takes no video key); attach sampled frames as images"
+    if ext equals ".mp4" or ext equals ".mkv" or ext equals ".mov" or ext equals ".webm" or ext equals ".avi" or ext equals ".m4v"
+        return "video", empty
     if ext isnt empty
-        return "", error "cannot infer media kind from {origin} (pass --kind image|audio)"
+        return "", error "cannot infer media kind from {origin} (pass --kind image|audio|video)"
     lowerMime := strpkg.ToLower(mime)
     if strpkg.HasPrefix(lowerMime, "image/")
         return "image", empty
     if strpkg.HasPrefix(lowerMime, "audio/")
         return "audio", empty
     if strpkg.HasPrefix(lowerMime, "video/")
-        return "", error "video ingest is not supported yet (the embedding API takes no video key); attach sampled frames as images"
-    return "", error "cannot infer media kind (pass --kind image|audio)"
+        return "video", empty
+    return "", error "cannot infer media kind (pass --kind image|audio|video)"
 
 # mimeFor guesses an attachment's MIME type from its extension; used when
 # the caller does not supply one.
@@ -302,8 +478,18 @@ func mimeFor(kind: string, file: string) string
             return "audio/flac"
         when ".aac"
             return "audio/aac"
+        when ".mp4", ".m4v"
+            return "video/mp4"
+        when ".mkv"
+            return "video/x-matroska"
+        when ".mov"
+            return "video/quicktime"
+        when ".webm"
+            return "video/webm"
+        when ".avi"
+            return "video/x-msvideo"
         when ""
-            return if kind equals "audio" then "audio/wav" else "image/png"
+            return if kind equals "audio" then "audio/wav" else if kind equals "video" then "video/mp4" else "image/png"
         default
             return "application/octet-stream"
 
@@ -348,6 +534,16 @@ func mimeExt(mime: string) string
             return ".flac"
         when "audio/aac"
             return ".aac"
+        when "video/mp4", "video/m4v", "video/x-m4v"
+            return ".mp4"
+        when "video/x-matroska", "video/matroska", "video/mkv"
+            return ".mkv"
+        when "video/quicktime"
+            return ".mov"
+        when "video/webm"
+            return ".webm"
+        when "video/x-msvideo", "video/avi"
+            return ".avi"
         default
             return ""
 

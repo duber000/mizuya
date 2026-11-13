@@ -177,15 +177,15 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int, filter: 
 
 # searchMedia returns the k media attachments whose embeddings are
 # closest to the query vector under cosine distance (vec1 KNN). Kind
-# narrows to "image" or "audio" (empty = any). Reads media_vec directly —
-# unlike entities, attachments carry no FTS side.
+# narrows to "image", "audio", or "video" (empty = any). Reads media_vec
+# directly — unlike entities, attachments carry no FTS side.
 func searchMedia(pool: db.Pool, vec: list of float64, k: int, kind: string) (list of MediaHit, error)
     if k <= 0
         k = 5
     if kind isnt empty
         kind = strpkg.ToLower(kind)
-        if kind isnt "image" and kind isnt "audio"
-            return empty list of MediaHit, error "--kind must be image or audio, got {kind}"
+        if kind isnt "image" and kind isnt "audio" and kind isnt "video"
+            return empty list of MediaHit, error "--kind must be image, audio, or video, got {kind}"
     blob := serializeVec(vec)
     knnArg := "\{k: {k}\}"
     parts := list of string{

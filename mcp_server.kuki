@@ -604,7 +604,7 @@ func registerAttachMedia(server: reference mcp.Server)
         jsonschema.Prop(
             "kind",
             jsonschema.String,
-            "image or audio (default: inferred from extension). Video is not supported yet.",
+            "image, audio, or video (default: inferred from extension). Video is frame-sampled (≤10 evenly spaced keyframes) and mean-pooled.",
         ),
         jsonschema.Prop(
             "caption",
@@ -622,7 +622,7 @@ func registerAttachMedia(server: reference mcp.Server)
     mcp.ToolWithOpts of attachMediaArgs(
         server,
         "attach_media",
-        "Attach a media file (image or audio) to the knowledge graph — to an existing entity, or as a new media-native entity when id is omitted. Bytes are stored sha256-addressed and embedded via the configured provider; the bytes are never secret-scanned and the caption gate is the only text-redaction path. Returns confirmation text; get_context lists attachments.",
+        "Attach a media file (image, audio, or video) to the knowledge graph — to an existing entity, or as a new media-native entity when id is omitted. Bytes are stored sha256-addressed and embedded via the configured provider; the bytes are never secret-scanned and the caption gate is the only text-redaction path. Video is frame-sampled with ffmpeg and mean-pooled into one vector. Returns confirmation text; get_context lists attachments.",
         schema,
         mcp.ToolOpts{Idempotent: true, Destructive: true},
         handleAttachMedia,
@@ -665,6 +665,28 @@ func handleAttachMedia(args: attachMediaArgs) (any, error)
         return mcp.ErrorResult("attach failed: {aerr}"), empty
     return attachMediaText(res)
 
+# queryMediaVector computes the query vector for the similar_media tool:
+# file input goes through the shared query path (image/audio embed
+# directly; video is frame-sampled and mean-pooled); data_base64 input
+# supports image/audio only — a video needs a host file path.
+func queryMediaVector(args: similarMediaArgs) (list of float64, error)
+    if args.File isnt empty
+        if not files.Exists(args.File)
+            return empty list of float64, error "file not found: {args.File}"
+        vec, _, err := embedFileQuery(args.File)
+        if err isnt empty
+            return empty list of float64, err
+        return vec, empty
+    if args.Mime is empty
+        return empty list of float64, error "mime is required with data_base64"
+    raw := encoding.Base64Decode(args.DataBase64) onerr return empty list of float64, error "data_base64 is not valid base64: {error:w}"
+    kind, err := inferMediaKind("", args.Mime)
+    if err isnt empty
+        return empty list of float64, err
+    if kind equals "video"
+        return empty list of float64, error "video via data_base64 is not supported yet; pass a host-local file path instead"
+    return embedMedia(kind, raw)
+
 # attachMediaText renders the attach_media confirmation. A no-op
 # (already-attached) says so explicitly instead of crediting a redaction
 # of text that was never stored.
@@ -702,7 +724,11 @@ func registerSimilarMedia(server: reference mcp.Server)
             jsonschema.String,
             "MIME type (required with data_base64; inferred from the file extension otherwise)",
         ),
-        jsonschema.Prop("kind", jsonschema.String, "Narrow hits to image or audio (default: any)"),
+        jsonschema.Prop(
+            "kind",
+            jsonschema.String,
+            "Narrow hits to image, audio, or video (default: any)",
+        ),
         jsonschema.Prop("limit", jsonschema.Integer, "Max results (default: 5)"),
     })
 
@@ -726,33 +752,15 @@ func handleSimilarMedia(args: similarMediaArgs) (any, error)
     if limit <= 0
         limit = 5
     kind := strpkg.ToLower(strpkg.TrimSpace(args.Kind))
-    if kind isnt empty and kind isnt "image" and kind isnt "audio"
-        return mcp.ErrorResult("kind must be image or audio, got {args.Kind}"), empty
+    if kind isnt empty and kind isnt "image" and kind isnt "audio" and kind isnt "video"
+        return mcp.ErrorResult("kind must be image, audio, or video, got {args.Kind}"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
     defer db.Close(pool)
 
-    var vec: list of float64
-    var err: error
-    if hasFile
-        if not files.Exists(args.File)
-            return mcp.ErrorResult("file not found: {args.File}"), empty
-        raw := files.Read(args.File) onerr return mcp.ErrorResult("cannot read {args.File}: {error}"), empty
-        mkind, kErr := inferMediaKind(args.File, "")
-        if kErr isnt empty
-            return mcp.ErrorResult("{kErr}"), empty
-        vec, err = embedMedia(mkind, raw)
-    else
-        if args.Mime is empty
-            return mcp.ErrorResult("mime is required with data_base64"), empty
-        raw := encoding.Base64Decode(args.DataBase64) onerr return mcp.ErrorResult("data_base64 is not valid base64: {error}"), empty
-        mkind, mErr := inferMediaKind("", args.Mime)
-        if mErr isnt empty
-            return mcp.ErrorResult("{mErr}"), empty
-        vec, err = embedMedia(mkind, raw)
-
-    if err isnt empty
-        return mcp.ErrorResult("media embed failed: {err}"), empty
+    vec, qErr := queryMediaVector(args)
+    if qErr isnt empty
+        return mcp.ErrorResult("{qErr}"), empty
 
     probe := db.Query(pool, "SELECT dim FROM media_raw LIMIT 1") |> db.ScanAll of dimRow
     if probe isnt empty and probe[0].Dim isnt len(vec)

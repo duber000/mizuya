@@ -47,8 +47,15 @@ workflow builds images on tag push.
   (additive-optional in the contract); `similar --media <file>` queries
   the shared text/image/audio space against entity embeddings (refuses
   when the stored text vectors were built with a different
-  provider/dimension). Video ingest is not supported yet (sampled
-  keyframes are the planned path).
+  provider/dimension). Video ingest arrived in the follow-up entry below
+  (sampled keyframes, mean-pooled — the multimodal API takes no video key).
+- Video attachments: `attach --file clip.mp4` frame-samples with ffmpeg
+  (≤10 evenly spaced frames, ~1 fps for short clips) and mean-pools into
+  one vector on the attachment; `similar --media` and `similar-media`/
+  `similar_media` accept a video query the same way. `reembed`
+  re-derives video vectors through the same extraction path (verified
+  end-to-end). Requires ffmpeg/ffprobe in PATH; without it, video attach
+  fails fast with a clear error and nothing is stored.
 - Bug fix: `MIZUYA_EMBED_MODEL` values containing a colon (Ollama tags
   like `embeddinggemma-2:740m`) were split into provider/model by the
   client builder; the model is now passed through verbatim.

@@ -55,7 +55,7 @@ ReachableRow= { "depth": number, "other": string, "name": string, "type": string
 DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
                 "obs_text": string, "obs_at": string, "entity_updated": string }
 MediaRow    = { "id": string /* uuid7 */, "entity_id": string,
-                "kind": "image" | "audio", "mime": string,
+                "kind": "image" | "audio" | "video", "mime": string,
                 "path": string /* content-addressed asset path under <db dir>/assets/; filename is the sha256 hex */,
                 "sha256": string, "bytes": number,
                 "caption": string /* stored (redacted) caption, or "" */,
@@ -63,12 +63,12 @@ MediaRow    = { "id": string /* uuid7 */, "entity_id": string,
                 "source": string /* stored (redacted) source label */,
                 "at": string /* UTC, millisecond precision */ }
 MediaHit    = { "id": string /* media id */, "entity_id": string,
-                "kind": "image" | "audio", "caption": string,
+                "kind": "image" | "audio" | "video", "caption": string,
                 "path": string, "at": string /* UTC */,
                 "distance": number /* cosine distance, lower = closer */ }
 AttachResult= { "status": "attached" | "media-native" | "already-attached",
                 "entity_id": string, "media_id": string,
-                "kind": "image" | "audio", "mime": string,
+                "kind": "image" | "audio" | "video", "mime": string,
                 "path": string, "sha256": string, "bytes": number,
                 "redacted": number /* secrets the text gate redacted from the candidate caption/source/name; on "already-attached" the candidate is discarded, so this refers to it, not to stored data */,
                 "bytes_scanned": false /* always false — see MediaRow.scanned */,
@@ -87,7 +87,7 @@ AttachResult= { "status": "attached" | "media-native" | "already-attached",
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
 | `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "attachments": MediaRow[], "history"?: HistoryRow[]}` — `attachments` is additive-optional (listed newest-first; bytes never secret-scanned, `scanned: 0`); observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
 | `prune-history` | `{"status": "pruned" \| "dry-run", "keep": number, "before": string, "versions": number}` |
-| `similar` | `SimilarHit[]` — with `--media <file>`, the query vector is computed from image/audio bytes via the configured multimodal provider; refuses when the stored text embeddings were built with a different dimension (the store and the media query must share one space) — see `reembed` |
+| `similar` | `SimilarHit[]` — with `--media <file>`, the query vector is computed from image/audio bytes (or frame-sampled, mean-pooled video) via the configured multimodal provider; refuses when the stored text embeddings were built with a different dimension (the store and the media query must share one space) — see `reembed` |
 | `list` | `Entity[]` |
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |
 | `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |

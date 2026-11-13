@@ -139,7 +139,7 @@ func makeAttachCmd() reference cli.Command
     )
         |> .RequiredFlag("file", "Path to the media file")
         |> .StringFlag("id", "Entity to attach to (omit to create a media-native entity)", "")
-        |> .StringFlag("kind", "image or audio (default: inferred from extension)", "")
+        |> .StringFlag("kind", "image, audio, or video (default: inferred from extension)", "")
         |> .StringFlag(
             "caption",
             "Free-text caption (passes the same secret gate as observations)",
@@ -217,7 +217,7 @@ func makeSimilarMediaCmd() reference cli.Command
     )
         |> .RequiredFlag("file", "Media file to embed as the query (image or audio)")
         |> .IntFlag("limit", "Max results", 5)
-        |> .StringFlag("kind", "Narrow to image or audio (default: any)", "")
+        |> .StringFlag("kind", "Narrow to image, audio, or video (default: any)", "")
         |> .ActionE(doSimilarMedia)
 
 func makeListCmd() reference cli.Command
@@ -763,11 +763,9 @@ func doSimilar(args: cli.Args) error
     else if text isnt empty
         vec = embedText(text) onerr explain "cannot compute embedding"
     else
-        bytes := files.Read(media) onerr return error "cannot read {media}: {error:w}"
-        kind, kErr := inferMediaKind(media, "")
-        if kErr isnt empty
-            return kErr
-        v := embedMedia(kind, bytes) onerr explain "cannot compute media embedding"
+        v, _, vErr := embedFileQuery(media)
+        if vErr isnt empty
+            return vErr
         probe := db.Query(pool, "SELECT dim FROM embeddings_raw LIMIT 1") |> db.ScanAll of dimRow
         if probe isnt empty and probe[0].Dim isnt len(v)
             return cli.UsageFail(
@@ -808,19 +806,17 @@ func doSimilar(args: cli.Args) error
 func doSimilarMedia(args: cli.Args) error
     file := cli.GetString(args, "file")
     kind := strpkg.ToLower(strpkg.TrimSpace(cli.GetString(args, "kind")))
-    if kind isnt empty and kind isnt "image" and kind isnt "audio"
-        return cli.UsageFail("--kind must be image or audio, got {kind}")
+    if kind isnt empty and kind isnt "image" and kind isnt "audio" and kind isnt "video"
+        return cli.UsageFail("--kind must be image, audio, or video, got {kind}")
     limit := cli.GetIntOr(args, "limit", 5)
     if limit <= 0
         return cli.UsageFail("--limit must be > 0, got {limit}")
 
     if not files.Exists(file)
         return error "file not found: {file}"
-    bytes := files.Read(file) onerr return error "cannot read {file}: {error:w}"
-    mkind, kErr := inferMediaKind(file, "")
-    if kErr isnt empty
-        return kErr
-    vec := embedMedia(mkind, bytes) onerr explain "cannot compute media embedding"
+    vec, _, vErr := embedFileQuery(file)
+    if vErr isnt empty
+        return vErr
 
     pool := openPool(args) onerr explain "cannot open database"
     defer db.Close(pool)

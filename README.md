@@ -19,8 +19,8 @@ place to keep everything you've learned within reach.
 - **vec1 virtual table** for vector KNN with cosine distance, plus a plain
   `embeddings_raw` side store (the vendored vec1 build is write/search-only)
 - **Binary BLOB vector storage** — compact little-endian float32 encoding
-- **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback) — including multimodal text/image/audio in one shared 768-d space via `embeddinggemma-2`
-- **Media attachments** — images and audio stored sha256-addressed under `<db dir>/assets/`, embedded as 768-d vectors (`attach`); bytes are never secret-scanned and every output says so
+- **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback) — including multimodal text/image/audio/video in one shared 768-d space via `embeddinggemma-2`
+- **Media attachments** — images, audio, and frame-sampled video stored sha256-addressed under `<db dir>/assets/`, embedded as 768-d vectors (`attach`); bytes are never secret-scanned and every output says so
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
 - **Append-only version log** (`entity_history`) + observation supersession
 - **Fail-closed secret redaction** on every stored free-text field
@@ -42,8 +42,8 @@ binary at ./mizuya
 | `init`    | Create the database file and schema (also implicit: every command self-initializes an uninitialized `--db` path via idempotent `initDB` on open) |
 | `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
-| `attach`  | Attach a media file (`--file [--id entity] [--kind image\|audio] [--caption ...] [--name ...]`); omits `--id` to auto-create a content-addressed media-native entity; bytes are sha256-stored and never scanned — the caption passes the same fail-closed gate as observations |
-| `similar-media` | Similarity search over stored media attachments (`--file [--limit] [--kind image\|audio]`); returns attachments (id, entity, kind, caption, distance) instead of entities |
+| `attach`  | Attach a media file (`--file [--id entity] [--kind image\|audio\|video] [--caption ...] [--name ...]`); omits `--id` to auto-create a content-addressed media-native entity; bytes are sha256-stored and never scanned — the caption passes the same fail-closed gate as observations |
+| `similar-media` | Similarity search over stored media attachments (`--file [--limit] [--kind image\|audio\|video]`); returns attachments (id, entity, kind, caption, distance) instead of entities |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
 | `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--regex] [--type] [--tag] [--since] [--until]`) |
 | `context` | Entity + neighbors + observations (always newest-first) + media attachments (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
@@ -95,15 +95,19 @@ retention policy: [docs/STORAGE.md](docs/STORAGE.md).
 
 ## Media attachments
 
-`attach` stores an image or an audio file on an entity — or, without
+`attach` stores an image, an audio file, or a video on an entity — or, without
 `--id`, as its own **media-native entity** (`type: media`, id
 `media-<sha256[:12]>`, so re-attaching the same bytes is idempotent).
+Video is frame-sampled with ffmpeg (≤10 evenly spaced keyframes, ~1 fps
+for short clips) and mean-pooled into a single image-space vector —
+the multimodal API takes no video key, so this is the honest
+approximation; it needs `ffmpeg`/`ffprobe` in PATH.
 Bytes are copied once under `<db dir>/assets/<sha256>.<ext>`; the `media`
 table records entity link, mime, size, and a caption that passes the
 same fail-closed secret gate as observations. Media bytes are **never**
 secret-scanned — every output marks attachments `[bytes unscanned]`.
 
-Embeddings use the configured provider. For the shared text/image/audio
+Embeddings use the configured provider. For the shared text/image/audio/video
 vector space (768-d), use Ollama with EmbeddingGemma 2 — media and text
 retrieval then live in one space:
 
@@ -117,8 +121,10 @@ MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m \
 
 One attachment = one 768-d vector in the `media_vec` index; the caption
 (like any entity text) is embedded into the entity's own vector as usual.
-Video is not supported yet — the multimodal APIs take no video key, so
-frames must be sampled first. Entity text embeddings only share the space
+Video is frame-sampled with ffmpeg (≤10 evenly spaced keyframes, ~1 fps
+for short clips) and mean-pooled into a single image-space vector — the
+multimodal API takes no video key, so this is the honest approximation.
+Video needs ffmpeg/ffprobe in PATH. Entity text embeddings only share the space
 with media when the text provider *is* `embeddinggemma-2:740m`; switching
 providers changes the vector dimension (vec1 bakes it at first insert), so
 after switching run **`mizuya reembed`** — every entity and media asset is
@@ -157,7 +163,7 @@ The `mcp` subcommand starts a Model Context Protocol stdio server with
 | `search`         | Hybrid search (BM25 + vector RRF; optional type/tag/since/until) |
 | `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones) + media `attachments` (each marked unscanned); optional `history`, `since`, `until`, `hide_superseded` |
 | `similar`        | Vector similarity search by entity id or text; same filters as `search` |
-| `attach_media`   | Attach a media file (image or audio) — `file` (host-local path) or `data_base64` — to an entity, or auto-create a media-native one; bytes are sha256-stored and never secret-scanned; caption passes the text gate |
+| `attach_media`   | Attach a media file (image, audio, or video) — `file` (host-local path) or `data_base64` — to an entity, or auto-create a media-native one; bytes are sha256-stored and never secret-scanned; caption passes the text gate |
 | `similar_media`  | Vector similarity search over stored media attachments (file or data_base64 query; `kind` filter; returns attachments, not entities) |
 
 ### MCP resources
