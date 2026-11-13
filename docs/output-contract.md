@@ -83,11 +83,12 @@ AttachResult= { "status": "attached" | "media-native" | "already-attached",
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
 | `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "attachments": MediaRow[], "history"?: HistoryRow[]}` — `attachments` is additive-optional (listed newest-first; bytes never secret-scanned, `scanned: 0`); observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
 | `prune-history` | `{"status": "pruned" \| "dry-run", "keep": number, "before": string, "versions": number}` |
-| `similar` | `SimilarHit[]` — with `--media <file>`, the query vector is computed from image/audio bytes via the configured multimodal provider; refuses when the stored text embeddings were built with a different dimension (the store and the media query must share one space) |
+| `similar` | `SimilarHit[]` — with `--media <file>`, the query vector is computed from image/audio bytes via the configured multimodal provider; refuses when the stored text embeddings were built with a different dimension (the store and the media query must share one space) — see `reembed` |
 | `list` | `Entity[]` |
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |
 | `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |
 | `import-openwiki` | `{"status": "imported", "entities": number, "links": number}` (deprecated alias for `import-okf --bundle openwiki`; shape unchanged) |
+| `reembed` | `{"status": "reembedded", "entities": number, "media": number, "model": string, "dim": number, "note": string}` — all-or-nothing rebuild of `embeddings_vec`/`embeddings_raw` (and `media_vec`/`media_raw` when a provider is configured) with the *currently configured* provider. Every vector is computed before the store drops — a provider outage aborts with nothing modified; the swap itself is one transaction. `entity_history` and `entities` are untouched; `content_hash` advances to match |
 | `mcp` | no `--json`; stdio is JSON-RPC (MCP). Logs go to stderr, never stdout |
 
 Text mode additionally prints, after each search/similar result table, one

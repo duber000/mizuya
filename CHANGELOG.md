@@ -52,6 +52,13 @@ workflow builds images on tag push.
 - Bug fix: `MIZUYA_EMBED_MODEL` values containing a colon (Ollama tags
   like `embeddinggemma-2:740m`) were split into provider/model by the
   client builder; the model is now passed through verbatim.
+- New `reembed` command (all-or-nothing, one transaction): rebuilds
+  `embeddings_vec`/`embeddings_raw` with the configured provider — and
+  `media_vec`/`media_raw` when a provider is set — for switching
+  embedding models/dimensions. Every vector is computed before the store
+  drops, so a provider outage aborts with nothing modified; `content_hash`
+  advances to match. `similar --media` points here on dim mismatch.
+  TestLabeledRecall recall@5 = 1.00 with embeddinggemma-2:740m.
 
 ### Removed
 - `distill` — it shelled out to an `openwiki -p` run, and the openwiki

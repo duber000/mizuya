@@ -50,6 +50,7 @@ binary at ./mizuya
 | `similar` | Cosine similarity search (`--id` *or* `--text` *or* `--media <file>`, `[--limit]`, `[--threshold 1-100]`, same filters as `search`); `--media` needs a multimodal provider (`embeddinggemma-2:740m`) so the store and the media query share one vector space |
 | `list`    | List entities, optionally filtered by `--type`                          |
 | `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`); observations already marked `distilled` are skipped |
+| `reembed` | All-or-nothing rebuild of the vector store with the configured provider — required after switching embedding models/dimensions (`--json` for the structured result) |
 | `import-okf` | Import an OKF knowledge bundle (`--bundle docs`, default: `docs/` with `index.md`/`log.md` skipped per SPEC §8/§9) into entities + `references` edges; idempotent |
 | `import-openwiki` | Deprecated alias for `import-okf --bundle openwiki` |
 | `mcp`     | Start the MCP stdio server for AI agent access                          |
@@ -118,8 +119,16 @@ One attachment = one 768-d vector in the `media_vec` index; the caption
 Video is not supported yet — the multimodal APIs take no video key, so
 frames must be sampled first. Entity text embeddings only share the space
 with media when the text provider *is* `embeddinggemma-2:740m`; switching
-providers requires a full re-embed (vec1 bakes its dimension at first
-insert).
+providers changes the vector dimension (vec1 bakes it at first insert), so
+after switching run **`mizuya reembed`** — every entity and media asset is
+re-embedded with the configured provider *before* the store drops, so a
+provider outage aborts with the store untouched. `similar --media` refuses
+cross-dim queries and points at this command.
+
+`reembed` also advances each entity's stored `content_hash`, so the next
+`upsert`/`observe` does not re-embed needlessly. Migration safety:
+`TestLabeledRecall` passes at recall@5 = 1.00 (floor 0.80) with
+`embeddinggemma-2:740m` as the text provider.
 
 ## Append-only beliefs (funes-style)
 

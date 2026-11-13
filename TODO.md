@@ -180,12 +180,15 @@ Phase 3 — safety, idempotency, measurement — **done**:
 - [x] Bug: `MIZUYA_EMBED_MODEL` with a colon tag (embeddinggemma-2:740m)
       was split into provider/model by `embeddings.New`; the client now
       passes the model through verbatim.
-- [ ] P2 — migrate *text* embeddings to embeddinggemma-2:740m so one
-      provider serves text + media; vec1 dim is baked at first insert, so
-      this is a drop-and-rebuild `embeddings_vec` + full re-embed, gated
-      on `TestLabeledRecall` (floor 0.80 recall@5) before and after.
-      Until then, media vectors and non-embeddinggemma text vectors must
-      not be mixed in one index — `similar --media` enforces this.
+- [x] P2 — `reembed` command: all-or-nothing migration of the entity
+      store (embeds everything *before* dropping embeddings_vec; one
+      transaction; advances content_hash) and, when a provider is
+      configured, re-embeds all media into the same space. `similar
+      --media` now points here on dim mismatch. Verified end-to-end on a
+      hash-fallback → embeddinggemma-2:740m migration (store 64→768d);
+      TestLabeledRecall recall@5 = 1.00 (floor 0.80) with the new
+      provider. Default stays the offline hash fallback; full
+      multimodal is env-var opt-in.
 - [ ] P3 — video: sampled frames (the multimodal APIs take no video key);
       keyframe gallery per attachment, or per-segment vectors for long
       clips. Decide after P2 based on recall measurements.

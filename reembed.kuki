@@ -1,0 +1,162 @@
+# mizuya — embedding store migration (`reembed`).
+#
+# Switching the configured embedding provider/model (e.g. hash fallback →
+# Ollama embeddinggemma-2:740m, or 768-d → MRL-truncated 256-d) changes the
+# vector dimension, and vec1 bakes the dimension at first insert — mixed
+# graphs are silent garbage, not an error. `reembed` is the explicit,
+# all-or-nothing migration: it recomputes EVERY entity vector with the
+# currently configured provider first (an embed failure aborts and touches
+# nothing), then drops + recreates embeddings_vec and embeddings_raw and
+# repopulates them from the computed vectors in one transaction.
+#
+# Media vectors are re-embedded too when a provider is configured — the
+# media index must live in the same space as the entity index or the
+# cross-modal query breaks. With the hash fallback (no provider), entity
+# embeddings are rebuilt but media is left untouched (the fallback has no
+# media path by design) and the output says so.
+#
+# Migration never fails halfway: any error before the transaction leaves
+# the store exactly as it was; inside the transaction, a failure rolls
+# the whole drop/recreate/repopulate back.
+
+petiole main
+
+import "stdlib/db"
+import "stdlib/files"
+import "stdlib/log"
+import "stdlib/string" as strpkg
+
+type ReembedResult
+    Status: string as "status"
+    Entities: int as "entities"
+    Media: int as "media"
+    Model: string as "model"
+    Dim: int as "dim"
+    Note: string as "note"
+
+# reembedEverything rebuilds the entity and (when a provider is
+# configured) media vector stores with the currently configured provider.
+func reembedEverything(pool: db.Pool) (ReembedResult, error)
+    cfg := loadEmbedConfig()
+    providerNote := ""
+    if cfg.provider is empty
+        providerNote = "no provider configured; entity embeddings rebuilt with the hash fallback, media vectors left untouched"
+    else if not strpkg.Contains(strpkg.ToLower(cfg.model), "embeddinggemma")
+        providerNote = "note: media needs a multimodal provider (embeddinggemma-2); a non-multimodal provider fails the media pass — the rebuild aborts before touching the store in that case"
+
+    # Pass 1 — compute every entity vector BEFORE anything is dropped.
+    entityRows := db.Query(pool, "SELECT id FROM entities") |> db.ScanAll of idRow
+    entityVecs := empty map of string to list of float64
+    dim := 0
+    for r in entityRows
+        text := entityText(pool, r.Id) onerr return ReembedResult{}, error "cannot read entity {r.Id}: {error:w}"
+        vec := embedText(text) onerr return ReembedResult{}, error "cannot embed entity {r.Id}: {error:w} (no store was modified)"
+        if dim equals 0
+            dim = len(vec)
+        entityVecs[r.Id] = vec
+
+    # Pass 2 — media vectors (skipped entirely on the hash fallback).
+    mediaVecs := empty map of string to list of float64
+    if cfg.provider isnt empty
+        mediaRows := db.Query(pool, "SELECT id, kind, path FROM media") |> db.ScanAll of mediaSlimRow
+        for m in mediaRows
+            bytes := files.Read(m.Path) onerr return ReembedResult{}, error "cannot read media asset {m.Path} (row {m.Id}): {error:w} (no store was modified)"
+            vec := embedMedia(m.Kind, bytes) onerr return ReembedResult{}, error "cannot embed media {m.Id} ({m.Path}): {error:w} (no store was modified)"
+            mediaVecs[m.Id] = vec
+
+    # Pass 3 — swap the stores in one transaction.
+    if err := rebuildEntityVecTable(pool, entityVecs, dim); err isnt empty
+        return ReembedResult{}, error "cannot rebuild entity vector store: {err:w}"
+    mediaRebuilt := 0
+    if cfg.provider isnt empty
+        if err := rebuildMediaVecTable(pool, mediaVecs); err isnt empty
+            return ReembedResult{}, error "cannot rebuild media vector store: {err:w}"
+        mediaRebuilt = len(mediaVecs)
+
+    return ReembedResult{
+        Status: "reembedded",
+        Entities: len(entityVecs),
+        Media: mediaRebuilt,
+        Model: embedModel(),
+        Dim: dim,
+        Note: providerNote,
+    }, empty
+
+# rebuildEntityVecTable drops + recreates embeddings_vec and replaces
+# embeddings_raw with the computed vectors. Callers compute ALL vectors
+# first, so the store is never left half-migrated on embed failure.
+# dim is passed in for a sanity assertion (all vecs must agree).
+func rebuildEntityVecTable(pool: db.Pool, vecs: map of string to list of float64, dim: int) error
+    for id in vecs
+        vec := vecs[id]
+        if len(vec) isnt dim
+            return error "inconsistent vector dimension {len(vec)} (expected {dim}); no store was modified"
+
+    err := db.Transaction(pool, tx =>
+        db.TxExec(tx, "DELETE FROM embeddings_raw") onerr return
+        db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_vec") onerr return
+        db.TxExec(tx, embeddingsSQL) onerr return
+        for id in vecs
+            blob := serializeVec(vecs[id])
+            db.TxExec(tx, "INSERT INTO embeddings_vec(vector, entity_id) VALUES (?, ?)", blob, id) onerr return
+            db.TxExec(
+                tx,
+                "INSERT OR REPLACE INTO embeddings_raw(entity_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+                id,
+                embedModel(),
+                dim,
+                blob,
+            ) onerr return
+        db.TxExec(tx, embeddingsRebuildSQL) onerr return
+        return empty
+    )
+    if err isnt empty
+        return err
+    # content_hash advances so the next touch doesn't re-embed needlessly.
+    for id in vecs
+        text := entityText(pool, id) onerr
+            log.Warn(
+                "mizuya: reembed: cannot re-read entity to advance content_hash",
+                "id",
+                id,
+                "err",
+                error,
+            )
+            continue
+
+        setStoredHash(pool, id, corpusHash(text)) onerr
+            log.Warn("mizuya: reembed: cannot persist content_hash", "id", id, "err", error)
+
+    return empty
+
+# rebuildMediaVecTable drops + recreates media_vec and replaces
+# media_raw with the computed vectors.
+func rebuildMediaVecTable(pool: db.Pool, vecs: map of string to list of float64) error
+    return db.Transaction(pool, tx =>
+        db.TxExec(tx, "DELETE FROM media_raw") onerr return
+        db.TxExec(tx, "DROP TABLE IF EXISTS media_vec") onerr return
+        db.TxExec(tx, mediaVecSQL) onerr return
+        for id in vecs
+            blob := serializeVec(vecs[id])
+            db.TxExec(tx, "INSERT INTO media_vec(vector, media_id) VALUES (?, ?)", blob, id) onerr return
+            db.TxExec(
+                tx,
+                "INSERT OR REPLACE INTO media_raw(media_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+                id,
+                embedModel(),
+                len(vecs[id]),
+                blob,
+            ) onerr return
+        db.TxExec(tx, mediaRebuildSQL) onerr return
+        return empty
+    )
+
+# idRow scans an entity id column.
+type idRow
+    Id: string as "id"
+
+# mediaSlimRow scans just what the media re-embed pass needs.
+type mediaSlimRow
+    Id: string as "id"
+    Kind: string as "kind"
+    Path: string as "path"
