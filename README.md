@@ -24,7 +24,7 @@ place to keep everything you've learned within reach.
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
 - **Append-only version log** (`entity_history`) + observation supersession
 - **Fail-closed secret redaction** on every stored free-text field
-- **MCP stdio server** — 7 tools for AI agent integration via `stdlib/mcp`
+- **MCP stdio server** — 8 tools for AI agent integration via `stdlib/mcp`
 
 ## Build and Run
 
@@ -43,6 +43,7 @@ binary at ./mizuya
 | `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
 | `attach`  | Attach a media file (`--file [--id entity] [--kind image\|audio] [--caption ...] [--name ...]`); omits `--id` to auto-create a content-addressed media-native entity; bytes are sha256-stored and never scanned — the caption passes the same fail-closed gate as observations |
+| `similar-media` | Similarity search over stored media attachments (`--file [--limit] [--kind image\|audio]`); returns attachments (id, entity, kind, caption, distance) instead of entities |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
 | `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--regex] [--type] [--tag] [--since] [--until]`) |
 | `context` | Entity + neighbors + observations (always newest-first) + media attachments (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
@@ -146,7 +147,7 @@ and ranking instead of trusting rank alone.
 ## MCP Server
 
 The `mcp` subcommand starts a Model Context Protocol stdio server with
-7 tools that AI agents can use to read and write the knowledge graph:
+8 tools that AI agents can use to read and write the knowledge graph:
 
 | MCP Tool         | Description                                               |
 |------------------|-----------------------------------------------------------|
@@ -157,6 +158,7 @@ The `mcp` subcommand starts a Model Context Protocol stdio server with
 | `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones) + media `attachments` (each marked unscanned); optional `history`, `since`, `until`, `hide_superseded` |
 | `similar`        | Vector similarity search by entity id or text; same filters as `search` |
 | `attach_media`   | Attach a media file (image or audio) — `file` (host-local path) or `data_base64` — to an entity, or auto-create a media-native one; bytes are sha256-stored and never secret-scanned; caption passes the text gate |
+| `similar_media`  | Vector similarity search over stored media attachments (file or data_base64 query; `kind` filter; returns attachments, not entities) |
 
 ### MCP resources
 

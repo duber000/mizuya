@@ -196,6 +196,78 @@ func TestAttachResultContract(t: reference testing.T)
         "embed_deferred",
     })
 
+func TestSearchMediaReturnsNearest(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
+    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := writeTempPng(t, dir)
+    dbPath := filepath.Join(dir, "test.db")
+
+    r1, err := attachMediaFile(pool, dbPath, attachArgs(file))
+    test.AssertNoError(t, err)
+    # Second, different file (identical bytes would dedup to r1).
+    other := filepath.Join(dir, "second.png")
+    files.WriteBytes(list of byte{9, 8, 7, 6, 5}, other) onerr
+        t.Fatalf("write fixture: %v", error)
+        return
+
+    r2, err2 := attachMediaFile(pool, dbPath, attachArgs(other))
+    test.AssertNoError(t, err2)
+
+    # Plant hand-built vectors: vec1 bakes the dimension at first insert,
+    # so the whole test store uses 3-dimensional vectors.
+    test.AssertNoError(t, upsertMediaEmbedding(pool, r1.MediaId, list of float64{1.0, 0.0, 0.0}))
+    test.AssertNoError(t, upsertMediaEmbedding(pool, r2.MediaId, list of float64{0.0, 1.0, 0.0}))
+
+    hits, sErr := searchMedia(pool, list of float64{0.9, 0.1, 0.0}, 5, "")
+    test.AssertNoError(t, sErr)
+    test.AssertEqual(t, len(hits), 2)
+    test.AssertEqual(t, hits[0].Id, r1.MediaId)
+
+    imgHits, sErr2 := searchMedia(pool, list of float64{0.9, 0.1, 0.0}, 5, "image")
+    test.AssertNoError(t, sErr2)
+    test.AssertEqual(t, len(imgHits), 2)
+
+    audioHits, sErr3 := searchMedia(pool, list of float64{0.9, 0.1, 0.0}, 5, "audio")
+    test.AssertNoError(t, sErr3)
+    test.AssertEqual(t, len(audioHits), 0)
+
+    kindHits, kErr := searchMedia(pool, list of float64{0.9, 0.1, 0.0}, 5, "hologram")
+    test.AssertError(t, kErr)
+    test.AssertTrue(t, kindHits is empty)
+
+func TestSearchMediaEmptyStore(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "")
+    t.Setenv("MIZUYA_EMBED_MODEL", "")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    hits, sErr := searchMedia(pool, list of float64{1.0, 0.0, 0.0}, 5, "")
+    test.AssertNoError(t, sErr)
+    test.AssertTrue(t, hits is empty)
+
+func TestMediaHitContract(t: reference testing.T)
+    h := MediaHit{
+        Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
+        EntityId: "deploy-console",
+        Kind: "image",
+        Caption: "c",
+        Path: "/abs/assets/ab12.png",
+        At: "2026-11-12 01:04:18.647",
+        Distance: 0.73,
+    }
+    assertJSONKeys(t, h, list of string{
+        "id",
+        "entity_id",
+        "kind",
+        "caption",
+        "path",
+        "at",
+        "distance",
+    })
+
 func TestMediaRowContract(t: reference testing.T)
     row := MediaRow{
         Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",

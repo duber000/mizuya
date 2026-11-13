@@ -175,6 +175,31 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int, filter: 
     result := db.Query(pool, q, many args) |> db.ScanAll of SimilarHit
     return result, empty
 
+# searchMedia returns the k media attachments whose embeddings are
+# closest to the query vector under cosine distance (vec1 KNN). Kind
+# narrows to "image" or "audio" (empty = any). Reads media_vec directly —
+# unlike entities, attachments carry no FTS side.
+func searchMedia(pool: db.Pool, vec: list of float64, k: int, kind: string) (list of MediaHit, error)
+    if k <= 0
+        k = 5
+    if kind isnt empty
+        kind = strpkg.ToLower(kind)
+        if kind isnt "image" and kind isnt "audio"
+            return empty list of MediaHit, error "--kind must be image or audio, got {kind}"
+    blob := serializeVec(vec)
+    knnArg := "\{k: {k}\}"
+    parts := list of string{
+        "SELECT m.id AS id, m.entity_id AS entity_id, m.kind AS kind, m.caption AS caption, m.path AS path, m.at AS at, v.distance AS distance FROM media_vec(?, ?) v JOIN media m ON m.id = v.media_id",
+    }
+    args := list of any{blob, knnArg}
+    if kind isnt empty
+        parts = append(parts, "WHERE m.kind = ?")
+        args = append(args, kind)
+    parts = append(parts, "ORDER BY v.distance ASC")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of MediaHit
+    return result, empty
+
 # getEmbedding fetches the stored embedding for an entity (for the
 # "similar --id ..." path where we use an entity's own vector as the
 # query). Reads come from the plain embeddings_raw table — the vec1

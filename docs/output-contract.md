@@ -62,6 +62,10 @@ MediaRow    = { "id": string /* uuid7 */, "entity_id": string,
                 "scanned": 0 /* always 0 — the regex secret gate covers text only; media BYTES are never scanned */,
                 "source": string /* stored (redacted) source label */,
                 "at": string /* UTC, millisecond precision */ }
+MediaHit    = { "id": string /* media id */, "entity_id": string,
+                "kind": "image" | "audio", "caption": string,
+                "path": string, "at": string /* UTC */,
+                "distance": number /* cosine distance, lower = closer */ }
 AttachResult= { "status": "attached" | "media-native" | "already-attached",
                 "entity_id": string, "media_id": string,
                 "kind": "image" | "audio", "mime": string,
@@ -89,6 +93,7 @@ AttachResult= { "status": "attached" | "media-native" | "already-attached",
 | `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |
 | `import-openwiki` | `{"status": "imported", "entities": number, "links": number}` (deprecated alias for `import-okf --bundle openwiki`; shape unchanged) |
 | `reembed` | `{"status": "reembedded", "entities": number, "media": number, "model": string, "dim": number, "note": string}` — all-or-nothing rebuild of `embeddings_vec`/`embeddings_raw` (and `media_vec`/`media_raw` when a provider is configured) with the *currently configured* provider. Every vector is computed before the store drops — a provider outage aborts with nothing modified; the swap itself is one transaction. `entity_history` and `entities` are untouched; `content_hash` advances to match |
+| `similar-media` | `MediaHit[]` — KNN over the `media_vec` index with the query embedded via the configured multimodal provider; refuses when the query dim and the stored `media_raw` dim disagree (run `reembed` after switching providers) |
 | `mcp` | no `--json`; stdio is JSON-RPC (MCP). Logs go to stderr, never stdout |
 
 Text mode additionally prints, after each search/similar result table, one
@@ -103,6 +108,9 @@ the preferred, stdio-safe form) or `data_base64` (with `mime` required), plus op
 `id` (omit for a media-native `type=media` entity), `kind`, `caption`, `name`, and
 `source`. It returns short confirmation text (`attached: ...` / `already-attached: ...`)
 always ending with the `[bytes unscanned]` honesty marker — never raw input echoes;
+`similar_media` takes the same `file` / `data_base64` (+ `mime`) query pair, accepts a
+`kind` filter and `limit`, and returns `MediaHit[]` as JSON text (same `dist` guard as
+`similar --media`: query dim must match the stored index dim).
 
 `add_observation` / `relate` return short
 confirmation text (`observed: ...`, `related: ...`) echoing the *stored*

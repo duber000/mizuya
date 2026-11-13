@@ -52,6 +52,12 @@ workflow builds images on tag push.
 - Bug fix: `MIZUYA_EMBED_MODEL` values containing a colon (Ollama tags
   like `embeddinggemma-2:740m`) were split into provider/model by the
   client builder; the model is now passed through verbatim.
+- New `similar-media` command and 8th MCP tool `similar_media`:
+  KNN over the `media_vec` index with the query embedded via the
+  configured provider (dim-guarded against `media_raw`); returns
+  attachments (id, entity_id, kind, caption, distance) — the "which
+  screenshot/audio is this like?" query. Verified end-to-end with
+  Ollama (identical file ranks distance 0).
 - New `reembed` command (all-or-nothing, one transaction): rebuilds
   `embeddings_vec`/`embeddings_raw` with the configured provider — and
   `media_vec`/`media_raw` when a provider is set — for switching

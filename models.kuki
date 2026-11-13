@@ -130,6 +130,19 @@ type hashRow
 type dimRow
     Dim: int as "dim"
 
+# MediaHit is a single row from a media-index similarity search —
+# the attachment dimension of the graph ("which screenshot/audio is
+# this most like?"), as opposed to SimilarHit over entities. Distance is
+# cosine distance, lower = closer, same convention.
+type MediaHit
+    Id: string as "id"
+    EntityId: string as "entity_id"
+    Kind: string as "kind"
+    Caption: string as "caption"
+    Path: string as "path"
+    At: string as "at"
+    Distance: float64 as "distance"
+
 # MediaRow is one stored media attachment on an entity. The entity can be
 # media-native (type = media, auto-created by `attach` when no --id is
 # given — id = media-<sha256[:12]>, content-addressed so re-attaching the

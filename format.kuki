@@ -72,6 +72,29 @@ func printSimilarHits(hits: list of SimilarHit)
     for h in hits
         print("  {color.Dim("→")} {drillHint(h.Id)}")
 
+# printSimilarMediaHits renders media-index hits, with the same
+# drill-down hint style as printSimilarHits (the owning entity is the
+# drill-down coordinate, so the hint points at its context).
+func printSimilarMediaHits(hits: list of MediaHit)
+    if hits is empty
+        print(color.Dim("  No media indexed yet."))
+        return
+    t := table.New({"id", "entity", "kind", "distance", "at", "caption"})
+    for h in hits
+        dist := "{h.Distance:.4f}"
+        t = t
+            |> table.AddRowValues(
+                strpkg.Truncate(h.Id, 26),
+                h.EntityId,
+                h.Kind,
+                dist,
+                h.At,
+                strpkg.Truncate(h.Caption, 60),
+            )
+    t |> table.Print()
+    for h in hits
+        print("  {color.Dim("→")} {drillHint(h.EntityId)}")
+
 # printHistory renders the append-only version log of an entity, newest
 # first. No-op when the caller did not request history.
 func printHistory(hist: list of HistoryRow)

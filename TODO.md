@@ -194,9 +194,13 @@ Phase 3 — safety, idempotency, measurement — **done**:
       clips. Decide after P2 based on recall measurements.
 - [ ] Media-bytes OCR secret scan (tesseract sidecar?) — the one redaction
       gap in an otherwise fail-closed gate; needs an opt-in decision.
-- [ ] `media_vec` query surface (`similar_media` tool?); vectors are
-      stored today but no reader exposes them yet (entity-level
-      `similar --media` is the interim cross-modal path).
+- [x] `similar-media` command + 8th MCP tool `similar_media`: KNN over
+      the `media_vec` index with the query embedded via the configured
+      provider; dim-guarded against `media_raw`; returns attachments
+      (id, entity_id, kind, caption, distance). KNN path pinned offline
+      by planted-vector tests.
+- [x] Media embeds via Ollama `/v1/embeddings` object input (no custom
+      HTTP path needed — verified passthrough).
 - [ ] Interleaved caption+media embed (`{"text": caption, "image": ...}`)
       instead of bare-media vectors — measure against bare-media on the
       labeled benchmark before switching.

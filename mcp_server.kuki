@@ -1,5 +1,5 @@
 # mizuya — MCP stdio server
-# Registers 6 tools so AI agents (Claude Desktop, etc.) can interact
+# Registers 8 tools so AI agents (Claude Desktop, etc.) can interact
 # with the knowledge graph over the Model Context Protocol.
 
 petiole main
@@ -7,6 +7,7 @@ petiole main
 import "stdlib/db"
 import "stdlib/encoding"
 import "stdlib/env"
+import "stdlib/files"
 import "stdlib/json" as jsonpkg
 import "stdlib/jsonschema"
 import "stdlib/log"
@@ -71,6 +72,13 @@ type attachMediaArgs
     Caption: string as "caption"
     Name: string as "name"
     Source: string as "source"
+
+type similarMediaArgs
+    File: string as "file"
+    DataBase64: string as "data_base64"
+    Mime: string as "mime"
+    Kind: string as "kind"
+    Limit: int as "limit"
 
 type similarArgs
     Id: string as "id"
@@ -167,7 +175,7 @@ func entityContextResource(uri: string) (string, error)
     data := jsonpkg.PrettyBytes(payload) onerr return "", error
     return data as string, empty
 
-# registerTools adds all 7 knowledge graph tools to the MCP server.
+# registerTools adds all 8 knowledge graph tools to the MCP server.
 func registerTools(server: reference mcp.Server)
     registerUpsertEntity(server)
     registerAddObservation(server)
@@ -176,6 +184,7 @@ func registerTools(server: reference mcp.Server)
     registerGetContext(server)
     registerSimilarTool(server)
     registerAttachMedia(server)
+    registerSimilarMedia(server)
 
 # --- Tool: upsert_entity ---
 
@@ -673,6 +682,88 @@ func attachMediaText(res: AttachResult) (any, error)
     return mcp.TextResult(
         "{res.Status}: media {res.MediaId} on entity {res.EntityId} ({res.Kind}, {res.Bytes} B){redactNote}{embedNote} [bytes unscanned]",
     ), empty
+
+# --- Tool: similar_media ---
+
+func registerSimilarMedia(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "file",
+            jsonschema.String,
+            "Host-local path to the query media file (preferred). Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "data_base64",
+            jsonschema.String,
+            "Base64-encoded query media (for non-shared filesystems). Requires mime. Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "mime",
+            jsonschema.String,
+            "MIME type (required with data_base64; inferred from the file extension otherwise)",
+        ),
+        jsonschema.Prop("kind", jsonschema.String, "Narrow hits to image or audio (default: any)"),
+        jsonschema.Prop("limit", jsonschema.Integer, "Max results (default: 5)"),
+    })
+
+    mcp.ToolWithOpts of similarMediaArgs(
+        server,
+        "similar_media",
+        "Vector similarity search over stored media attachments (cosine distance, nearest first). Unlike `similar` (which returns entities), this returns the attachments themselves — ids, owning entity, kind, caption, distance — so you can drill into an attachment with get_context on its entity_id. Bytes are embedded via the configured provider; media and text must live in one space (reembed).",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSimilarMedia,
+    )
+
+func handleSimilarMedia(args: similarMediaArgs) (any, error)
+    hasFile := args.File isnt empty
+    hasB64 := args.DataBase64 isnt empty
+    if hasFile and hasB64
+        return mcp.ErrorResult("pass only one of file and data_base64"), empty
+    if not hasFile and not hasB64
+        return mcp.ErrorResult("either file or data_base64 is required"), empty
+    limit := args.Limit
+    if limit <= 0
+        limit = 5
+    kind := strpkg.ToLower(strpkg.TrimSpace(args.Kind))
+    if kind isnt empty and kind isnt "image" and kind isnt "audio"
+        return mcp.ErrorResult("kind must be image or audio, got {args.Kind}"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+
+    var vec: list of float64
+    var err: error
+    if hasFile
+        if not files.Exists(args.File)
+            return mcp.ErrorResult("file not found: {args.File}"), empty
+        raw := files.Read(args.File) onerr return mcp.ErrorResult("cannot read {args.File}: {error}"), empty
+        mkind, kErr := inferMediaKind(args.File, "")
+        if kErr isnt empty
+            return mcp.ErrorResult("{kErr}"), empty
+        vec, err = embedMedia(mkind, raw)
+    else
+        if args.Mime is empty
+            return mcp.ErrorResult("mime is required with data_base64"), empty
+        raw := encoding.Base64Decode(args.DataBase64) onerr return mcp.ErrorResult("data_base64 is not valid base64: {error}"), empty
+        mkind, mErr := inferMediaKind("", args.Mime)
+        if mErr isnt empty
+            return mcp.ErrorResult("{mErr}"), empty
+        vec, err = embedMedia(mkind, raw)
+
+    if err isnt empty
+        return mcp.ErrorResult("media embed failed: {err}"), empty
+
+    probe := db.Query(pool, "SELECT dim FROM media_raw LIMIT 1") |> db.ScanAll of dimRow
+    if probe isnt empty and probe[0].Dim isnt len(vec)
+        return mcp.ErrorResult(
+            "media query ({len(vec)}d) and media index ({probe[0].Dim}d) disagree; run `mizuya reembed` with the multimodal provider",
+        ), empty
+
+    hits := searchMedia(pool, vec, limit, kind) onerr return mcp.ErrorResult("media similarity search failed: {error}"), empty
+
+    data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
 
 # --- Helpers ---
 

@@ -93,6 +93,7 @@ func main()
             makeSearchCmd(),
             makeContextCmd(),
             makeSimilarCmd(),
+            makeSimilarMediaCmd(),
             makeListCmd(),
             makeMCPCmd(),
             makeImportOKFCmd(),
@@ -208,6 +209,16 @@ func makeSimilarCmd() reference cli.Command
         |> .StringFlag("since", "Only entities updated on/after this YYYY-MM-DD", "")
         |> .StringFlag("until", "Only entities updated on/before this YYYY-MM-DD", "")
         |> .ActionE(doSimilar)
+
+func makeSimilarMediaCmd() reference cli.Command
+    return cli.NewCommand(
+        "similar-media",
+        "Vector similarity search over stored media attachments (cosine distance, like similar but for attachments)",
+    )
+        |> .RequiredFlag("file", "Media file to embed as the query (image or audio)")
+        |> .IntFlag("limit", "Max results", 5)
+        |> .StringFlag("kind", "Narrow to image or audio (default: any)", "")
+        |> .ActionE(doSimilarMedia)
 
 func makeListCmd() reference cli.Command
     return cli.NewCommand("list", "List entities (optionally filtered by --type)")
@@ -788,6 +799,45 @@ func doSimilar(args: cli.Args) error
             header = header + " (closest {threshold}%)"
         print(color.Bold(header))
         printSimilarHits(hits)
+    return empty
+
+# doSimilarMedia embeds a media file and KNN-searches the media index.
+# Mirrors `similar` but over media_vec — the "which attachment is this
+# like?" query. Requires a multimodal provider; the dim is guarded
+# against media_raw the same way `similar --media` guards embeddings_raw.
+func doSimilarMedia(args: cli.Args) error
+    file := cli.GetString(args, "file")
+    kind := strpkg.ToLower(strpkg.TrimSpace(cli.GetString(args, "kind")))
+    if kind isnt empty and kind isnt "image" and kind isnt "audio"
+        return cli.UsageFail("--kind must be image or audio, got {kind}")
+    limit := cli.GetIntOr(args, "limit", 5)
+    if limit <= 0
+        return cli.UsageFail("--limit must be > 0, got {limit}")
+
+    if not files.Exists(file)
+        return error "file not found: {file}"
+    bytes := files.Read(file) onerr return error "cannot read {file}: {error:w}"
+    mkind, kErr := inferMediaKind(file, "")
+    if kErr isnt empty
+        return kErr
+    vec := embedMedia(mkind, bytes) onerr explain "cannot compute media embedding"
+
+    pool := openPool(args) onerr explain "cannot open database"
+    defer db.Close(pool)
+
+    probe := db.Query(pool, "SELECT dim FROM media_raw LIMIT 1") |> db.ScanAll of dimRow
+    if probe isnt empty and probe[0].Dim isnt len(vec)
+        return cli.UsageFail(
+            "media query ({len(vec)}d) and media index ({probe[0].Dim}d) disagree; run `mizuya reembed` with the multimodal provider",
+        )
+
+    hits := searchMedia(pool, vec, limit, kind) onerr explain "media similarity search failed"
+
+    if cli.IsJSON(args)
+        printJSON(hits)
+    else
+        print(color.Bold("similar media to: {file}"))
+        printSimilarMediaHits(hits)
     return empty
 
 func doList(args: cli.Args) error
