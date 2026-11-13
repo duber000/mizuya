@@ -5,6 +5,7 @@
 petiole main
 
 import "stdlib/db"
+import "stdlib/encoding"
 import "stdlib/env"
 import "stdlib/json" as jsonpkg
 import "stdlib/jsonschema"
@@ -60,6 +61,16 @@ type getContextArgs
     Since: string as "since"
     Until: string as "until"
     HideSuperseded: bool as "hide_superseded"
+
+type attachMediaArgs
+    Id: string as "id"
+    File: string as "file"
+    DataBase64: string as "data_base64"
+    Mime: string as "mime"
+    Kind: string as "kind"
+    Caption: string as "caption"
+    Name: string as "name"
+    Source: string as "source"
 
 type similarArgs
     Id: string as "id"
@@ -144,17 +155,19 @@ func entityContextResource(uri: string) (string, error)
     outgoing := outgoingContext(pool, id) onerr return "", error
     incoming := incomingContext(pool, id) onerr return "", error
     obs := listObservations(pool, id) onerr return "", error
+    atts := listMedia(pool, id) onerr return "", error
 
     payload := ToolArgs{
         "entity": e,
         "outgoing": outgoing,
         "incoming": incoming,
         "observations": obs,
+        "attachments": atts,
     }
     data := jsonpkg.PrettyBytes(payload) onerr return "", error
     return data as string, empty
 
-# registerTools adds all 6 knowledge graph tools to the MCP server.
+# registerTools adds all 7 knowledge graph tools to the MCP server.
 func registerTools(server: reference mcp.Server)
     registerUpsertEntity(server)
     registerAddObservation(server)
@@ -162,6 +175,7 @@ func registerTools(server: reference mcp.Server)
     registerSearchTool(server)
     registerGetContext(server)
     registerSimilarTool(server)
+    registerAttachMedia(server)
 
 # --- Tool: upsert_entity ---
 
@@ -437,6 +451,7 @@ func handleGetContext(args: getContextArgs) (any, error)
 
     e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, args.Id)}"), empty
     obs := listObservationsRange(pool, args.Id, args.Since, args.Until, args.HideSuperseded) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+    atts := listMedia(pool, args.Id) onerr return mcp.ErrorResult("cannot read media attachments: {error}"), empty
 
     hist := empty list of HistoryRow
     if args.History
@@ -452,6 +467,7 @@ func handleGetContext(args: getContextArgs) (any, error)
             "outgoing": outReach,
             "incoming": inReach,
             "observations": obs,
+            "attachments": atts,
         }
         if args.History
             payload["history"] = hist
@@ -466,6 +482,7 @@ func handleGetContext(args: getContextArgs) (any, error)
         "outgoing": outgoing,
         "incoming": incoming,
         "observations": obs,
+        "attachments": atts,
     }
     if args.History
         payload["history"] = hist
@@ -550,6 +567,112 @@ func handleSimilar(args: similarArgs) (any, error)
 
     data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
     return mcp.TextResult(data as string), empty
+
+# --- Tool: attach_media ---
+
+func registerAttachMedia(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "id",
+            jsonschema.String,
+            "Entity to attach the media to. Omit to auto-create a media-native entity (type=media, id = media-<sha256>).",
+        ),
+        jsonschema.Prop(
+            "file",
+            jsonschema.String,
+            "Host-local path to the media file (preferred for stdio MCP). Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "data_base64",
+            jsonschema.String,
+            "Base64-encoded bytes (for non-shared filesystems). Requires mime. Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "mime",
+            jsonschema.String,
+            "MIME type (required with data_base64; inferred from extension otherwise)",
+        ),
+        jsonschema.Prop(
+            "kind",
+            jsonschema.String,
+            "image or audio (default: inferred from extension). Video is not supported yet.",
+        ),
+        jsonschema.Prop(
+            "caption",
+            jsonschema.String,
+            "Free-text caption. Passes the same fail-closed secret gate as observations — redacted in place; the stored caption is what gets embedded/returned. Bytes themselves are never scanned.",
+        ),
+        jsonschema.Prop(
+            "name",
+            jsonschema.String,
+            "Name for an auto-created media-native entity (default: file basename)",
+        ),
+        jsonschema.Prop("source", jsonschema.String, "Source label (default: agent)"),
+    })
+
+    mcp.ToolWithOpts of attachMediaArgs(
+        server,
+        "attach_media",
+        "Attach a media file (image or audio) to the knowledge graph — to an existing entity, or as a new media-native entity when id is omitted. Bytes are stored sha256-addressed and embedded via the configured provider; the bytes are never secret-scanned and the caption gate is the only text-redaction path. Returns confirmation text; get_context lists attachments.",
+        schema,
+        mcp.ToolOpts{Idempotent: true, Destructive: true},
+        handleAttachMedia,
+    )
+
+func handleAttachMedia(args: attachMediaArgs) (any, error)
+    hasFile := args.File isnt empty
+    hasB64 := args.DataBase64 isnt empty
+    if hasFile and hasB64
+        return mcp.ErrorResult("pass only one of file and data_base64"), empty
+    if not hasFile and not hasB64
+        return mcp.ErrorResult("either file or data_base64 is required"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer db.Close(pool)
+
+    aa := AttachArgs{
+        Id: args.Id,
+        File: args.File,
+        Kind: args.Kind,
+        Mime: args.Mime,
+        Caption: args.Caption,
+        Name: args.Name,
+        Source: args.Source,
+    }
+
+    if hasFile
+        res, aerr := attachMediaFile(pool, mcpDBPath, aa)
+        if aerr isnt empty
+            return mcp.ErrorResult("attach failed: {aerr}"), empty
+        return attachMediaText(res)
+
+    if args.Mime is empty
+        return mcp.ErrorResult("mime is required with data_base64"), empty
+    raw, dErr := encoding.Base64Decode(args.DataBase64)
+    if dErr isnt empty
+        return mcp.ErrorResult("data_base64 is not valid base64: {dErr}"), empty
+    res, aerr := attachMediaBytes(pool, mcpDBPath, aa, raw, "")
+    if aerr isnt empty
+        return mcp.ErrorResult("attach failed: {aerr}"), empty
+    return attachMediaText(res)
+
+# attachMediaText renders the attach_media confirmation. A no-op
+# (already-attached) says so explicitly instead of crediting a redaction
+# of text that was never stored.
+func attachMediaText(res: AttachResult) (any, error)
+    if res.Status equals "already-attached"
+        return mcp.TextResult(
+            "already-attached: media {res.MediaId} already on entity {res.EntityId}; nothing stored. [bytes unscanned]",
+        ), empty
+    redactNote := ""
+    if res.Redacted > 0
+        redactNote = " (redacted {res.Redacted} secret(s) before storing)"
+    embedNote := ""
+    if res.EmbedDeferred
+        embedNote = " (embedding deferred)"
+    return mcp.TextResult(
+        "{res.Status}: media {res.MediaId} on entity {res.EntityId} ({res.Kind}, {res.Bytes} B){redactNote}{embedNote} [bytes unscanned]",
+    ), empty
 
 # --- Helpers ---
 

@@ -83,7 +83,7 @@ func printHistory(hist: list of HistoryRow)
         print("  {color.Dim(h.ChangedAt)}  {color.Bold(h.Name)} {color.Dim("({h.Type})")}")
         print("    {color.Dim(strpkg.Truncate(h.Data, 100))}")
 
-func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of ContextRow, obs: list of ObsRow)
+func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of ContextRow, obs: list of ObsRow, atts: list of MediaRow)
     printEntityHeader(e)
     print("")
     print(color.Bold("data:"))
@@ -119,8 +119,9 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
                 src = "conversation"
             mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {o.SupersededBy})")}" else ""
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
+    printAttachments(atts)
 
-func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow, incoming: list of ReachableRow, obs: list of ObsRow)
+func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow, incoming: list of ReachableRow, obs: list of ObsRow, atts: list of MediaRow)
     printEntityHeader(e)
     print(color.Dim("  reachable within {depth} hops"))
     print("")
@@ -157,6 +158,23 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
                 src = "conversation"
             mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {o.SupersededBy})")}" else ""
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
+    printAttachments(atts)
+
+# printAttachments renders an entity's media attachments. The bytes are
+# never secret-scanned, so every attachment line carries the
+# [bytes unscanned] marker — the same honest-visibility rule as the
+# regex gate (nothing claims a scan happened).
+func printAttachments(atts: list of MediaRow)
+    if atts is empty
+        return
+    print("")
+    print(color.Bold("attachments:"))
+    for a in atts
+        print(
+            "  {a.Kind} {color.Cyan(a.Path)} {color.Dim("({a.Bytes} B)")} {color.Yellow("[bytes unscanned]")}",
+        )
+        if a.Caption isnt empty
+            print("     {color.Dim(a.Caption)}")
 
 func printJSON(v: any)
     data := jsonpkg.PrettyBytes(v) onerr

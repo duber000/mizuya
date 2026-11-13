@@ -13,6 +13,7 @@
 
 petiole main
 
+import "stdlib/encoding"
 import "stdlib/llm/embeddings"
 import "stdlib/parse"
 
@@ -58,18 +59,55 @@ func loadEmbedConfig() embedConfig
         # matches the previous empty-string defaults.
         return embedConfig{}
 
+# embedClient builds the provider client for embed requests. The model
+# name is passed through VERBATIM — never through the "provider:model"
+# split embedded in embeddings.New — because Ollama model tags carry a
+# colon themselves (embeddinggemma-2:740m), which the split would
+# mangle into provider="embeddinggemma-2" model="740m".
+func embedClient(cfg: embedConfig) embeddings.Client
+    client := embeddings.New("")
+    client = embeddings.Model(client, cfg.model)
+    client = embeddings.Provider(client, cfg.provider)
+    if cfg.url isnt empty
+        client = embeddings.BaseURL(client, cfg.url)
+    if cfg.apiKey isnt empty
+        client = embeddings.APIKey(client, cfg.apiKey)
+    return client
+
 # embedText converts text into a vector using the configured provider.
 # Falls back to hashEmbed when no provider is set.
 func embedText(text: string) (list of float64, error)
     cfg := loadEmbedConfig()
     if cfg.provider is empty
         return hashEmbed(text, EmbedDim), empty
-    client := embeddings.New(cfg.model) |> embeddings.Provider(cfg.provider)
-    if cfg.url isnt empty
-        client = embeddings.BaseURL(client, cfg.url)
-    if cfg.apiKey isnt empty
-        client = embeddings.APIKey(client, cfg.apiKey)
-    vec32 := embeddings.EmbedOne(client, text)
+    vec32 := embeddings.EmbedOne(embedClient(cfg), text)
+    out := make(list of float64, len(vec32))
+    for i, v in vec32
+        out[i] = v as float64
+    return out, empty
+
+# embedMedia embeds one media item through the configured provider. The
+# input is an OpenAI-compatible multimodal object — Ollama serving
+# embeddinggemma-2 (MIZUYA_EMBED_PROVIDER=ollama,
+# MIZUYA_EMBED_MODEL=embeddinggemma-2:740m) accepts
+# {"image": "<base64>"} / {"audio": "<base64>"} and returns a unit-norm
+# 768-dimensional vector in the same shared space as text. (Video has no
+# multimodal key in the API — keyframes are a separate, later ingest
+# path.)
+#
+# Fails closed when no provider is configured: the hash fallback has no
+# media path, and silently storing a garbage vector is worse than
+# refusing. Callers treat this as a deferral (the row is committed; the
+# vector lands on a later touch) — same contract as entity embeddings.
+func embedMedia(kind: string, bytes: list of byte) (list of float64, error)
+    cfg := loadEmbedConfig()
+    if cfg.provider is empty
+        return empty, error "media embeddings require a multimodal provider (MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m); none configured"
+    input := map of string to string{kind: encoding.Base64Encode(bytes)}
+    resp := embeddings.EmbedRaw(embedClient(cfg), input) onerr return empty, error "media embed request failed: {error:w}"
+    if resp.Data is empty
+        return empty, error "media embed returned no vectors"
+    vec32 := resp.Data[0].Embedding
     out := make(list of float64, len(vec32))
     for i, v in vec32
         out[i] = v as float64

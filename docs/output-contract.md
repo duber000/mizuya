@@ -54,6 +54,21 @@ ContextRow  = { "rel": string, "other": string, "name": string, "type": string, 
 ReachableRow= { "depth": number, "other": string, "name": string, "type": string, "summary": string }
 DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
                 "obs_text": string, "obs_at": string, "entity_updated": string }
+MediaRow    = { "id": string /* uuid7 */, "entity_id": string,
+                "kind": "image" | "audio", "mime": string,
+                "path": string /* content-addressed asset path under <db dir>/assets/; filename is the sha256 hex */,
+                "sha256": string, "bytes": number,
+                "caption": string /* stored (redacted) caption, or "" */,
+                "scanned": 0 /* always 0 — the regex secret gate covers text only; media BYTES are never scanned */,
+                "source": string /* stored (redacted) source label */,
+                "at": string /* UTC, millisecond precision */ }
+AttachResult= { "status": "attached" | "media-native" | "already-attached",
+                "entity_id": string, "media_id": string,
+                "kind": "image" | "audio", "mime": string,
+                "path": string, "sha256": string, "bytes": number,
+                "redacted": number /* secrets the text gate redacted from the candidate caption/source/name; on "already-attached" the candidate is discarded, so this refers to it, not to stored data */,
+                "bytes_scanned": false /* always false — see MediaRow.scanned */,
+                "embed_deferred": boolean /* media vector not stored (provider unavailable) — the row committed; vector lands on a later touch */ }
 ```
 
 ## Per-command `--json` shapes
@@ -63,11 +78,12 @@ DriftRow    = { "obs_id": string, "entity_id": string, "entity_name": string,
 | `init` | `{"status": "initialized", "db": string}` |
 | `upsert` | `Entity` — plus two optional additive keys when the post-commit embedding refresh failed: `"embedding": "deferred"` and `"embedding_error": string` (see note below) |
 | `observe` | `{"status": "observed", "id": string, "text": string /* the STORED (redacted) text */, "redacted": number /* secrets redacted by the gate */}` — plus the same two optional `embedding` keys when the refresh failed |
+| `attach` | `AttachResult` — `status` is `"media-native"` (a media-native `type=media` entity was auto-created; the entity id is `media-<sha256[:12]>` when `--id` is omitted, so re-attaching the same bytes is idempotent), `"attached"`, or `"already-attached"` (identical bytes already on this entity — nothing stored). `redacted` is the count of secrets the text gate redacted from the candidate caption/source/name; on `already-attached` the candidate is discarded and `redacted` refers to it, not to stored data (the stored caption is unchanged) |
 | `relate` | `{"status": "related", "src": string, "rel": string, "dst": string}` |
 | `search` | `SearchHit[]` (hybrid or, with `--regex`, FTS-regex hits with `score: 0`) |
-| `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "history"?: HistoryRow[]}` — observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
+| `context` | `{"entity": Entity, "outgoing": ContextRow[], "incoming": ContextRow[], "observations": ObsRow[], "attachments": MediaRow[], "history"?: HistoryRow[]}` — `attachments` is additive-optional (listed newest-first; bytes never secret-scanned, `scanned: 0`); observations always newest-first; with `--depth > 1` the neighbors become `ReachableRow[]` and `"depth": number` is added; `history` appears only with `--history`; `--hide-superseded` filters superseded observations out of the array |
 | `prune-history` | `{"status": "pruned" \| "dry-run", "keep": number, "before": string, "versions": number}` |
-| `similar` | `SimilarHit[]` |
+| `similar` | `SimilarHit[]` — with `--media <file>`, the query vector is computed from image/audio bytes via the configured multimodal provider; refuses when the stored text embeddings were built with a different dimension (the store and the media query must share one space) |
 | `list` | `Entity[]` |
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |
 | `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |
@@ -80,15 +96,23 @@ ready-to-run drill-down line per hit: `→ context --id <id> --history`.
 ## MCP tools
 
 The MCP equivalents return the same shapes as JSON text: `search` → `SearchHit[]`,
-`get_context` → the `context` payload, `similar` → `SimilarHit[]`,
-`upsert_entity` → `Entity`. `add_observation` / `relate` return short
+`get_context` → the `context` payload (now incl. `attachments`), `similar` → `SimilarHit[]`,
+`upsert_entity` → `Entity`. `attach_media` takes either `file` (a host-local path —
+the preferred, stdio-safe form) or `data_base64` (with `mime` required), plus optional
+`id` (omit for a media-native `type=media` entity), `kind`, `caption`, `name`, and
+`source`. It returns short confirmation text (`attached: ...` / `already-attached: ...`)
+always ending with the `[bytes unscanned]` honesty marker — never raw input echoes;
+
+`add_observation` / `relate` return short
 confirmation text (`observed: ...`, `related: ...`) echoing the *stored*
 (redacted) values — never the raw input. When the embedding provider is
 unreachable but the write committed, both write tools still succeed (never an
 error result — an agent retrying would duplicate the append): they log a
 stderr WARN, `add_observation` appends `(embedding deferred)` to its
 confirmation text, and `upsert_entity` returns the plain `Entity` (deferral
-only on stderr).
+only on stderr). `attach_media` follows the same fail-soft contract — an
+unreachable provider yields `(embedding deferred)` in the confirmation and a
+committed row, not an error result.
 
 ## MCP resources
 
@@ -98,4 +122,4 @@ failures surface as MCP resource errors, not as JSON text.
 | Resource | Payload |
 |---|---|
 | `entity://list` | `Entity[]` — same shape as `list --json` (capped at 500, newest-updated first) |
-| `entity://{id}` | the shallow `get_context` payload (`entity`, `outgoing`, `incoming`, `observations`) — observations newest-first, same ordering pin as the tool |
+| `entity://{id}` | the shallow `get_context` payload (`entity`, `outgoing`, `incoming`, `observations`, `attachments`) — observations newest-first, same ordering pin as the tool |

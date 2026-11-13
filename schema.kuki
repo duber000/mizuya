@@ -87,6 +87,37 @@ const embeddingsRawCascadeSQL = "CREATE TRIGGER IF NOT EXISTS embeddings_raw_aft
 
 const embeddingsRebuildSQL = `INSERT INTO embeddings_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
 
+# --- Media attachments ---
+# Media lives in its own table: the regex secret gate cannot scan bytes,
+# so the row records that honestly (scanned = 0 always) and stores only
+# derived, safe data — the sha256 (bytes-addressed asset path under
+# <db dir>/assets/), byte count, mime, and a caption that passes the
+# same fail-closed gate as observations. UNIQUE(entity_id, sha256) makes
+# re-attaching the same file to the same entity a no-op.
+# Media vectors get their own vec1 vtab + raw side store, mirroring the
+# embeddings pair — the entity-embedding contract stays untouched.
+const mediaSQL = "CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, kind TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, caption TEXT NOT NULL DEFAULT '', scanned INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'agent', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')))"
+
+const mediaUniqueSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_entity_sha ON media(entity_id, sha256)"
+
+const idxMediaEntitySQL = "CREATE INDEX IF NOT EXISTS idx_media_entity ON media(entity_id)"
+
+const mediaVecSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS media_vec USING vec1(vector, media_id)"
+
+const mediaRawSQL = "CREATE TABLE IF NOT EXISTS media_raw (media_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)"
+
+const mediaRebuildSQL = `INSERT INTO media_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
+
+# Virtual tables can't carry FK cascades. Triggers keep both vector stores
+# in sync: one on media delete, one on entity delete (media rows go with the
+# entity via the FK cascade; the media_id IN-subquery catches them on the
+# entity path). No delete path for entities exists in mizuya today, but the
+# trigger pair costs nothing and keeps the stores consistent however rows
+# disappear.
+const mediaCascadeSQL = "CREATE TRIGGER IF NOT EXISTS media_vec_after_media_delete AFTER DELETE ON media BEGIN DELETE FROM media_vec WHERE media_id = old.id; DELETE FROM media_raw WHERE media_id = old.id; END"
+
+const mediaEntityCascadeSQL = "CREATE TRIGGER IF NOT EXISTS media_vec_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM media_vec WHERE media_id IN (SELECT id FROM media WHERE entity_id = old.id); DELETE FROM media_raw WHERE media_id IN (SELECT id FROM media WHERE entity_id = old.id); END"
+
 # Virtual tables can't carry foreign-key cascades. A trigger keeps the
 # vector index in sync when an entity is deleted.
 const embeddingsCascadeSQL = "CREATE TRIGGER IF NOT EXISTS embeddings_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM embeddings_vec WHERE entity_id = old.id; END"
@@ -154,6 +185,14 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, embeddingsRawCascadeSQL) onerr return
         db.TxExec(tx, embeddingsRebuildSQL) onerr return
         db.TxExec(tx, embeddingsCascadeSQL) onerr return
+        db.TxExec(tx, mediaSQL) onerr return
+        db.TxExec(tx, mediaUniqueSQL) onerr return
+        db.TxExec(tx, idxMediaEntitySQL) onerr return
+        db.TxExec(tx, mediaVecSQL) onerr return
+        db.TxExec(tx, mediaRawSQL) onerr return
+        db.TxExec(tx, mediaRebuildSQL) onerr return
+        db.TxExec(tx, mediaCascadeSQL) onerr return
+        db.TxExec(tx, mediaEntityCascadeSQL) onerr return
         db.TxExec(tx, entitiesFtsSQL) onerr return
         db.TxExec(tx, triggerAI) onerr return
         db.TxExec(tx, triggerAD) onerr return

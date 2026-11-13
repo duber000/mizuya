@@ -19,11 +19,12 @@ place to keep everything you've learned within reach.
 - **vec1 virtual table** for vector KNN with cosine distance, plus a plain
   `embeddings_raw` side store (the vendored vec1 build is write/search-only)
 - **Binary BLOB vector storage** — compact little-endian float32 encoding
-- **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback)
+- **Real embeddings** via Ollama or OpenAI-compatible APIs (with hash fallback) — including multimodal text/image/audio in one shared 768-d space via `embeddinggemma-2`
+- **Media attachments** — images and audio stored sha256-addressed under `<db dir>/assets/`, embedded as 768-d vectors (`attach`); bytes are never secret-scanned and every output says so
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
 - **Append-only version log** (`entity_history`) + observation supersession
 - **Fail-closed secret redaction** on every stored free-text field
-- **MCP stdio server** — 6 tools for AI agent integration via `stdlib/mcp`
+- **MCP stdio server** — 7 tools for AI agent integration via `stdlib/mcp`
 
 ## Build and Run
 
@@ -41,11 +42,12 @@ binary at ./mizuya
 | `init`    | Create the database file and schema (also implicit: every command self-initializes an uninitialized `--db` path via idempotent `initDB` on open) |
 | `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
+| `attach`  | Attach a media file (`--file [--id entity] [--kind image\|audio] [--caption ...] [--name ...]`); omits `--id` to auto-create a content-addressed media-native entity; bytes are sha256-stored and never scanned — the caption passes the same fail-closed gate as observations |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
 | `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--regex] [--type] [--tag] [--since] [--until]`) |
-| `context` | Entity + neighbors + observations, always newest-first (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
+| `context` | Entity + neighbors + observations (always newest-first) + media attachments (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
 | `prune-history` | Compact the append-only version log: `--keep N` and/or `--before YYYY-MM-DD`, `--dry-run`; a version is pruned only when it breaks **both** bounds; newest version per entity always kept |
-| `similar` | Cosine similarity search (`--id` *or* `--text`, `[--limit]`, `[--threshold 1-100]`, same filters as `search`) |
+| `similar` | Cosine similarity search (`--id` *or* `--text` *or* `--media <file>`, `[--limit]`, `[--threshold 1-100]`, same filters as `search`); `--media` needs a multimodal provider (`embeddinggemma-2:740m`) so the store and the media query share one vector space |
 | `list`    | List entities, optionally filtered by `--type`                          |
 | `drift`   | Observations made stale by a later entity change (`--limit`, `--include-superseded`); observations already marked `distilled` are skipped |
 | `import-okf` | Import an OKF knowledge bundle (`--bundle docs`, default: `docs/` with `index.md`/`log.md` skipped per SPEC §8/§9) into entities + `references` edges; idempotent |
@@ -69,8 +71,12 @@ place as `[REDACTED:<detector>]` before storing, and a scanner error refuses
 the write rather than reporting "clean".
 
 Coverage: entity name, summary, and tags; observation text and its `source`
-label; relation labels; imported front-matter fields — all redacted in
-place. Entity type is a closed enum validated (and lowercased) at the
+label; relation labels; imported front-matter fields; media captions and
+attachment source labels — all redacted in place. Media **bytes are never
+scanned** (the gate is text-only): attachments are marked `[bytes unscanned]`
+in every mode and the `media.scanned` column stays 0, so the absence of a
+scan is always visible, never silently implied. Entity type is a closed
+enum validated (and lowercased) at the
 CLI/MCP boundaries. A secret detected in the **entity id** refuses the
 upsert outright — ids are referential keys (relations, history, FTS,
 `entity://` URIs) and are never rewritten in place. `import-okf` covers its
@@ -84,6 +90,36 @@ a stderr `WARN` log line with detector names (never the secret), so clipping
 is visible even when stdout is piped. Control with `MIZUYA_SECRET_SCAN=redact`
 (default) or `=off`; any other value is an error. Storage sizing + history
 retention policy: [docs/STORAGE.md](docs/STORAGE.md).
+
+## Media attachments
+
+`attach` stores an image or an audio file on an entity — or, without
+`--id`, as its own **media-native entity** (`type: media`, id
+`media-<sha256[:12]>`, so re-attaching the same bytes is idempotent).
+Bytes are copied once under `<db dir>/assets/<sha256>.<ext>`; the `media`
+table records entity link, mime, size, and a caption that passes the
+same fail-closed secret gate as observations. Media bytes are **never**
+secret-scanned — every output marks attachments `[bytes unscanned]`.
+
+Embeddings use the configured provider. For the shared text/image/audio
+vector space (768-d), use Ollama with EmbeddingGemma 2 — media and text
+retrieval then live in one space:
+
+```bash
+ollama pull embeddinggemma-2:740m
+MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m \
+  mizuya attach --file screenshot.png --id deploy-console --caption "red modal after rollback"
+MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m \
+  mizuya similar --media screenshot.png --limit 5
+```
+
+One attachment = one 768-d vector in the `media_vec` index; the caption
+(like any entity text) is embedded into the entity's own vector as usual.
+Video is not supported yet — the multimodal APIs take no video key, so
+frames must be sampled first. Entity text embeddings only share the space
+with media when the text provider *is* `embeddinggemma-2:740m`; switching
+providers requires a full re-embed (vec1 bakes its dimension at first
+insert).
 
 ## Append-only beliefs (funes-style)
 
@@ -101,7 +137,7 @@ and ranking instead of trusting rank alone.
 ## MCP Server
 
 The `mcp` subcommand starts a Model Context Protocol stdio server with
-6 tools that AI agents can use to read and write the knowledge graph:
+7 tools that AI agents can use to read and write the knowledge graph:
 
 | MCP Tool         | Description                                               |
 |------------------|-----------------------------------------------------------|
@@ -109,8 +145,9 @@ The `mcp` subcommand starts a Model Context Protocol stdio server with
 | `add_observation`| Append an observation (entity_id, text, source, supersedes) |
 | `relate`         | Create a typed edge between two entities                  |
 | `search`         | Hybrid search (BM25 + vector RRF; optional type/tag/since/until) |
-| `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones); optional `history`, `since`, `until`, `hide_superseded` |
+| `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones) + media `attachments` (each marked unscanned); optional `history`, `since`, `until`, `hide_superseded` |
 | `similar`        | Vector similarity search by entity id or text; same filters as `search` |
+| `attach_media`   | Attach a media file (image or audio) — `file` (host-local path) or `data_base64` — to an entity, or auto-create a media-native one; bytes are sha256-stored and never secret-scanned; caption passes the text gate |
 
 ### MCP resources
 

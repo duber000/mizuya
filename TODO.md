@@ -159,6 +159,45 @@ Phase 3 — safety, idempotency, measurement — **done**:
   trained vec1 index. Only add one if `TestLabeledRecall`/benchmarks say
   it helps; record the result here either way.
 
+## Media (embeddinggemma-2) — current status
+
+- [x] `attach` CLI + `attach_media` MCP tool (7th tool): image and audio
+      uploads to an entity (or auto-created media-native `type=media`
+      entity, id `media-<sha256[:12]>` — content-addressed, idempotent).
+      Bytes stored sha256-addressed under `<db dir>/assets/`, never
+      secret-scanned (regex gate is text-only); `[bytes unscanned]` /
+      `media.scanned = 0` keeps that visible everywhere. Caption passes
+      the same fail-closed gate as observations.
+- [x] `media_vec` vec1 vtab + `media_raw` side store (mirrors the entity
+      embedding pair; entity contract untouched). One 768-d unit-norm
+      vector per attachment via the configured provider; fail-soft
+      deferral when the provider is down.
+- [x] Ollama path validated end-to-end (embeddinggemma-2:740m,
+      `MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m`):
+      object input `{"image"|"audio": b64}` through `/v1/embeddings`,
+      `context` lists `attachments`, `similar --media <file>` crosses the
+      shared space (dim-guarded against non-multimodal stores).
+- [x] Bug: `MIZUYA_EMBED_MODEL` with a colon tag (embeddinggemma-2:740m)
+      was split into provider/model by `embeddings.New`; the client now
+      passes the model through verbatim.
+- [ ] P2 — migrate *text* embeddings to embeddinggemma-2:740m so one
+      provider serves text + media; vec1 dim is baked at first insert, so
+      this is a drop-and-rebuild `embeddings_vec` + full re-embed, gated
+      on `TestLabeledRecall` (floor 0.80 recall@5) before and after.
+      Until then, media vectors and non-embeddinggemma text vectors must
+      not be mixed in one index — `similar --media` enforces this.
+- [ ] P3 — video: sampled frames (the multimodal APIs take no video key);
+      keyframe gallery per attachment, or per-segment vectors for long
+      clips. Decide after P2 based on recall measurements.
+- [ ] Media-bytes OCR secret scan (tesseract sidecar?) — the one redaction
+      gap in an otherwise fail-closed gate; needs an opt-in decision.
+- [ ] `media_vec` query surface (`similar_media` tool?); vectors are
+      stored today but no reader exposes them yet (entity-level
+      `similar --media` is the interim cross-modal path).
+- [ ] Interleaved caption+media embed (`{"text": caption, "image": ...}`)
+      instead of bare-media vectors — measure against bare-media on the
+      labeled benchmark before switching.
+
 ## Consumer feedback (foamy/courier) — addressed
 
 - [x] Observation ordering pinned: `context`/`get_context` observations are

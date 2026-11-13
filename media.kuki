@@ -1,0 +1,357 @@
+# mizuya — media attachments.
+#
+# Media files (images today in practice; the schema and embed path are
+# audio-ready; video is a later milestone — the multimodal APIs take no
+# video key, so frames must be sampled first) attach to entities or
+# spawn media-native entities (type = media). Bytes are stored once,
+# sha256-addressed under <db dir>/assets/; the media table records the
+# derivation plus a caption.
+#
+# Redaction contract, extended honestly to non-text input:
+#   - caption and source pass the SAME fail-closed secret gate as
+#     observations (redact in place, WARN with detector names only;
+#     scanner errors refuse the write).
+#   - media BYTES are never scanned — the regex gate is text-only. Every
+#     reader is told this via the media.scanned column (always 0 today)
+#     and a loud marker in the CLI/MCP output. Nothing claims bytes were
+#     vetted.
+#   - a media-native entity's name (from --name or the file basename) is
+#     redacted by the normal upsert path.
+#
+# Embedding: one 768-d vector per attachment via the configured provider
+# (Ollama + embeddinggemma-2:740m today), stored in the media_vec vec1
+# table + media_raw side store — the entity-embedding contract (and its
+# tests) is untouched. A provider outage never fails the write: the row
+# commits, the vector is deferred (same fail-soft contract as entity
+# re-embeds), and callers see EmbedDeferred.
+
+petiole main
+
+import "path/filepath"
+import "stdlib/crypto"
+import "stdlib/db"
+import "stdlib/files"
+import "stdlib/log"
+import "stdlib/string" as strpkg
+
+# maxMediaBytes caps an attachment at 10 MB (base64 transport over MCP
+# inflates ~33%; a screenshot or a few minutes of 16 kHz mono audio fits
+# comfortably).
+const maxMediaBytes: int = 10485760
+
+type AttachArgs
+    Id: string
+    File: string
+    Kind: string
+    Mime: string
+    Caption: string
+    Name: string
+    Source: string
+
+# attachMediaFile reads a host-local file and attaches it.
+func attachMediaFile(pool: db.Pool, dbPath: string, args: AttachArgs) (AttachResult, error)
+    if args.File is empty
+        return AttachResult{}, error "--file is required"
+    if not files.Exists(args.File)
+        return AttachResult{}, error "file not found: {args.File}"
+    bytes := files.Read(args.File) onerr return AttachResult{}, error "cannot read {args.File}: {error:w}"
+    return attachMediaBytes(pool, dbPath, args, bytes, args.File)
+
+# attachMediaBytes stores bytes as a media attachment. origin is the
+# user-facing filename ("" for base64 input — the asset path is then
+# sha256-only, with no extension).
+func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: list of byte, origin: string) (AttachResult, error)
+    if bytes is empty
+        return AttachResult{}, error "refusing to attach an empty file"
+    if len(bytes) > maxMediaBytes
+        return AttachResult{}, error "file is {len(bytes)} bytes; the limit is {maxMediaBytes} (10 MB)"
+
+    kind := args.Kind
+    if kind isnt empty
+        kind = strpkg.ToLower(strpkg.TrimSpace(kind))
+        if kind equals "video"
+            return AttachResult{}, error "video ingest is not supported yet (the embedding API takes no video key); attach sampled frames as images"
+        if kind isnt "image" and kind isnt "audio"
+            return AttachResult{}, error "--kind must be image or audio, got {args.Kind}"
+    else
+        inferred, iErr := inferMediaKind(origin, args.Mime)
+        if iErr isnt empty
+            return AttachResult{}, iErr
+        kind = inferred
+
+    mime := args.Mime
+    if mime is empty
+        mime = mimeFor(kind, origin)
+
+    sha := crypto.SHA256Hex(bytes)
+
+    # Caption + source pass the same fail-closed gate as observations.
+    redacted := 0
+    caption := args.Caption
+    if caption isnt empty
+        c, n, cErr := redactSecrets(caption)
+        if cErr isnt empty
+            return AttachResult{}, cErr
+        caption = c
+        redacted = redacted + n
+    source := args.Source
+    if source is empty
+        source = "agent"
+    srcClean, srcRedacted, sErr := redactSecrets(source)
+    if sErr isnt empty
+        return AttachResult{}, sErr
+    source = srcClean
+    redacted = redacted + srcRedacted
+
+    # Entity resolution: attach to an existing entity, or auto-create a
+    # content-addressed media-native one (id = media-<sha256[:12]>), which
+    # makes re-attaching the same bytes under no --id idempotent.
+    entityId := args.Id
+    created := false
+    if entityId is empty
+        entityId = "media-{sha[:12]}"
+        name := args.Name
+        if name is empty
+            name = baseName(origin)
+        if name is empty
+            name = "media-{sha[:8]}"
+        tags := list of string{"media", kind}
+        uRedacted, uErr := upsertEntity(pool, entityId, "media", name, caption, tags)
+        if uErr isnt empty
+            return AttachResult{}, uErr
+        redacted = redacted + uRedacted
+        created = true
+        # Best-effort re-embed of the media-native entity (its corpus is
+        # the caption); a provider outage must not fail the write.
+        _, rerr := reEmbedIfChanged(pool, entityId)
+        if rerr isnt empty
+            log.Warn(
+                "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+                "id",
+                entityId,
+                "err",
+                "{rerr}",
+            )
+    else
+        _ := getEntity(pool, entityId) onerr
+            return AttachResult{}, error "entity not found: {entityId}{suggestionsFor(pool, entityId)}"
+
+    # Store the bytes once, content-addressed under <db dir>/assets/.
+    assetDir := filepath.Join(files.Dirname(dbPath), "assets")
+    files.MkDirAll(assetDir) onerr return AttachResult{}, error "cannot create assets directory {assetDir}: {error:w}"
+    ext := extOf(origin, mime)
+    assetPath := filepath.Join(assetDir, "{sha}{ext}")
+    if not files.Exists(assetPath)
+        files.WriteBytes(bytes, assetPath) onerr return AttachResult{}, error "cannot write {assetPath}: {error:w}"
+
+    # Idempotent insert: same bytes on the same entity = no-op.
+    existing, xErr := findMedia(pool, entityId, sha)
+    if (xErr is empty) and existing.Id isnt empty
+        return AttachResult{
+            Status: "already-attached",
+            EntityId: entityId,
+            MediaId: existing.Id,
+            Kind: existing.Kind,
+            Mime: existing.Mime,
+            Path: existing.Path,
+            Sha256: existing.Sha256,
+            Bytes: existing.Bytes,
+            Redacted: redacted,
+            BytesScanned: false,
+        }, empty
+
+    db.Exec(
+        pool,
+        "INSERT INTO media (entity_id, kind, mime, path, sha256, bytes, caption, scanned, source) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+        entityId,
+        kind,
+        mime,
+        assetPath,
+        sha,
+        len(bytes),
+        caption,
+        source,
+    ) onerr return AttachResult{}, error "cannot store media row: {error:w}"
+
+    row, qErr := findMedia(pool, entityId, sha)
+    if qErr isnt empty
+        return AttachResult{}, qErr
+
+    # Fail-soft embed, same contract as entity re-embeds.
+    embedDeferred := true
+    vec, vErr := embedMedia(kind, bytes)
+    if vErr is empty
+        if mErr := upsertMediaEmbedding(pool, row.Id, vec); mErr is empty
+            embedDeferred = false
+        else
+            log.Warn(
+                "mizuya: write committed; media embedding store failed, vector deferred until next touch",
+                "media_id",
+                row.Id,
+                "err",
+                "{mErr}",
+            )
+    else
+        log.Warn(
+            "mizuya: write committed; media embedding deferred until a provider is available",
+            "media_id",
+            row.Id,
+            "err",
+            "{vErr}",
+        )
+
+    status := "attached"
+    if created
+        status = "media-native"
+
+    return AttachResult{
+        Status: status,
+        EntityId: entityId,
+        MediaId: row.Id,
+        Kind: kind,
+        Mime: mime,
+        Path: assetPath,
+        Sha256: sha,
+        Bytes: len(bytes),
+        Redacted: redacted,
+        BytesScanned: false,
+        EmbedDeferred: embedDeferred,
+    }, empty
+
+# findMedia returns the media row for (entity, sha256), or a row with an
+# empty Id when none exists.
+func findMedia(pool: db.Pool, entityId: string, sha: string) (MediaRow, error)
+    count := db.Count(pool, "SELECT count(*) FROM media WHERE entity_id = ? AND sha256 = ?", entityId, sha) onerr return MediaRow{}, error
+    if count equals 0
+        return MediaRow{}, empty
+    q := "SELECT id, entity_id, kind, mime, path, sha256, bytes, caption, scanned, source, at FROM media WHERE entity_id = ? AND sha256 = ?"
+    row := db.Query(pool, q, entityId, sha) |> db.ScanOne of MediaRow
+    return row, empty
+
+# listMedia returns an entity's attachments, newest first. Used by the
+# context outputs (CLI text/JSON and the MCP get_context tool/resource).
+func listMedia(pool: db.Pool, entityId: string) (list of MediaRow, error)
+    q := "SELECT id, entity_id, kind, mime, path, sha256, bytes, caption, scanned, source, at FROM media WHERE entity_id = ? ORDER BY at DESC, id DESC"
+    result := db.Query(pool, q, entityId) |> db.ScanAll of MediaRow
+    return result, empty
+
+# upsertMediaEmbedding stores (or replaces) the media vector. Mirrors
+# upsertEmbedding: vec1 has no UPSERT, so delete + insert on the vtab
+# side; the raw bytes live in the plain media_raw side store.
+func upsertMediaEmbedding(pool: db.Pool, mediaId: string, vec: list of float64) error
+    blob := serializeVec(vec)
+    db.Exec(pool, "DELETE FROM media_vec WHERE media_id = ?", mediaId) onerr return
+    q := "INSERT INTO media_vec(vector, media_id) VALUES (?, ?)"
+    db.Exec(pool, q, blob, mediaId) onerr return
+    db.Exec(
+        pool,
+        "INSERT OR REPLACE INTO media_raw(media_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+        mediaId,
+        embedModel(),
+        len(vec),
+        blob,
+    ) onerr return
+    return empty
+
+# inferMediaKind maps a filename extension — or, for base64 input with no
+# filename, a MIME type — onto image|audio. Video is rejected with a
+# pointer to the keyframe milestone instead of a silent mis-embed.
+func inferMediaKind(origin: string, mime: string) (string, error)
+    ext := strpkg.ToLower(extOnly(origin))
+    if ext equals ".png" or ext equals ".jpg" or ext equals ".jpeg" or ext equals ".gif" or ext equals ".webp" or ext equals ".bmp"
+        return "image", empty
+    if ext equals ".wav" or ext equals ".mp3" or ext equals ".m4a" or ext equals ".ogg" or ext equals ".flac" or ext equals ".opus" or ext equals ".aac"
+        return "audio", empty
+    if ext equals ".mp4" or ext equals ".mkv" or ext equals ".mov" or ext equals ".webm" or ext equals ".avi"
+        return "", error "video ingest is not supported yet (the embedding API takes no video key); attach sampled frames as images"
+    if ext isnt empty
+        return "", error "cannot infer media kind from {origin} (pass --kind image|audio)"
+    lowerMime := strpkg.ToLower(mime)
+    if strpkg.HasPrefix(lowerMime, "image/")
+        return "image", empty
+    if strpkg.HasPrefix(lowerMime, "audio/")
+        return "audio", empty
+    if strpkg.HasPrefix(lowerMime, "video/")
+        return "", error "video ingest is not supported yet (the embedding API takes no video key); attach sampled frames as images"
+    return "", error "cannot infer media kind (pass --kind image|audio)"
+
+# mimeFor guesses an attachment's MIME type from its extension; used when
+# the caller does not supply one.
+func mimeFor(kind: string, file: string) string
+    ext := strpkg.ToLower(extOnly(file))
+    switch ext
+        when ".png"
+            return "image/png"
+        when ".jpg", ".jpeg"
+            return "image/jpeg"
+        when ".gif"
+            return "image/gif"
+        when ".webp"
+            return "image/webp"
+        when ".bmp"
+            return "image/bmp"
+        when ".wav"
+            return "audio/wav"
+        when ".mp3"
+            return "audio/mpeg"
+        when ".m4a"
+            return "audio/mp4"
+        when ".ogg", ".opus"
+            return "audio/ogg"
+        when ".flac"
+            return "audio/flac"
+        when ".aac"
+            return "audio/aac"
+        when ""
+            return if kind equals "audio" then "audio/wav" else "image/png"
+        default
+            return "application/octet-stream"
+
+# extOf returns the asset extension (dot-prefixed, lowercased) to use for
+# the content-addressed filename. Prefers the origin filename's extension;
+# falls back to the MIME type when input was base64-only.
+func extOf(origin: string, mime: string) string
+    ext := strpkg.ToLower(extOnly(origin))
+    if ext isnt empty
+        return ext
+    return mimeExt(mime)
+
+func extOnly(file: string) string
+    if file is empty
+        return ""
+    _, after, ok := strpkg.CutLast(filepath.Base(file), ".")
+    if not ok
+        return ""
+    return ".{strpkg.ToLower(after)}"
+
+func mimeExt(mime: string) string
+    switch strpkg.ToLower(mime)
+        when "image/png"
+            return ".png"
+        when "image/jpeg"
+            return ".jpg"
+        when "image/gif"
+            return ".gif"
+        when "image/webp"
+            return ".webp"
+        when "image/bmp"
+            return ".bmp"
+        when "audio/wav", "audio/x-wav", "audio/wave"
+            return ".wav"
+        when "audio/mpeg"
+            return ".mp3"
+        when "audio/mp4", "audio/m4a"
+            return ".m4a"
+        when "audio/ogg"
+            return ".ogg"
+        when "audio/flac"
+            return ".flac"
+        when "audio/aac"
+            return ".aac"
+        default
+            return ""
+
+func baseName(origin: string) string
+    if origin is empty
+        return ""
+    return filepath.Base(origin)

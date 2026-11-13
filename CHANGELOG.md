@@ -29,6 +29,30 @@ workflow builds images on tag push.
 - Dockerfile pins kukicha `v0.86.9` (was `v0.86.5`), matching the
   vendored stdlib.
 
+### Media attachments (embeddinggemma-2)
+- New `attach` command and 7th MCP tool `attach_media`: stores image and
+  audio files sha256-addressed under `<db dir>/assets/` (bytes deduped,
+  never secret-scanned — every output marks `[bytes unscanned]` and
+  `media.scanned` is always 0), links them to an existing entity or
+  auto-creates a content-addressed media-native entity (`type: media`,
+  id `media-<sha256[:12]>`; re-attaching the same bytes is idempotent).
+  The caption passes the same fail-closed secret gate as observations.
+- Media embeddings are one 768-d unit-norm vector per attachment in a new
+  `media_vec` vec1 table + `media_raw` side store (the entity-embedding
+  contract is untouched); a provider outage defers the vector instead of
+  failing the write, same fail-soft contract as entity re-embeds.
+- Validated end-to-end with Ollama `embeddinggemma-2:740m` (object input
+  `{"image"|"audio": b64}` via `/v1/embeddings`): `context`/`get_context`
+  and the `entity://{id}` resource now list newest-first `attachments`
+  (additive-optional in the contract); `similar --media <file>` queries
+  the shared text/image/audio space against entity embeddings (refuses
+  when the stored text vectors were built with a different
+  provider/dimension). Video ingest is not supported yet (sampled
+  keyframes are the planned path).
+- Bug fix: `MIZUYA_EMBED_MODEL` values containing a colon (Ollama tags
+  like `embeddinggemma-2:740m`) were split into provider/model by the
+  client builder; the model is now passed through verbatim.
+
 ### Removed
 - `distill` — it shelled out to an `openwiki -p` run, and the openwiki
   tool/ecosystem is gone. The `observations.distilled` column, the

@@ -1,0 +1,217 @@
+# mizuya — tests for media attachments (media table, assets, redaction).
+#
+# The provider-free path is deterministic: with MIZUYA_EMBED_PROVIDER
+# unset, embedMedia fails closed, the attach commits, and the vector is
+# reported deferred — the same fail-soft contract as entity re-embeds.
+# Media BYTES are never scanned; scanned is always 0, pinned here.
+
+petiole main
+
+import "path/filepath"
+import "stdlib/encoding"
+import "stdlib/files"
+import "stdlib/string" as strpkg
+import "stdlib/test"
+import "testing"
+
+# tinyPNG is a 1x1 valid PNG (content doesn't get decoded — bytes are
+# hashed and embedded blindly).
+const tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+func writeTempPng(t: reference testing.T, dir: string) string
+    path := filepath.Join(dir, "fixture.png")
+    bytes, derr := encoding.Base64Decode(tinyPNG)
+    test.AssertNoError(t, derr)
+    files.WriteBytes(bytes, path) onerr
+        t.Fatalf("write fixture: %v", error)
+        return ""
+
+    return path
+
+func attachArgs(file: string) AttachArgs
+    return AttachArgs{
+        Id: "",
+        File: file,
+        Kind: "",
+        Mime: "",
+        Caption: "",
+        Name: "",
+        Source: "",
+    }
+
+func TestAttachMediaNativeCreatesEntity(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := writeTempPng(t, dir)
+    res, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(file))
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, res.Status, "media-native")
+    test.AssertEqual(t, res.Kind, "image")
+    test.AssertEqual(t, res.Mime, "image/png")
+    test.AssertEqual(t, res.BytesScanned, false)
+    test.AssertEqual(t, res.EmbedDeferred, true)
+    test.AssertTrue(t, res.Bytes > 0)
+    test.AssertContains(t, res.Path, "assets")
+    test.AssertTrue(t, files.Exists(res.Path))
+
+    e, gerr := getEntity(pool, res.EntityId)
+    test.AssertNoError(t, gerr)
+    test.AssertEqual(t, e.Type, "media")
+
+    atts := listMedia(pool, res.EntityId) onerr return
+    test.AssertEqual(t, len(atts), 1)
+    test.AssertEqual(t, atts[0].Scanned, 0)
+    test.AssertEqual(t, atts[0].Sha256, res.Sha256)
+
+func TestAttachIsIdempotentForSameBytes(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := writeTempPng(t, dir)
+    dbPath := filepath.Join(dir, "test.db")
+
+    first, err := attachMediaFile(pool, dbPath, attachArgs(file))
+    test.AssertNoError(t, err)
+    second, err2 := attachMediaFile(pool, dbPath, attachArgs(file))
+    test.AssertNoError(t, err2)
+
+    test.AssertEqual(t, second.Status, "already-attached")
+    test.AssertEqual(t, second.MediaId, first.MediaId)
+    test.AssertEqual(t, second.EntityId, first.EntityId)
+
+    atts := listMedia(pool, first.EntityId) onerr return
+    test.AssertEqual(t, len(atts), 1)
+
+    # The media-native entity wasn't duplicated in the log either.
+    hist := listEntityHistory(pool, first.EntityId, 50) onerr return
+    test.AssertEqual(t, len(hist), 1)
+
+func TestAttachCaptionRedaction(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := writeTempPng(t, dir)
+    args := attachArgs(file)
+    args.Caption = "deploy key AKIAIOSFODNN7EXAMPLE leaked in screenshot"
+
+    res, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), args)
+    test.AssertNoError(t, err)
+    test.AssertTrue(t, res.Redacted > 0)
+
+    atts := listMedia(pool, res.EntityId) onerr return
+    test.AssertEqual(t, len(atts), 1)
+    test.AssertContains(t, atts[0].Caption, "[REDACTED:")
+    test.AssertFalse(t, strpkg.Contains(atts[0].Caption, "AKIAIOSFODNN7EXAMPLE"))
+
+    e := getEntity(pool, res.EntityId) onerr return
+    test.AssertContains(t, e.Data, "[REDACTED:")
+
+func TestAttachToExistingAndMissingEntity(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := writeTempPng(t, dir)
+    dbPath := filepath.Join(dir, "test.db")
+
+    _, uerr := upsertEntity(pool, "deploy-console", "tool", "Deploy console", "", empty list of string)
+    test.AssertNoError(t, uerr)
+
+    args := attachArgs(file)
+    args.Id = "deploy-console"
+    args.Caption = "red modal after rolling back"
+    res, err := attachMediaFile(pool, dbPath, args)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, res.Status, "attached")
+    test.AssertEqual(t, res.EntityId, "deploy-console")
+
+    missing := attachArgs(file)
+    missing.Id = "no-such-entity"
+    _, err2 := attachMediaFile(pool, dbPath, missing)
+    test.AssertError(t, err2)
+
+func TestAttachRejectsVideoAndUnknownKind(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := filepath.Join(dir, "clip.mp4")
+    files.WriteBytes(list of byte{1, 2, 3}, file) onerr
+        t.Fatalf("write fixture: %v", error)
+        return
+
+    _, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(file))
+    test.AssertError(t, err)
+    test.AssertContains(t, "{err}", "video")
+
+    args := attachArgs(file)
+    args.Kind = "hologram"
+    _, err2 := attachMediaFile(pool, filepath.Join(dir, "test.db"), args)
+    test.AssertError(t, err2)
+
+func TestAttachRejectsEmptyAndOversize(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    emptyFile := filepath.Join(dir, "empty.png")
+    files.WriteBytes(empty list of byte, emptyFile) onerr
+        t.Fatalf("write fixture: %v", error)
+        return
+
+    _, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(emptyFile))
+    test.AssertError(t, err)
+
+func TestAttachResultContract(t: reference testing.T)
+    r := AttachResult{
+        Status: "attached",
+        EntityId: "deploy-console",
+        MediaId: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
+        Kind: "image",
+        Mime: "image/png",
+        Path: "/abs/assets/ab12.png",
+        Sha256: "ab12",
+        Bytes: 123,
+        Redacted: 0,
+        BytesScanned: false,
+        EmbedDeferred: false,
+    }
+    assertJSONKeys(t, r, list of string{
+        "status",
+        "entity_id",
+        "media_id",
+        "kind",
+        "mime",
+        "path",
+        "sha256",
+        "bytes",
+        "redacted",
+        "bytes_scanned",
+        "embed_deferred",
+    })
+
+func TestMediaRowContract(t: reference testing.T)
+    row := MediaRow{
+        Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
+        EntityId: "deploy-console",
+        Kind: "image",
+        Mime: "image/png",
+        Path: "/abs/assets/ab12.png",
+        Sha256: "ab12",
+        Bytes: 123,
+        Caption: "c",
+        Scanned: 0,
+        Source: "agent",
+        At: "2026-11-12 01:04:18.647",
+    }
+    assertJSONKeys(t, row, list of string{
+        "id",
+        "entity_id",
+        "kind",
+        "mime",
+        "path",
+        "sha256",
+        "bytes",
+        "caption",
+        "scanned",
+        "source",
+        "at",
+    })

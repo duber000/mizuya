@@ -16,6 +16,10 @@ A mizuya database is one SQLite file (WAL mode) with:
 | `relations` | edges | edges |
 | `embeddings_vec` (vec1) | float32 vector per entity | entities × dim × 4 B |
 | `embeddings_raw` | the same vector again (vec1 reads are write/search-only in the vendored build) | entities × dim × 4 B |
+| `media` | one row per attachment (sha256, byte count, mime, redacted caption — never the bytes) | attachments × ~0.3 KB |
+| `media_vec` (vec1) | one float32 vector per attachment | attachments × dim × 4 B |
+| `media_raw` | media vector side store | attachments × dim × 4 B |
+| `<db dir>/assets/` | the media BYTES, sha256-addressed (identical files stored once) | attachments × file size |
 | `entities_fts` (FTS5) | token index over id/name/type/data | roughly the text corpus |
 | `entity_ids_fuzzy` (spellfix1) | id vocabulary | entities |
 
@@ -30,6 +34,10 @@ A mizuya database is one SQLite file (WAL mode) with:
 - **History**: a no-op upsert appends nothing (dedup against the latest
   logged version), so history cost is proportional to *actual changes*, not
   writes.
+- **Media bytes** live outside the SQLite file under `<db dir>/assets/`,
+  named by sha256 (content dedup across attachments — two entities pointing
+  at the same screenshot store it once). A 10 MB attachment costs ~10 MB
+  disk plus ~6 KB of vectors at dim 768; the database itself stays tiny.
 
 ## Projection (text ≈ 1 KB/entity incl. FTS, history ≈ 1 change/10 writes)
 

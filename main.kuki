@@ -88,6 +88,7 @@ func main()
             makeInitCmd(),
             makeUpsertCmd(),
             makeObserveCmd(),
+            makeAttachCmd(),
             makeRelateCmd(),
             makeSearchCmd(),
             makeContextCmd(),
@@ -121,6 +122,23 @@ func makeObserveCmd() reference cli.Command
         |> .StringFlag("source", "Observation source", "conversation")
         |> .StringFlag("supersedes", "Id of an observation on this entity that this one corrects", "")
         |> .ActionE(doObserve)
+
+func makeAttachCmd() reference cli.Command
+    return cli.NewCommand(
+        "attach",
+        "Attach a media file (image or audio) to an entity — or auto-create a media-native entity when --id is omitted",
+    )
+        |> .RequiredFlag("file", "Path to the media file")
+        |> .StringFlag("id", "Entity to attach to (omit to create a media-native entity)", "")
+        |> .StringFlag("kind", "image or audio (default: inferred from extension)", "")
+        |> .StringFlag(
+            "caption",
+            "Free-text caption (passes the same secret gate as observations)",
+            "",
+        )
+        |> .StringFlag("name", "Media-native entity name (default: file basename)", "")
+        |> .StringFlag("source", "Attachment source label", "agent")
+        |> .ActionE(doAttach)
 
 func makeRelateCmd() reference cli.Command
     return cli.NewCommand("relate", "Create a typed edge between two entities")
@@ -166,6 +184,11 @@ func makeSimilarCmd() reference cli.Command
     return cli.NewCommand("similar", "Vector similarity search (cosine distance)")
         |> .StringFlag("id", "Use this entity's embedding as the query", "")
         |> .StringFlag("text", "Embed this text and use it as the query", "")
+        |> .StringFlag(
+            "media",
+            "Embed this media file and use it as the query (needs a multimodal provider embedding into the same space)",
+            "",
+        )
         |> .IntFlag("limit", "Max results (ignored when --threshold is set)", 5)
         |> .IntFlag(
             "threshold",
@@ -447,6 +470,53 @@ func doObserve(args: cli.Args) error
         )
     return empty
 
+# doAttach stores a media file as an attachment. Media bytes are stored
+# sha256-addressed under <db dir>/assets/ (deduped); the caption passes the
+# same fail-closed gate as observations; the bytes themselves are never
+# scanned — every mode says so. When --id is omitted a content-addressed
+# media-native entity is auto-created. A provider outage never fails a
+# write that committed — the vector is deferred and reported.
+func doAttach(args: cli.Args) error
+    dbPath := cli.GetString(args, "db")
+    pool := openPool(args) onerr explain "cannot open database"
+    defer db.Close(pool)
+
+    res, aerr := attachMediaFile(pool, dbPath, AttachArgs{
+        Id: cli.GetString(args, "id"),
+        File: cli.GetString(args, "file"),
+        Kind: cli.GetString(args, "kind"),
+        Mime: "",
+        Caption: cli.GetString(args, "caption"),
+        Name: cli.GetString(args, "name"),
+        Source: cli.GetString(args, "source"),
+    })
+    if aerr isnt empty
+        return aerr
+
+    if cli.IsJSON(args)
+        printJSON(res)
+        return empty
+
+    print(
+        "{color.Green(res.Status)} media {color.Bold(res.MediaId)} on entity {color.Bold(res.EntityId)}  {color.Dim("{res.Kind}, {res.Bytes} B")}",
+    )
+    print("  asset: {color.Dim(res.Path)}")
+    print("  sha256: {color.Dim(res.Sha256)}")
+    print(color.Yellow("  bytes are not secret-scanned (regex gate covers text only)"))
+    if res.Status equals "already-attached" and res.Redacted > 0
+        print("  {color.Dim(
+            "candidate caption had {res.Redacted} secret(s); nothing was stored (identical bytes already on this entity)",
+        )}"
+        )
+    else if res.Redacted > 0
+        print("  {color.Yellow("redacted {res.Redacted} secret(s) before storing")}")
+    if res.EmbedDeferred
+        print(color.Yellow(
+            "  embedding deferred (provider unavailable); vector lands on the next touch with a provider configured",
+        ))
+    print(color.Dim("→ context --id {res.EntityId}"))
+    return empty
+
 func doRelate(args: cli.Args) error
     src := cli.GetString(args, "src")
     rel := cli.GetString(args, "rel")
@@ -534,6 +604,7 @@ func doContext(args: cli.Args) error
         return error "{error:w}{suggestionsFor(pool, id)}"
 
     obs := listObservationsRange(pool, id, since, until, hideSuperseded) onerr explain "cannot read observations"
+    atts := listMedia(pool, id) onerr explain "cannot read media attachments"
 
     hist := empty list of HistoryRow
     if showHistory
@@ -557,12 +628,12 @@ func doContext(args: cli.Args) error
         }
 
     if depth > 1
-        renderDeepContext(args, pool, display, id, depth, obs, hist) onerr return
+        renderDeepContext(args, pool, display, id, depth, obs, hist, atts) onerr return
         return
-    renderShallowContext(args, pool, display, id, obs, hist) onerr return
+    renderShallowContext(args, pool, display, id, obs, hist, atts) onerr return
     return empty
 
-func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow, hist: list of HistoryRow) error
+func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow, hist: list of HistoryRow, atts: list of MediaRow) error
     outgoing := outgoingContext(pool, id) onerr explain "cannot read outgoing"
 
     incoming := incomingContext(pool, id) onerr explain "cannot read incoming"
@@ -573,16 +644,17 @@ func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, 
             "outgoing": outgoing,
             "incoming": incoming,
             "observations": obs,
+            "attachments": atts,
         }
         if hist isnt empty
             payload["history"] = hist
         printJSON(payload)
         return
-    printContext(e, outgoing, incoming, obs)
+    printContext(e, outgoing, incoming, obs, atts)
     printHistory(hist)
     return empty
 
-func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow, hist: list of HistoryRow) error
+func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow, hist: list of HistoryRow, atts: list of MediaRow) error
     outReach := reachableOutgoing(pool, id, depth) onerr explain "cannot read outgoing neighbors"
 
     inReach := reachableIncoming(pool, id, depth) onerr explain "cannot read incoming neighbors"
@@ -594,20 +666,29 @@ func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, dep
             "outgoing": outReach,
             "incoming": inReach,
             "observations": obs,
+            "attachments": atts,
         }
         if hist isnt empty
             payload["history"] = hist
         printJSON(payload)
         return
-    printReachableContext(e, depth, outReach, inReach, obs)
+    printReachableContext(e, depth, outReach, inReach, obs, atts)
     printHistory(hist)
     return empty
 
 func doSimilar(args: cli.Args) error
     id := cli.GetString(args, "id")
     text := cli.GetString(args, "text")
-    if (id is empty) and (text is empty)
-        return cli.UsageFail("either --id or --text is required")
+    media := cli.GetString(args, "media")
+    given := 0
+    if id isnt empty
+        given = given + 1
+    if text isnt empty
+        given = given + 1
+    if media isnt empty
+        given = given + 1
+    if given isnt 1
+        return cli.UsageFail("exactly one of --id, --text, --media is required")
     limit := cli.GetIntOr(args, "limit", 5)
     threshold := cli.GetIntOr(args, "threshold", 0)
 
@@ -631,8 +712,20 @@ func doSimilar(args: cli.Args) error
             return error "{error:w}{suggestionsFor(pool, id)}"
 
         vec = v
-    else
+    else if text isnt empty
         vec = embedText(text) onerr explain "cannot compute embedding"
+    else
+        bytes := files.Read(media) onerr return error "cannot read {media}: {error:w}"
+        kind, kErr := inferMediaKind(media, "")
+        if kErr isnt empty
+            return kErr
+        v := embedMedia(kind, bytes) onerr explain "cannot compute media embedding"
+        probe := db.Query(pool, "SELECT dim FROM embeddings_raw LIMIT 1") |> db.ScanAll of dimRow
+        if probe isnt empty and probe[0].Dim isnt len(v)
+            return cli.UsageFail(
+                "cross-modal --media needs the text store embedded with the same multimodal model (store holds {probe[0].Dim}d vectors); set MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m and re-touch entities",
+            )
+        vec = v
 
     filter := SearchFilter{
         Type: typeFilter,
@@ -649,7 +742,11 @@ func doSimilar(args: cli.Args) error
     if cli.IsJSON(args)
         printJSON(hits)
     else
-        header := if id isnt empty then "similar to: {id}" else "similar to text: {text}"
+        header := "similar to media: {media}"
+        if id isnt empty
+            header = "similar to: {id}"
+        else if text isnt empty
+            header = "similar to text: {text}"
         if threshold > 0
             header = header + " (closest {threshold}%)"
         print(color.Bold(header))
