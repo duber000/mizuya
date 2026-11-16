@@ -26,7 +26,8 @@ func openTestPool(tb: testing.TB) (db.Pool, string)
     dir, err := os.MkdirTemp("", "mizuya-test-")
     if err isnt empty
         tb.Fatalf("mktemp: %v", err)
-        return db.Pool{}, ""
+        var zeroPool: db.Pool
+        return zeroPool, ""
     path := filepath.Join(dir, "test.db")
     pool, oerr := sqlite.OpenWithExtensions(
         path,
@@ -41,10 +42,12 @@ func openTestPool(tb: testing.TB) (db.Pool, string)
     )
     if oerr isnt empty
         tb.Fatalf("open: %v", oerr)
-        return db.Pool{}, ""
+        var zeroPool: db.Pool
+        return zeroPool, ""
     if ierr := initDB(pool); ierr isnt empty
         tb.Fatalf("initDB: %v", ierr)
-        return db.Pool{}, ""
+        var zeroPool: db.Pool
+        return zeroPool, ""
     return pool, dir
 
 # closeTestPool closes the pool and removes the temp dir.
