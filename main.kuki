@@ -648,8 +648,7 @@ func doContext(args: cli.Args) error
     showHistory := cli.GetBool(args, "history")
     hideSuperseded := cli.GetBool(args, "hide-superseded")
 
-    e := resolveEntity(pool, args, id) onerr
-        return error "{error:w}{suggestionsFor(pool, id)}"
+    e := resolveEntity(pool, args, id) onerr error "{error:w}{suggestionsFor(pool, id)}"
 
     obs := listObservationsRange(pool, id, since, until, hideSuperseded) onerr explain "cannot read observations"
     atts := listMedia(pool, id) onerr explain "cannot read media attachments"
@@ -663,8 +662,7 @@ func doContext(args: cli.Args) error
     # makes "what did we think then" answerable.
     display := e
     if asOf isnt empty
-        h := entityStateAt(pool, id, asOf) onerr
-            return error "no logged state of {id} as of {asOf}: {error:w}"
+        h := entityStateAt(pool, id, asOf) onerr error "no logged state of {id} as of {asOf}: {error:w}"
 
         display = Entity{
             Id: h.EntityId,
@@ -756,8 +754,7 @@ func doSimilar(args: cli.Args) error
 
     vec := empty list of float64
     if id isnt empty
-        v := resolveEmbedding(pool, args, id) onerr
-            return error "{error:w}{suggestionsFor(pool, id)}"
+        v := resolveEmbedding(pool, args, id) onerr error "{error:w}{suggestionsFor(pool, id)}"
 
         vec = v
     else if text isnt empty

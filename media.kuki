@@ -304,6 +304,7 @@ func extractVideoFrames(file: string, maxFrames: int) (list of list of byte, err
     dir, tErr := files.TempDir("mizuya-frames-")
     if tErr isnt empty
         return empty, error "cannot create temp dir for video frames: {tErr:w}"
+    defer files.DeleteAll(dir)
     pattern := filepath.Join(dir, "frame_%03d.jpg")
     cErr := shell.Check(
         "ffmpeg",
@@ -318,10 +319,8 @@ func extractVideoFrames(file: string, maxFrames: int) (list of list of byte, err
         pattern,
     )
     if cErr isnt empty
-        files.DeleteAll(dir) onerr discard
         return empty, error "ffmpeg failed on {file}: {cErr:w}"
     entries := files.ListFiles(dir) onerr
-        files.DeleteAll(dir) onerr as cleanupErr discard
         return empty, error "cannot list extracted frames: {error:w}"
 
     frames := empty list of list of byte
@@ -330,7 +329,6 @@ func extractVideoFrames(file: string, maxFrames: int) (list of list of byte, err
         if bErr isnt empty
             continue
         frames = append(frames, b)
-    files.DeleteAll(dir) onerr discard
     if frames is empty
         return empty, error "ffmpeg extracted no frames from {file} (corrupt or unsupported video?)"
     return frames, empty
@@ -344,12 +342,11 @@ func videoFramesForAttach(origin: string, bytes: list of byte) (list of list of 
     f, tErr := files.TempFile("mizuya-video-")
     if tErr isnt empty
         return empty, error "cannot create temp file for video: {tErr:w}"
+    defer files.Delete(f)
     wErr := files.WriteBytes(bytes, f)
     if wErr isnt empty
-        files.Delete(f) onerr discard
         return empty, error "cannot write temp video file: {wErr:w}"
     frames, eErr := extractVideoFrames(f, maxVideoFrames)
-    files.Delete(f) onerr discard
     return frames, eErr
 
 # meanPoolNormalize averages embedding vectors and re-normalizes the
