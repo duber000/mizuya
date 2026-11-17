@@ -4,7 +4,7 @@ go 1.27.4
 
 require (
 	github.com/ncruces/go-sqlite3 v0.37.0
-	kukicha.org/stdlib v0.86.10
+	kukicha.org/stdlib v0.86.11
 )
 
 require (
