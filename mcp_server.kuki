@@ -104,7 +104,8 @@ func startMCP(dbPath: string) error
     router.AddResource(entityTemplate, func(argName: string, partial: string, prevArgs: map of string to string) list of string
         # Self-initializes and registers extensions, like every other pool.
         pool := openMCPPool() onerr return empty list of string
-        defer db.Close(pool)
+        defer
+            db.Close(pool) onerr discard
         entities := listEntities(pool, "", 500) onerr return empty list of string
         return entities
             |> slice.Filter(e => strpkg.HasPrefix(e.Id, partial))
@@ -146,7 +147,8 @@ func registerResources(server: reference mcp.Server)
 
 func listEntitiesResource(uri: string) (string, error)
     pool := openMCPPool() onerr return "", error
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
     entities := listEntities(pool, "", 500) onerr return "", error
     data := jsonpkg.PrettyBytes(entities) onerr return "", error
     return data as string, empty
@@ -157,7 +159,8 @@ func entityContextResource(uri: string) (string, error)
         return "", error "missing entity ID in URI: {uri}"
 
     pool := openMCPPool() onerr return "", error
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     e := getEntity(pool, id) onerr explain "entity not found: {id}"
     outgoing := outgoingContext(pool, id) onerr return "", error
@@ -222,7 +225,8 @@ func handleUpsertEntity(args: upsertEntityArgs) (any, error)
         return mcp.ErrorResult("invalid type {etype} (valid: {validEntityTypes()})"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     _, uerr := upsertEntity(pool, args.Id, etype, args.Name, args.Summary, args.Tags)
     if uerr isnt empty
@@ -277,7 +281,8 @@ func handleAddObservation(args: addObservationArgs) (any, error)
         source = "conversation"
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     redacted, storedText, oerr := addObservation(pool, args.EntityId, args.Text, source, args.Supersedes)
     if oerr isnt empty
@@ -328,7 +333,8 @@ func handleRelate(args: relateArgs) (any, error)
         return mcp.ErrorResult("src, rel, and dst are required"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     storedRel, rerr := relate(pool, args.Src, args.Rel, args.Dst)
     if rerr isnt empty
@@ -399,7 +405,8 @@ func handleSearch(args: searchArgs) (any, error)
     filter := SearchFilter{Type: typeFilter, Tag: args.Tag, Since: args.Since, Until: args.Until}
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     hits := hybridSearch(pool, args.Query, limit, filter) onerr return mcp.ErrorResult("search failed: {error}"), empty
 
@@ -456,7 +463,8 @@ func handleGetContext(args: getContextArgs) (any, error)
         return mcp.ErrorResult("{dErr}"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, args.Id)}"), empty
     obs := listObservationsRange(pool, args.Id, args.Since, args.Until, args.HideSuperseded) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
@@ -559,7 +567,8 @@ func handleSimilar(args: similarArgs) (any, error)
         return mcp.ErrorResult("{dErr}"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     vec := empty list of float64
     if args.Id isnt empty
@@ -637,7 +646,8 @@ func handleAttachMedia(args: attachMediaArgs) (any, error)
         return mcp.ErrorResult("either file or data_base64 is required"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     aa := AttachArgs{
         Id: args.Id,
@@ -756,7 +766,8 @@ func handleSimilarMedia(args: similarMediaArgs) (any, error)
         return mcp.ErrorResult("kind must be image, audio, or video, got {args.Kind}"), empty
 
     pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     vec, qErr := queryMediaVector(args)
     if qErr isnt empty

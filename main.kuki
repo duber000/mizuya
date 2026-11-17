@@ -371,7 +371,8 @@ func doInit(args: cli.Args) error
         unicodeext.Register,
     ) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     initDB(pool) onerr explain "cannot initialize schema"
 
@@ -392,7 +393,8 @@ func doUpsert(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     redacted, uerr := upsertEntity(pool, id, etype, name, summary, tags)
     if uerr isnt empty
@@ -448,7 +450,8 @@ func doObserve(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     redacted, storedText, oerr := observeResolved(pool, args, id, text, source, supersedes)
     if oerr isnt empty
@@ -497,7 +500,8 @@ func doObserve(args: cli.Args) error
 # bakes its dimension at first insert.
 func doReembed(args: cli.Args) error
     pool := openPool(args) onerr explain "cannot open database"
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     log.Info("mizuya: reembedding with configured provider; this may take a while on large graphs")
     res, rerr := reembedEverything(pool)
@@ -527,7 +531,8 @@ func doReembed(args: cli.Args) error
 func doAttach(args: cli.Args) error
     dbPath := cli.GetString(args, "db")
     pool := openPool(args) onerr explain "cannot open database"
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     res, aerr := attachMediaFile(pool, dbPath, AttachArgs{
         Id: cli.GetString(args, "id"),
@@ -574,7 +579,8 @@ func doRelate(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     storedRel, rerr := relate(pool, src, rel, dst)
     if rerr isnt empty
@@ -602,7 +608,8 @@ func doSearch(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     useRegex := cli.GetBool(args, "regex")
     filter := SearchFilter{
@@ -640,7 +647,8 @@ func doContext(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     depth := cli.GetIntOr(args, "depth", 1)
     if depth < 1
@@ -750,7 +758,8 @@ func doSimilar(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     vec := empty list of float64
     if id isnt empty
@@ -816,7 +825,8 @@ func doSimilarMedia(args: cli.Args) error
         return vErr
 
     pool := openPool(args) onerr explain "cannot open database"
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     probe := db.Query(pool, "SELECT dim FROM media_raw LIMIT 1") |> db.ScanAll of dimRow
     if probe isnt empty and probe[0].Dim isnt len(vec)
@@ -844,7 +854,8 @@ func doList(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     rows := listEntities(pool, etype, limit) onerr explain "list failed"
 
@@ -888,7 +899,8 @@ func doImportOKF(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     imported, linked, ierr := importOKF(pool, baseDir, bundle, "okf")
     if ierr isnt empty
@@ -914,7 +926,8 @@ func doImportOpenWiki(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     imported, linked, ierr := importOpenWiki(pool, baseDir)
     if ierr isnt empty
@@ -1058,7 +1071,8 @@ func doDrift(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     rows := listDrift(pool, limit, includeSuperseded) onerr explain "drift query failed"
 
@@ -1092,7 +1106,8 @@ func doPruneHistory(args: cli.Args) error
 
     pool := openPool(args) onerr explain "cannot open database"
 
-    defer db.Close(pool)
+    defer
+        db.Close(pool) onerr discard
 
     n, err := pruneHistory(pool, keep, before, dryRun)
     if err isnt empty

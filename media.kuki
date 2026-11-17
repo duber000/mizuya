@@ -151,7 +151,7 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
                 "{rerr}",
             )
     else
-        _ := getEntity(pool, entityId) onerr return AttachResult{}, error "entity not found: {entityId}{suggestionsFor(pool, entityId)}"
+        getEntity(pool, entityId) onerr return AttachResult{}, error "entity not found: {entityId}{suggestionsFor(pool, entityId)}"
 
     # Store the bytes once, content-addressed under <db dir>/assets/.
     assetDir := filepath.Join(files.Dirname(dbPath), "assets")
