@@ -151,8 +151,7 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
                 "{rerr}",
             )
     else
-        _ := getEntity(pool, entityId) onerr
-            return AttachResult{}, error "entity not found: {entityId}{suggestionsFor(pool, entityId)}"
+        _ := getEntity(pool, entityId) onerr return AttachResult{}, error "entity not found: {entityId}{suggestionsFor(pool, entityId)}"
 
     # Store the bytes once, content-addressed under <db dir>/assets/.
     assetDir := filepath.Join(files.Dirname(dbPath), "assets")
@@ -304,7 +303,8 @@ func extractVideoFrames(file: string, maxFrames: int) (list of list of byte, err
     dir, tErr := files.TempDir("mizuya-frames-")
     if tErr isnt empty
         return empty, error "cannot create temp dir for video frames: {tErr:w}"
-    defer files.DeleteAll(dir)
+    defer
+        files.DeleteAll(dir) onerr discard
     pattern := filepath.Join(dir, "frame_%03d.jpg")
     cErr := shell.Check(
         "ffmpeg",
@@ -320,8 +320,7 @@ func extractVideoFrames(file: string, maxFrames: int) (list of list of byte, err
     )
     if cErr isnt empty
         return empty, error "ffmpeg failed on {file}: {cErr:w}"
-    entries := files.ListFiles(dir) onerr
-        return empty, error "cannot list extracted frames: {error:w}"
+    entries := files.ListFiles(dir) onerr return empty, error "cannot list extracted frames: {error:w}"
 
     frames := empty list of list of byte
     for _, entry in entries
@@ -342,7 +341,8 @@ func videoFramesForAttach(origin: string, bytes: list of byte) (list of list of 
     f, tErr := files.TempFile("mizuya-video-")
     if tErr isnt empty
         return empty, error "cannot create temp file for video: {tErr:w}"
-    defer files.Delete(f)
+    defer
+        files.Delete(f) onerr discard
     wErr := files.WriteBytes(bytes, f)
     if wErr isnt empty
         return empty, error "cannot write temp video file: {wErr:w}"
