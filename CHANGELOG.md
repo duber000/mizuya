@@ -3,6 +3,14 @@
 All notable changes to mizuya. Versions are git tags (`vX.Y.Z`); the Docker
 workflow builds images on tag push.
 
+## 0.3.1 — 2026-11-22
+
+### Fixes
+- Docker release images now move the compiler's `/src` output to `/mizuya`.
+  Kukicha names its executable after the build directory, so the `v0.3.0`
+  image workflow failed after a successful compile.
+- The CLI and MCP server now report version `0.3.1` (previously `0.2.0`).
+
 ## 0.3.0 — 2026-11-22
 
 ### Breaking

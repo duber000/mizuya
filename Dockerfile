@@ -5,7 +5,7 @@ RUN go install kukicha.org/kukicha/cmd/kukicha@v0.86.12 && kukicha version
 
 COPY . .
 
-RUN CGO_ENABLED=0 kukicha build --no-line-directives . && mv mizuya /mizuya
+RUN CGO_ENABLED=0 kukicha build --no-line-directives . && mv src /mizuya
 
 # Runtime stage — distroless (no shell; ca-certificates included)
 FROM gcr.io/distroless/static-debian12

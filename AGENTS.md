@@ -73,8 +73,10 @@ These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki
 
 1. Keep `CHANGELOG.md` as the release record: move `## Unreleased` to the new semver version and date only when the release is ready.
 2. Verify the `Dockerfile` compiler pin matches the Kukicha version documented in the compiler-owned block above.
-3. Run `kukicha check ./...`, `kukicha fmt --check --json .`, and `MIZUYA_EMBED_PROVIDER=hash kukicha test . -count=1`.
-4. Remove generated Go artifacts, commit the release, and create an annotated `vX.Y.Z` tag. The Docker workflow publishes tags matching `v*`.
+3. Update the embedded CLI and MCP server versions to the release semver.
+4. Run `kukicha check ./...`, `kukicha fmt --check --json .`, and `MIZUYA_EMBED_PROVIDER=hash kukicha test . -count=1`.
+5. Remove generated Go artifacts, commit the release, and create an annotated `vX.Y.Z` tag. The Docker workflow publishes tags matching `v*`.
+6. Remember that Kukicha names its executable after the build directory; the Docker stage builds in `/src` and moves `src` to `/mizuya`.
 
 <!-- kukicha:start -->
 # Kukicha
