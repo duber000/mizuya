@@ -948,7 +948,7 @@ func doImportOpenWiki(args: cli.Args) error
 # concepts, and are skipped.
 func importOKF(pool: db.Pool, baseDir: string, bundleDir: string, sourceTag: string) (int, int, error)
     bundleRoot := files.Join(baseDir, bundleDir)
-    entries, lErr := files.Walk(bundleRoot)
+    entries, lErr := files.WalkEntries(bundleRoot)
     if lErr isnt empty
         return 0, 0, errs.Wrap(lErr, "cannot walk bundle dir")
 
