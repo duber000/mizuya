@@ -16,8 +16,8 @@ place to keep everything you've learned within reach.
   append path for observations and tags
 - BM25 ranking with per-column weights (`bm25(fts, 10, 5, 2, 1)`)
 - N-hop graph context lookups via recursive CTEs over the `relations` table
-- **vec1 virtual table** for vector KNN with cosine distance, plus a plain
-  `embeddings_raw` side store (the vendored vec1 build is write/search-only)
+- **vec1 virtual table** for vector KNN with cosine distance, carrying the
+  float32 vector plus model/dimension metadata in one store
 - **Binary BLOB vector storage** — compact little-endian float32 encoding
 - **Real embeddings** via Ollama `embeddinggemma-2:740m` (the default — one shared 768-d text/image/audio/video space) or any OpenAI-compatible API; `MIZUYA_EMBED_PROVIDER=hash` for the offline escape hatch
 - **Media attachments** — images, audio, and frame-sampled video stored sha256-addressed under `<db dir>/assets/`, embedded as 768-d vectors (`attach`); bytes are never secret-scanned and every output says so

@@ -4,7 +4,7 @@ title: AGENTS.md — mizuya repository guide
 description: Guidelines, verification commands, and architecture notes for agents working in mizuya.
 tags: [agents, conventions, kukicha, mcp, memory, vector, sqlite]
 generated: { by: antigravity/gemini-3.8-flash, at: 2026-09-26T12:51:00-04:00 }
-verified: 2026-11-06T01:43:00Z
+verified: 2026-11-23T00:00:00Z
 stale_after: 2026-12-26T00:00:00Z
 status: stable
 sources:
@@ -63,6 +63,18 @@ These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki
 - Every `ObsRow` carries `supersedes` and `superseded_by`; superseded observations stay visible (flagged) unless `hide_superseded` is passed.
 - `prune-history` is the ONLY deliberate deletion from `entity_history` (retention policy in `docs/STORAGE.md`); it always keeps the newest version per entity and fails closed with neither `--keep` nor `--before`.
 - Secret redaction must stay visible in every mode: observe `--json` `redacted` count and text-mode note, and a stderr `WARN` for *every* redacted field on any write (name, summary, tags, observation text/source, relation labels; detector names only — never log `SecretFinding.Raw`). Upsert echoes the redacted `Entity` it stored.
+
+### 5. Entity vector storage
+- `embeddings_vec` is the authoritative entity vector store: one vec1 row carries `vector`, `entity_id`, `model`, and `dim`. Do not reintroduce `embeddings_raw` or another duplicate vector table.
+- `getEmbedding` reads `embeddings_vec.vector` directly. Keep migration tests covering both historical vec1 layouts and the repeated delete/insert tombstone-compression path (`reembed_test.kuki`).
+- `media_raw` is still a deliberate side store; do not assume entity-vector changes apply to media until it receives its own migration and regression tests.
+
+## Releases
+
+1. Keep `CHANGELOG.md` as the release record: move `## Unreleased` to the new semver version and date only when the release is ready.
+2. Verify the `Dockerfile` compiler pin matches the Kukicha version documented in the compiler-owned block above.
+3. Run `kukicha check ./...`, `kukicha fmt --check --json .`, and `MIZUYA_EMBED_PROVIDER=hash kukicha test . -count=1`.
+4. Remove generated Go artifacts, commit the release, and create an annotated `vX.Y.Z` tag. The Docker workflow publishes tags matching `v*`.
 
 <!-- kukicha:start -->
 # Kukicha

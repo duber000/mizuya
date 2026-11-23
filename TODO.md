@@ -83,13 +83,12 @@ The candidates below are ordered by expected payoff for mizuya specifically.
   the rebuild config — same schema, no app changes. Pays off past a few
   thousand entities.
 
-- [ ] **Drop the `embeddings_raw` side store** if a future vec1 release lets
-  the indexed `vector` column read back as the original BLOB. (The vtab
-  carries only `vector, entity_id`; the plain `embeddings_raw` table holds
-  the same bytes plus model/dim provenance — it exists because the vendored
-  vec1 build SIGSEGVs on BLOB metadata and returns shifted bytes on
-  meta-constrained reads. Removing it halves per-entity vector storage:
-  `2×dim×4B` → `dim×4B`.)
+- [x] **Drop the `embeddings_raw` side store.** *(the current vec1 build
+      round-trips constrained vector reads and preserves metadata through
+      tombstone compression; `model`/`dim` now live as vec1 metadata,
+      `similar --id` reads `embeddings_vec.vector` directly, and startup
+      migrates both historical layouts before dropping `embeddings_raw`.
+      Entity vector storage drops from `2×dim×4B` to `dim×4B`.)*
 
 ## Funes lessons (from huggingface/funes) — adoption tracking
 
@@ -144,8 +143,8 @@ Phase 3 — safety, idempotency, measurement — **done**:
       `TestImportOpenWikiIdempotent`. Write-temp-then-rename is N/A:
       import only reads the bundle dir (relevant if an export/sync command
       is ever added).
-- [x] `docs/STORAGE.md` cost model: per-entity = text + FTS copy + 2×dim×4 B
-      vectors (vec1 row + raw side copy) + history per actual change;
+- [x] `docs/STORAGE.md` cost model: per-entity = text + FTS copy + dim×4 B
+      vectors (vec1 row + metadata) + history per actual change;
       projection table to 1M entities.
 - [x] "Tested and abandoned" discipline: see below.
 

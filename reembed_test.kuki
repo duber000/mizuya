@@ -7,15 +7,27 @@ petiole main
 
 import "path/filepath"
 import "stdlib/db"
+import "stdlib/sqlite"
 import "stdlib/test"
 import "testing"
 
-# countRawDim returns how many embeddings_raw rows carry dim = d.
-func countRawDim(pool: db.Pool, d: int) (int, error)
-    count := db.Count(pool, "SELECT count(*) FROM embeddings_raw WHERE dim = ?", d) onerr return 0, error
+# countVecDim returns how many vec1 metadata rows carry dim = d.
+func countVecDim(pool: db.Pool, d: int) (int, error)
+    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec WHERE dim = ?", d) onerr return 0, error
     return count as int, empty
 
-func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
+# embeddingMetaRow scans vec1 provenance metadata.
+type embeddingMetaRow
+    Model: string as "model"
+    Dim: int as "dim"
+
+# readEmbeddingMeta fetches one row of vec1 provenance metadata.
+func readEmbeddingMeta(pool: db.Pool, id: string) (embeddingMetaRow, error)
+    result := db.Query(pool, "SELECT model, dim FROM embeddings_vec WHERE entity_id = ?", id)
+        |> db.ScanOne of embeddingMetaRow onerr return embeddingMetaRow{}, error
+    return result, empty
+
+func TestReembedRebuildsEntityMetadata(t: reference testing.T)
     t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
     t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
@@ -45,9 +57,6 @@ func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
     _, rerr2 := reEmbedIfChanged(pool, "beta")
     test.AssertNoError(t, rerr2)
 
-    # Corrupt the raw side store the way an interrupted provider switch would.
-    db.Exec(pool, "UPDATE embeddings_raw SET dim = 999 WHERE entity_id = 'alpha'") onerr return
-
     res, eErr := reembedEverything(pool)
     test.AssertNoError(t, eErr)
     test.AssertEqual(t, res.Status, "reembedded")
@@ -55,12 +64,12 @@ func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
     test.AssertEqual(t, res.Dim, EmbedDim)
     test.AssertContains(t, res.Note, "hash provider")
 
-    n999, cErr := countRawDim(pool, 999)
-    test.AssertNoError(t, cErr)
-    test.AssertEqual(t, n999, 0)
-    nGood, cErr2 := countRawDim(pool, EmbedDim)
+    nGood, cErr2 := countVecDim(pool, EmbedDim)
     test.AssertNoError(t, cErr2)
     test.AssertEqual(t, nGood, 2)
+    rawExists, terr := sqlite.TableExists(pool, "embeddings_raw")
+    test.AssertNoError(t, terr)
+    test.AssertFalse(t, rawExists)
 
     # The rebuilt vector index must actually answer queries.
     vec, eErr2 := embedText("alpha widget")
@@ -68,6 +77,102 @@ func TestReembedRebuildsAndRepairsDim(t: reference testing.T)
     hits, sErr := similar(pool, vec, 2, SearchFilter{})
     test.AssertNoError(t, sErr)
     test.AssertTrue(t, hits isnt empty)
+
+func TestMigrateCurrentVec1SchemaDropsRawStore(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    blob := serializeVec(list of float64{1, 2, 3})
+    db.Exec(pool, "DROP TABLE embeddings_vec") onerr return
+    db.Exec(
+        pool,
+        "CREATE TABLE embeddings_raw (entity_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)",
+    ) onerr return
+    db.Exec(pool, "CREATE VIRTUAL TABLE embeddings_vec USING vec1(vector, entity_id)") onerr return
+    db.Exec(pool, "INSERT INTO embeddings_vec(vector, entity_id) VALUES (?, ?)", blob, "alpha") onerr return
+    db.Exec(
+        pool,
+        "INSERT INTO embeddings_raw(entity_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+        "alpha",
+        "old-model",
+        3,
+        blob,
+    ) onerr return
+
+    mErr := migrateVec1Schema(pool)
+    test.AssertNoError(t, mErr)
+
+    meta, qErr := readEmbeddingMeta(pool, "alpha")
+    test.AssertNoError(t, qErr)
+    test.AssertEqual(t, meta.Model, "old-model")
+    test.AssertEqual(t, meta.Dim, 3)
+    vec, gErr := getEmbedding(pool, "alpha")
+    test.AssertNoError(t, gErr)
+    test.AssertEqual(t, len(vec), 3)
+    rawExists, terr := sqlite.TableExists(pool, "embeddings_raw")
+    test.AssertNoError(t, terr)
+    test.AssertFalse(t, rawExists)
+
+func TestMigrateLegacyBlobVec1Schema(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    blob := serializeVec(list of float64{4, 5, 6})
+    db.Exec(pool, "DROP TABLE embeddings_vec") onerr return
+    db.Exec(
+        pool,
+        "CREATE VIRTUAL TABLE embeddings_vec USING vec1(vector, entity_id, model, dim, vec_raw)",
+    ) onerr return
+    db.Exec(
+        pool,
+        "INSERT INTO embeddings_vec(vector, entity_id, model, dim, vec_raw) VALUES (?, ?, ?, ?, ?)",
+        blob,
+        "alpha",
+        "legacy-model",
+        3,
+        blob,
+    ) onerr return
+
+    mErr := migrateVec1Schema(pool)
+    test.AssertNoError(t, mErr)
+
+    meta, qErr := readEmbeddingMeta(pool, "alpha")
+    test.AssertNoError(t, qErr)
+    test.AssertEqual(t, meta.Model, "legacy-model")
+    test.AssertEqual(t, meta.Dim, 3)
+    vec, gErr := getEmbedding(pool, "alpha")
+    test.AssertNoError(t, gErr)
+    test.AssertEqual(t, len(vec), 3)
+    rawExists, terr := sqlite.TableExists(pool, "embeddings_raw")
+    test.AssertNoError(t, terr)
+    test.AssertFalse(t, rawExists)
+
+func TestVec1TombstoneCompressionPreservesMetadata(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    vec := empty list of float64
+    for i from 0 to EmbedDim
+        vec = append(vec, (i + 1) as float64)
+    for i from 0 to 100
+        uErr := upsertEmbedding(pool, "cycle", vec)
+        test.AssertNoError(t, uErr)
+
+    meta, mErr := readEmbeddingMeta(pool, "cycle")
+    test.AssertNoError(t, mErr)
+    test.AssertEqual(t, meta.Model, EmbedModel)
+    test.AssertEqual(t, meta.Dim, EmbedDim)
+    stored, gErr := getEmbedding(pool, "cycle")
+    test.AssertNoError(t, gErr)
+    test.AssertEqual(t, len(stored), EmbedDim)
+    iErr := sqlite.IntegrityCheck(pool)
+    test.AssertNoError(t, iErr)
 
 func TestReembedEmptyStore(t: reference testing.T)
     t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")

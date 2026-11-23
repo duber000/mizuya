@@ -92,7 +92,7 @@ AttachResult= { "status": "attached" | "media-native" | "already-attached",
 | `drift` | `DriftRow[]`, or `{"status": "no-drift", "count": 0}` when empty |
 | `import-okf` | `{"status": "imported", "entities": number, "links": number}` (`--bundle` selects the bundle root, default `docs`) |
 | `import-openwiki` | `{"status": "imported", "entities": number, "links": number}` (deprecated alias for `import-okf --bundle openwiki`; shape unchanged) |
-| `reembed` | `{"status": "reembedded", "entities": number, "media": number, "model": string, "dim": number, "note": string}` — all-or-nothing rebuild of `embeddings_vec`/`embeddings_raw` (and `media_vec`/`media_raw` when a provider is configured) with the *currently configured* provider. Every vector is computed before the store drops — a provider outage aborts with nothing modified; the swap itself is one transaction. `entity_history` and `entities` are untouched; `content_hash` advances to match |
+| `reembed` | `{"status": "reembedded", "entities": number, "media": number, "model": string, "dim": number, "note": string}` — all-or-nothing rebuild of `embeddings_vec` (and `media_vec`/`media_raw` when a provider is configured) with the *currently configured* provider. Every vector is computed before the store drops — a provider outage aborts with nothing modified; the swap itself is one transaction. `entity_history` and `entities` are untouched; `content_hash` advances to match |
 | `similar-media` | `MediaHit[]` — KNN over the `media_vec` index with the query embedded via the configured multimodal provider; refuses when the query dim and the stored `media_raw` dim disagree (run `reembed` after switching providers) |
 | `mcp` | no `--json`; stdio is JSON-RPC (MCP). Logs go to stderr, never stdout |
 

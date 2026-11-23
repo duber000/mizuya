@@ -517,9 +517,9 @@ func doReembed(args: cli.Args) error
     )
     if res.Note isnt empty
         print("  {color.Dim(res.Note)}")
-    print(color.Dim(
-        "  vector stores rebuilt (embeddings_vec/raw, media_vec/raw); entity_history untouched",
-    ))
+    print(
+        color.Dim("  vector stores rebuilt (embeddings_vec, media_vec/raw); entity_history untouched"),
+    )
     return empty
 
 # doAttach stores a media file as an attachment. Media bytes are stored
@@ -772,7 +772,7 @@ func doSimilar(args: cli.Args) error
         v, _, vErr := embedFileQuery(media)
         if vErr isnt empty
             return vErr
-        probe := db.Query(pool, "SELECT dim FROM embeddings_raw LIMIT 1") |> db.ScanAll of dimRow
+        probe := db.Query(pool, "SELECT dim FROM embeddings_vec LIMIT 1") |> db.ScanAll of dimRow
         if probe isnt empty and probe[0].Dim isnt len(v)
             return cli.UsageFail(
                 "cross-modal --media needs the text store embedded with the same multimodal model (store holds {probe[0].Dim}d vectors); set MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m, then run `mizuya reembed`",
@@ -808,7 +808,7 @@ func doSimilar(args: cli.Args) error
 # doSimilarMedia embeds a media file and KNN-searches the media index.
 # Mirrors `similar` but over media_vec — the "which attachment is this
 # like?" query. Requires a multimodal provider; the dim is guarded
-# against media_raw the same way `similar --media` guards embeddings_raw.
+# against media_raw the same way `similar --media` guards embeddings_vec.
 func doSimilarMedia(args: cli.Args) error
     file := cli.GetString(args, "file")
     kind := strpkg.ToLower(strpkg.TrimSpace(cli.GetString(args, "kind")))

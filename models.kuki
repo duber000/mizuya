@@ -199,8 +199,7 @@ type entityData
     Summary: string as "summary"
     Tags: list of string as "tags"
 
-# vecRow scans a stored float32 LE BLOB from the embeddings_raw side
-# table (the vec1 vtab is write/search only — see schema.kuki).
+# vecRow scans a stored float32 LE BLOB from the vec1 virtual table.
 type vecRow
     Vec: list of byte as "vec"
 

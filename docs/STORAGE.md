@@ -14,8 +14,7 @@ A mizuya database is one SQLite file (WAL mode) with:
 | `observations` | append-only observation rows | observations × text |
 | `entity_history` | one full row snapshot per *actual* change | changes × data size |
 | `relations` | edges | edges |
-| `embeddings_vec` (vec1) | float32 vector per entity | entities × dim × 4 B |
-| `embeddings_raw` | the same vector again (vec1 reads are write/search-only in the vendored build) | entities × dim × 4 B |
+| `embeddings_vec` (vec1) | float32 vector plus model/dim metadata per entity | entities × dim × 4 B |
 | `media` | one row per attachment (sha256, byte count, mime, redacted caption — never the bytes) | attachments × ~0.3 KB |
 | `media_vec` (vec1) | one float32 vector per attachment | attachments × dim × 4 B |
 | `media_raw` | media vector side store | attachments × dim × 4 B |
@@ -27,10 +26,11 @@ A mizuya database is one SQLite file (WAL mode) with:
 
 - **Text floor**: name + summary + tags ≈ 0.2–1 KB typical; FTS5 index adds
   roughly another copy of the indexed text.
-- **Vector floor**: `2 × dim × 4 B` per entity (vec1 row + raw side copy).
-  The default is now `embeddinggemma-2:740m` (768) → 6 KB; the hash
-  fallback (`MIZUYA_EMBED_PROVIDER=hash`, dim 64) is 512 B;
-  text-embedding-3-small (1536) → 12 KB.
+- **Vector floor**: `dim × 4 B` per entity. The default is now
+  `embeddinggemma-2:740m` (768) → 3 KB; the hash fallback
+  (`MIZUYA_EMBED_PROVIDER=hash`, dim 64) is 256 B; text-embedding-3-small
+  (1536) → 6 KB. Media vectors still have a `media_raw` side copy until
+  they get the same migration.
 - **History**: a no-op upsert appends nothing (dedup against the latest
   logged version), so history cost is proportional to *actual changes*, not
   writes.
@@ -43,9 +43,9 @@ A mizuya database is one SQLite file (WAL mode) with:
 
 | Entities | dim 64 (hash) | dim 768 | dim 1536 | + observations (10/entity, 200 B each) |
 |---:|---:|---:|---:|---:|
-| 10k | ~15 MB | ~70 MB | ~135 MB | +20 MB |
-| 100k | ~150 MB | ~700 MB | ~1.35 GB | +200 MB |
-| 1M | ~1.5 GB | ~7 GB | ~13.5 GB | +2 GB |
+| 10k | ~12 MB | ~40 MB | ~70 MB | +20 MB |
+| 100k | ~125 MB | ~400 MB | ~700 MB | +200 MB |
+| 1M | ~1.25 GB | ~4 GB | ~7 GB | +2 GB |
 
 The embedding is the dominant term once a real provider is configured —
 budget for it first. The vec1 index is `flat` (brute-force KNN, no extra

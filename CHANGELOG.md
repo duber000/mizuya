@@ -3,7 +3,7 @@
 All notable changes to mizuya. Versions are git tags (`vX.Y.Z`); the Docker
 workflow builds images on tag push.
 
-## Unreleased
+## 0.3.0 — 2026-11-22
 
 ### Breaking
 - **The default embedding provider is now Ollama serving
@@ -43,8 +43,8 @@ workflow builds images on tag push.
   semantics.
 - Invalid `--since`/`--until`/`--as-of`/`--threshold` values are usage
   errors (exit 2), matching the output contract.
-- Dockerfile pins kukicha `v0.86.9` (was `v0.86.5`), matching the
-  vendored stdlib.
+- Dockerfile pins kukicha `v0.86.12`, matching the compiler and vendored
+  stdlib.
 
 ### Media attachments (embeddinggemma-2)
 - New `attach` command and 7th MCP tool `attach_media`: stores image and
@@ -83,7 +83,7 @@ workflow builds images on tag push.
   screenshot/audio is this like?" query. Verified end-to-end with
   Ollama (identical file ranks distance 0).
 - New `reembed` command (all-or-nothing, one transaction): rebuilds
-  `embeddings_vec`/`embeddings_raw` with the configured provider — and
+  `embeddings_vec` with the configured provider — and
   `media_vec`/`media_raw` when a provider is set — for switching
   embedding models/dimensions. Every vector is computed before the store
   drops, so a provider outage aborts with nothing modified; `content_hash`
@@ -91,6 +91,11 @@ workflow builds images on tag push.
   TestLabeledRecall recall@5 = 1.00 with embeddinggemma-2:740m.
 
 ### Removed
+- Entity vectors no longer duplicate storage in `embeddings_raw`. vec1 now
+  carries `model` and `dim` metadata alongside the vector; `similar --id`
+  reads the vector directly. Startup migrates both historical vec1 layouts
+  transactionally and drops the obsolete side table, halving entity vector
+  storage. `media_raw` remains until media receives the same migration.
 - `distill` — it shelled out to an `openwiki -p` run, and the openwiki
   tool/ecosystem is gone. The `observations.distilled` column, the
   `drift` exclusion for `distilled = 1` rows, and the

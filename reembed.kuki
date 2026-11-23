@@ -6,8 +6,8 @@
 # graphs are silent garbage, not an error. `reembed` is the explicit,
 # all-or-nothing migration: it recomputes EVERY entity vector with the
 # currently configured provider first (an embed failure aborts and touches
-# nothing), then drops + recreates embeddings_vec and embeddings_raw and
-# repopulates them from the computed vectors in one transaction.
+# nothing), then drops + recreates embeddings_vec and repopulates it from
+# the computed vectors and model/dim metadata in one transaction.
 #
 # Media vectors are re-embedded too when a provider is configured — the
 # media index must live in the same space as the entity index or the
@@ -82,8 +82,8 @@ func reembedEverything(pool: db.Pool) (ReembedResult, error)
         Note: providerNote,
     }, empty
 
-# rebuildEntityVecTable drops + recreates embeddings_vec and replaces
-# embeddings_raw with the computed vectors. Callers compute ALL vectors
+# rebuildEntityVecTable drops + recreates embeddings_vec with the computed
+# vectors and metadata. Callers compute ALL vectors
 # first, so the store is never left half-migrated on embed failure.
 # dim is passed in for a sanity assertion (all vecs must agree).
 func rebuildEntityVecTable(pool: db.Pool, vecs: map of string to list of float64, dim: int) error
@@ -93,19 +93,17 @@ func rebuildEntityVecTable(pool: db.Pool, vecs: map of string to list of float64
             return error "inconsistent vector dimension {len(vec)} (expected {dim}); no store was modified"
 
     err := db.Transaction(pool, tx =>
-        db.TxExec(tx, "DELETE FROM embeddings_raw") onerr return
         db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_vec") onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
         for id in vecs
             blob := serializeVec(vecs[id])
-            db.TxExec(tx, "INSERT INTO embeddings_vec(vector, entity_id) VALUES (?, ?)", blob, id) onerr return
             db.TxExec(
                 tx,
-                "INSERT OR REPLACE INTO embeddings_raw(entity_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+                "INSERT INTO embeddings_vec(vector, entity_id, model, dim) VALUES (?, ?, ?, ?)",
+                blob,
                 id,
                 embedModel(),
                 dim,
-                blob,
             ) onerr return
         db.TxExec(tx, embeddingsRebuildSQL) onerr return
         return empty
