@@ -1,6 +1,7 @@
-# mizuya — MCP stdio server
-# Registers 8 tools so AI agents (Claude Desktop, etc.) can interact
-# with the knowledge graph over the Model Context Protocol.
+# mizuya — MCP server: stdio by default, or stateless streamable HTTP behind
+# a bearer token (`--http`, see mcp_http.kuki). Registers 8 tools so AI
+# agents (Claude Desktop, etc.) can interact with the knowledge graph over
+# the Model Context Protocol.
 
 petiole main
 
@@ -94,9 +95,11 @@ type similarArgs
 # --db flag before starting the server.
 var mcpDBPath = ".mizuya/mizuya.db"
 
-# startMCP creates the MCP server, registers all tools, and runs the
-# stdio transport (blocking).
-func startMCP(dbPath: string) error
+# startMCP creates the MCP server, registers all tools, and runs it. With
+# httpAddr empty it speaks stdio (blocking) — the MCP client owns the
+# process. Otherwise it serves stateless streamable HTTP at httpAddr behind
+# the bearer token (see mcp_http.kuki); token is already validated.
+func startMCP(dbPath: string, httpAddr: string, token: string) error
     mcpDBPath = dbPath
 
     router := mcp.NewRouter()
@@ -112,18 +115,20 @@ func startMCP(dbPath: string) error
             |> slice.Map(e => e.Id)
     )
 
-    server := mcp.NewWithCompletion("mizuya", "0.3.1", router.Handler())
+    server := mcp.NewWithCompletion("mizuya", Version, router.Handler())
     registerTools(server)
     registerResources(server)
+    serve := func() error
+        if httpAddr isnt empty
+            return startMCPHTTP(server, httpAddr, token)
+        return mcp.Serve(server)
     # CPU profiling is opt-in: MIZUYA_CPU_PROFILE names the output path.
     profilePath := env.GetOr("MIZUYA_CPU_PROFILE", "")
     if profilePath isnt empty
         log.Info("CPU profile enabled", "path", profilePath)
-        profile.CPU(profilePath, func() error
-            return mcp.Serve(server)
-        ) onerr return
+        profile.CPU(profilePath, serve) onerr return
         return empty
-    return mcp.Serve(server)
+    return serve()
 
 # registerResources exposes knowledge graph data as MCP resources.
 # entity://list — snapshot of all entities (name, type, summary).

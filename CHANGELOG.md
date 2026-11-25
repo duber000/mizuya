@@ -3,6 +3,31 @@
 All notable changes to mizuya. Versions are git tags (`vX.Y.Z`); the Docker
 workflow builds images on tag push.
 
+## Unreleased
+
+### Added
+- **MCP over streamable HTTP.** `mizuya mcp --http 127.0.0.1:8765` serves the
+  same 8 tools over the go-sdk's stateless streamable HTTP transport
+  (protocol 2026-07-28), so the server can run as a daemon that several
+  clients reach by URL; stdio remains the default. HTTP mode is fail-closed:
+  it requires a bearer token (`MIZUYA_MCP_TOKEN`, or a 0600 file via
+  `--token-file` / `MIZUYA_MCP_TOKEN_FILE` — systemd `LoadCredential` works),
+  refuses weak (<32-char) tokens and group/other-readable token files, and a
+  non-loopback bind needs `--allow-remote`. Tokens are compared in constant
+  time and never logged; `WriteTimeout` is raised to 5 min so a cold
+  embedding-model load cannot cut a response. See README "HTTP transport".
+
+### Fixed
+- Startup migration of the legacy `vec1(vector, entity_id, model, dim, vec_raw)`
+  layout was silently skipped: the layout probe matched DDL text, and the
+  legacy column list contains the current one as a prefix. Layouts are now
+  detected by their columns, and the migration tests assert the resulting
+  schema and the round-tripped vector values (they previously passed against
+  the un-migrated layout).
+- Startup no longer opens a write transaction when the vector store is already
+  current, and a leftover `embeddings_vec_migrate` table no longer blocks
+  `initDB`.
+
 ## 0.3.1 — 2026-11-22
 
 ### Fixes

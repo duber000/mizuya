@@ -24,7 +24,7 @@ place to keep everything you've learned within reach.
 - **Hybrid search** — Reciprocal Rank Fusion merging FTS5 + vector results
 - **Append-only version log** (`entity_history`) + observation supersession
 - **Fail-closed secret redaction** on every stored free-text field
-- **MCP stdio server** — 8 tools for AI agent integration via `stdlib/mcp`
+- **MCP server** — 8 tools for AI agent integration via `stdlib/mcp`: stdio (client-spawned), or stateless streamable HTTP behind a bearer token for daemonized use
 
 ## Build and Run
 
@@ -54,7 +54,7 @@ binary at ./mizuya
 | `reembed` | All-or-nothing rebuild of the vector store with the configured provider — required after switching embedding models/dimensions (`--json` for the structured result) |
 | `import-okf` | Import an OKF knowledge bundle (`--bundle docs`, default: `docs/` with `index.md`/`log.md` skipped per SPEC §8/§9) into entities + `references` edges; idempotent |
 | `import-openwiki` | Deprecated alias for `import-okf --bundle openwiki` |
-| `mcp`     | Start the MCP stdio server for AI agent access                          |
+| `mcp`     | Start the MCP server for AI agent access — stdio, or `--http` (bearer-authed) |
 
 All commands accept the global `--db <path>` (default `.mizuya/mizuya.db`)
 and `--json` for structured output. The exact `--json` shapes of every
@@ -203,6 +203,95 @@ Or if you've built the binary:
 }
 ```
 
+### HTTP transport (daemonized use)
+
+`mizuya mcp --http <addr>` serves the same tools over the streamable HTTP
+transport in **stateless** mode (each request is self-contained — nothing is
+lost on restart), behind a bearer-token gate. stdio stays the default.
+
+```bash
+# 1. A token: 64 hex chars, in a file only you can read.
+install -d -m 700 ~/.config/mizuya
+openssl rand -hex 32 > ~/.config/mizuya/mcp-token && chmod 600 ~/.config/mizuya/mcp-token
+
+# 2. Serve. --db must be absolute when a service manager starts it.
+mizuya mcp --db ~/.mizuya/mizuya.db --http 127.0.0.1:8765 --token-file ~/.config/mizuya/mcp-token
+```
+
+Clients configure an HTTP MCP server at `http://127.0.0.1:8765/` with the
+header `Authorization: Bearer <token>` (the stdlib's own client:
+`mcp.BearerConnect(ctx, url, token)`).
+
+Smoke test without an MCP client:
+
+```bash
+curl -sN -X POST http://127.0.0.1:8765/ \
+  -H "Authorization: Bearer $(cat ~/.config/mizuya/mcp-token)" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+**Fail-closed rules.** HTTP mode refuses to start without a token; the token
+comes from `--token-file`, then `MIZUYA_MCP_TOKEN_FILE`, then `MIZUYA_MCP_TOKEN`,
+must be at least 32 characters, and token files must be mode 0600. A
+non-loopback `--http` address additionally needs `--allow-remote` — the token
+travels in plaintext, so anything beyond loopback belongs behind a TLS
+terminating reverse proxy. Tokens are compared in constant time and never
+logged.
+
+#### User systemd unit
+
+`~/.config/systemd/user/mizuya-mcp.service`:
+
+```ini
+[Unit]
+Description=mizuya — MCP server (stateless streamable HTTP, loopback)
+# Only meaningful if Ollama runs as a *user* service; mizuya degrades
+# gracefully when Ollama is down (writes commit, vectors deferred with a WARN).
+# Wants=ollama.service
+# After=ollama.service
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/mizuya mcp --db %h/.mizuya/mizuya.db --http 127.0.0.1:8765
+LoadCredential=mcp_token:%h/.config/mizuya/mcp-token
+Environment=MIZUYA_MCP_TOKEN_FILE=%d/mcp_token
+EnvironmentFile=-%h/.config/mizuya/env
+Restart=on-failure
+RestartSec=2
+
+# Hardening: needs only its data dir, loopback, and ffmpeg for video.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.mizuya
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Not MemoryDenyWriteExecute: SQLite runs as WASM under wazero — test first.
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user enable --now mizuya-mcp.service
+journalctl --user -u mizuya-mcp -f          # rejected-request and deferred-embed WARNs land here
+loginctl enable-linger "$USER"              # only if it must run without a login session
+```
+
+`LoadCredential` hands the token to the service as a 0400 file under `%d`
+(`$CREDENTIALS_DIRECTORY`), so it never shows up in `systemctl show` and
+mizuya's permission check passes. Keep embedding settings identical between
+the daemon and your shell — one `~/.config/mizuya/env` that both read — since
+two different `MIZUYA_EMBED_*` configurations writing one store means a
+`reembed`.
+
 ## Embedding Providers
 
 By default mizuya uses **Ollama serving `embeddinggemma-2:740m`** — one
@@ -305,7 +394,8 @@ search.kuki       — FTS5 + regex search, filters, vec1 vector storage
 hybrid.kuki       — Reciprocal Rank Fusion (FTS5 + vector merge)
 embed.kuki        — Embedding provider abstraction (default ollama+embeddinggemma-2:740m, hash hatch, OpenAI-compatible)
 scanner.kuki      — Fail-closed secret scanner (pluggable SecretScanner, regex default)
-mcp_server.kuki   — MCP stdio server with 6 tool registrations
+mcp_server.kuki   — MCP server: tool registrations + stdio entry point
+mcp_http.kuki     — MCP streamable HTTP transport + bearer-token gate
 format.kuki       — Terminal display formatting
 *_test.kuki       — store_test, bench_test (labeled recall + benchmarks),
                     contract_test (output contract), phase3_test (scanner/import)

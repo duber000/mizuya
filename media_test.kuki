@@ -228,6 +228,9 @@ func TestAttachVideoEndToEnd(t: reference testing.T)
 
     res, err := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(file))
     test.AssertNoError(t, err)
+    if err isnt empty
+        # Fail cleanly here instead of indexing a zero-value result below.
+        return
     test.AssertEqual(t, res.Kind, "video")
     test.AssertEqual(t, res.Mime, "video/mp4")
     # No provider configured: frames extract fine, vector defers.

@@ -1,0 +1,182 @@
+# mizuya — tests for the streamable-HTTP MCP transport and its bearer gate.
+
+petiole main
+
+import "net/http"
+import "net/http/httptest"
+import "os"
+import "path/filepath"
+import "stdlib/ctx"
+import "stdlib/mcp"
+import "stdlib/test"
+import "testing"
+import "time"
+
+const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+const otherToken = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+# okHandler stands in for the MCP handler in the gate unit test.
+type okHandler
+
+func ServeHTTP on h: reference okHandler(w: http.ResponseWriter, _r: reference http.Request)
+    w.WriteHeader(http.StatusNoContent)
+
+func TestBearerToken(t: reference testing.T)
+    test.AssertEqual(t, bearerToken("Bearer " + testToken), testToken)
+    test.AssertEqual(t, bearerToken("bearer " + testToken), testToken)
+    test.AssertEqual(t, bearerToken("Bearer   " + testToken), testToken)
+    test.AssertEqual(t, bearerToken("Bearer"), "")
+    test.AssertEqual(t, bearerToken("Bearer " + testToken + " extra"), "")
+    test.AssertEqual(t, bearerToken("Basic abc"), "")
+    test.AssertEqual(t, bearerToken(""), "")
+
+func TestTokenMatches(t: reference testing.T)
+    test.AssertTrue(t, tokenMatches(testToken, testToken))
+    test.AssertFalse(t, tokenMatches(testToken, otherToken))
+    test.AssertFalse(t, tokenMatches(testToken, testToken + "0"))
+    test.AssertFalse(t, tokenMatches("", testToken))
+
+func TestIsLoopbackAddr(t: reference testing.T)
+    test.AssertTrue(t, isLoopbackAddr("127.0.0.1:8765"))
+    test.AssertTrue(t, isLoopbackAddr("[::1]:8765"))
+    test.AssertTrue(t, isLoopbackAddr("localhost:8765"))
+    test.AssertFalse(t, isLoopbackAddr(":8765"))
+    test.AssertFalse(t, isLoopbackAddr("0.0.0.0:8765"))
+    test.AssertFalse(t, isLoopbackAddr("192.168.1.2:8765"))
+    test.AssertFalse(t, isLoopbackAddr("example.com:8765"))
+    test.AssertFalse(t, isLoopbackAddr("no-port"))
+
+func TestBearerGate(t: reference testing.T)
+    var inner: http.Handler
+    inner = reference of okHandler{}
+    gate := bearerAuth(inner, testToken)
+
+    missing := httptest.NewRequest(http.MethodPost, "/", empty)
+    rec := httptest.NewRecorder()
+    gate.ServeHTTP(rec, missing)
+    test.AssertEqual(t, rec.Code, http.StatusUnauthorized)
+    test.AssertEqual(t, rec.Header().Get("WWW-Authenticate"), 'Bearer realm="mizuya"')
+
+    wrong := httptest.NewRequest(http.MethodPost, "/", empty)
+    wrong.Header.Set("Authorization", "Bearer " + otherToken)
+    rec2 := httptest.NewRecorder()
+    gate.ServeHTTP(rec2, wrong)
+    test.AssertEqual(t, rec2.Code, http.StatusUnauthorized)
+
+    # The gate covers every method, not just POST.
+    get := httptest.NewRequest(http.MethodGet, "/", empty)
+    rec3 := httptest.NewRecorder()
+    gate.ServeHTTP(rec3, get)
+    test.AssertEqual(t, rec3.Code, http.StatusUnauthorized)
+
+    ok := httptest.NewRequest(http.MethodPost, "/", empty)
+    ok.Header.Set("Authorization", "bearer " + testToken)
+    rec4 := httptest.NewRecorder()
+    gate.ServeHTTP(rec4, ok)
+    test.AssertEqual(t, rec4.Code, http.StatusNoContent)
+    test.AssertEqual(t, rec4.Header().Get("WWW-Authenticate"), "")
+
+func TestResolveMCPToken(t: reference testing.T)
+    t.Setenv("MIZUYA_MCP_TOKEN", "")
+    t.Setenv("MIZUYA_MCP_TOKEN_FILE", "")
+    _, err := resolveMCPToken("")
+    test.AssertTrue(t, err isnt empty)
+    test.AssertContains(t, err.Error(), "MIZUYA_MCP_TOKEN")
+
+    t.Setenv("MIZUYA_MCP_TOKEN", "short")
+    _, err2 := resolveMCPToken("")
+    test.AssertTrue(t, err2 isnt empty)
+    test.AssertContains(t, err2.Error(), "at least 32")
+
+    t.Setenv("MIZUYA_MCP_TOKEN", testToken)
+    tok, ok := resolveMCPToken("")
+    test.AssertNoError(t, ok)
+    test.AssertEqual(t, tok, testToken)
+
+    # A token file wins over the environment, and a trailing newline is fine.
+    dir := t.TempDir()
+    path := filepath.Join(dir, "token")
+    werr := os.WriteFile(path, (testToken + "\n") as list of byte, 0o600)
+    test.AssertNoError(t, werr)
+    cerr := os.Chmod(path, 0o600)
+    test.AssertNoError(t, cerr)
+    t.Setenv("MIZUYA_MCP_TOKEN", "env-should-lose-" + testToken)
+    fromFile, ferr := resolveMCPToken(path)
+    test.AssertNoError(t, ferr)
+    test.AssertEqual(t, fromFile, testToken)
+
+    # Loose permissions refuse to start, whatever the content.
+    cherr := os.Chmod(path, 0o644)
+    test.AssertNoError(t, cherr)
+    _, perr := readTokenFile(path)
+    test.AssertTrue(t, perr isnt empty)
+    test.AssertContains(t, perr.Error(), "chmod 600")
+
+# pingArgs mirrors the typed-args registration mcp_server.kuki uses.
+type pingArgs
+    Shout: bool as "shout"
+
+func handlePing(args: pingArgs) (any, error)
+    return "pong", empty
+
+# inProcessTransport routes an http.Client straight into handler with no
+# socket — sandboxes that forbid listen(2) can still drive the full client
+# and server stacks — and optionally stamps a bearer token on each request,
+# exactly like the stdlib's own bearer client.
+type inProcessTransport
+    handler: http.Handler
+    token: string
+
+func RoundTrip on tr: reference inProcessTransport(r: reference http.Request) (reference http.Response, error)
+    req := r.Clone(r.Context())
+    if tr.token isnt empty
+        req.Header.Set("Authorization", "Bearer " + tr.token)
+    rec := httptest.NewRecorder()
+    tr.handler.ServeHTTP(rec, req)
+    return rec.Result(), empty
+
+# inProcessClient builds an http.Client that talks to handler in-process.
+func inProcessClient(handler: http.Handler, token: string) reference http.Client
+    transport := inProcessTransport{handler: handler, token: token}
+    client := http.Client{Transport: reference of transport}
+    return reference of client
+
+func TestStreamableHTTPBearerGate(t: reference testing.T)
+    server := mcp.New("mizuya-test", "0.0.0")
+    mcp.ToolWithOpts of pingArgs(server, "ping", "returns pong", map of string to any{
+        "type": "object",
+        "properties": map of string to any{
+            "shout": map of string to any{"type": "boolean"},
+        },
+    }, mcp.ToolOpts{ReadOnly: true}, handlePing
+    )
+    handler := newMCPHTTPHandler(server, testToken)
+    # Only the URL matters to the SDK's Host check (loopback) — no socket.
+    endpoint := "http://127.0.0.1:8765/"
+    h := ctx.WithTimeout(ctx.Background(), 10 * time.Second)
+    defer ctx.Cancel(h)
+
+    # Without the token the handshake itself is refused.
+    _, noAuth := mcp.ConnectWithClient(h.Ctx, endpoint, inProcessClient(handler, ""))
+    test.AssertTrue(t, noAuth isnt empty)
+
+    # So is the wrong token.
+    _, wrong := mcp.ConnectWithClient(h.Ctx, endpoint, inProcessClient(handler, otherToken))
+    test.AssertTrue(t, wrong isnt empty)
+
+    # With the right token, initialize, tools/list and tools/call round-trip
+    # through the real stateless handler.
+    session, cerr := mcp.ConnectWithClient(h.Ctx, endpoint, inProcessClient(handler, testToken))
+    test.AssertNoError(t, cerr)
+    if cerr isnt empty
+        return
+    tools, lerr := mcp.ListTools(h.Ctx, session)
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(tools), 1)
+    if len(tools) equals 1
+        test.AssertEqual(t, tools[0].Name, "ping")
+    res, callErr := mcp.CallTool(h.Ctx, session, "ping", empty map of string to any)
+    test.AssertNoError(t, callErr)
+    test.AssertEqual(t, res.Text, "pong")
+    mcp.Close(session) onerr discard

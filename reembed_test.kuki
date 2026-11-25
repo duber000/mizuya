@@ -27,6 +27,31 @@ func readEmbeddingMeta(pool: db.Pool, id: string) (embeddingMetaRow, error)
         |> db.ScanOne of embeddingMetaRow onerr return embeddingMetaRow{}, error
     return result, empty
 
+# assertCurrentVec1Layout pins the post-migration schema: the vtab carries
+# the model/dim metadata columns, the legacy vec_raw column is gone, and
+# neither the embeddings_raw side store nor the scratch copy table survived.
+func assertCurrentVec1Layout(t: reference testing.T, pool: db.Pool)
+    hasVecRaw, cErr := sqlite.ColumnExists(pool, "embeddings_vec", "vec_raw")
+    test.AssertNoError(t, cErr)
+    test.AssertFalse(t, hasVecRaw, "vec_raw column must be gone after migration")
+    hasModel, cErr2 := sqlite.ColumnExists(pool, "embeddings_vec", "model")
+    test.AssertNoError(t, cErr2)
+    test.AssertTrue(t, hasModel, "model metadata column must exist after migration")
+    rawExists, terr := sqlite.TableExists(pool, "embeddings_raw")
+    test.AssertNoError(t, terr)
+    test.AssertFalse(t, rawExists, "embeddings_raw side store must be gone after migration")
+    scratchExists, terr2 := sqlite.TableExists(pool, "embeddings_vec_migrate")
+    test.AssertNoError(t, terr2)
+    test.AssertFalse(t, scratchExists, "scratch copy table must be dropped")
+
+# assertVecEqual checks values, not just shape: a metadata-constrained
+# read of `vector` must round-trip the original float32s exactly. The
+# old vec1 build could return shifted bytes through this path.
+func assertVecEqual(t: reference testing.T, got: list of float64, want: list of float64)
+    test.AssertEqual(t, len(got), len(want))
+    for i from 0 to len(want)
+        test.AssertEqual(t, got[i], want[i])
+
 func TestReembedRebuildsEntityMetadata(t: reference testing.T)
     t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
     t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
@@ -78,13 +103,15 @@ func TestReembedRebuildsEntityMetadata(t: reference testing.T)
     test.AssertNoError(t, sErr)
     test.AssertTrue(t, hits isnt empty)
 
-func TestMigrateCurrentVec1SchemaDropsRawStore(t: reference testing.T)
+func TestMigrateSideStoreVec1SchemaDropsRawStore(t: reference testing.T)
     t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
     t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    blob := serializeVec(list of float64{1, 2, 3})
+    # Previous layout: bare vtab + authoritative raw side store.
+    want := list of float64{1, 2, 3}
+    blob := serializeVec(want)
     db.Exec(pool, "DROP TABLE embeddings_vec") onerr return
     db.Exec(
         pool,
@@ -104,16 +131,15 @@ func TestMigrateCurrentVec1SchemaDropsRawStore(t: reference testing.T)
     mErr := migrateVec1Schema(pool)
     test.AssertNoError(t, mErr)
 
+    # Provenance comes from the side store; the vector survives the copy.
     meta, qErr := readEmbeddingMeta(pool, "alpha")
     test.AssertNoError(t, qErr)
     test.AssertEqual(t, meta.Model, "old-model")
     test.AssertEqual(t, meta.Dim, 3)
     vec, gErr := getEmbedding(pool, "alpha")
     test.AssertNoError(t, gErr)
-    test.AssertEqual(t, len(vec), 3)
-    rawExists, terr := sqlite.TableExists(pool, "embeddings_raw")
-    test.AssertNoError(t, terr)
-    test.AssertFalse(t, rawExists)
+    assertVecEqual(t, vec, want)
+    assertCurrentVec1Layout(t, pool)
 
 func TestMigrateLegacyBlobVec1Schema(t: reference testing.T)
     t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
@@ -121,7 +147,8 @@ func TestMigrateLegacyBlobVec1Schema(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)
 
-    blob := serializeVec(list of float64{4, 5, 6})
+    want := list of float64{4, 5, 6}
+    blob := serializeVec(want)
     db.Exec(pool, "DROP TABLE embeddings_vec") onerr return
     db.Exec(
         pool,
@@ -140,16 +167,65 @@ func TestMigrateLegacyBlobVec1Schema(t: reference testing.T)
     mErr := migrateVec1Schema(pool)
     test.AssertNoError(t, mErr)
 
+    # This layout already carries model/dim, so only the schema assertions
+    # tell a real migration apart from a silently skipped one.
     meta, qErr := readEmbeddingMeta(pool, "alpha")
     test.AssertNoError(t, qErr)
     test.AssertEqual(t, meta.Model, "legacy-model")
     test.AssertEqual(t, meta.Dim, 3)
     vec, gErr := getEmbedding(pool, "alpha")
     test.AssertNoError(t, gErr)
-    test.AssertEqual(t, len(vec), 3)
-    rawExists, terr := sqlite.TableExists(pool, "embeddings_raw")
-    test.AssertNoError(t, terr)
-    test.AssertFalse(t, rawExists)
+    assertVecEqual(t, vec, want)
+    assertCurrentVec1Layout(t, pool)
+
+func TestMigrateCurrentVec1SchemaDropsStaleRawStore(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    # An intermediate build wrote both the current vtab layout and the raw
+    # side store. The vtab is authoritative, so the stale raw copy must lose.
+    want := list of float64{7, 8, 9}
+    upsertEmbedding(pool, "alpha", want) onerr return
+    db.Exec(
+        pool,
+        "CREATE TABLE embeddings_raw (entity_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)",
+    ) onerr return
+    db.Exec(
+        pool,
+        "INSERT INTO embeddings_raw(entity_id, model, dim, vec) VALUES (?, ?, ?, ?)",
+        "alpha",
+        "stale-model",
+        3,
+        serializeVec(list of float64{100, 100, 100}),
+    ) onerr return
+    db.Exec(
+        pool,
+        "CREATE TRIGGER embeddings_raw_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM embeddings_raw WHERE entity_id = old.id; END",
+    ) onerr return
+
+    # Fixture sanity: this is the current layout, not a legacy one.
+    legacyBlob, pErr := sqlite.ColumnExists(pool, "embeddings_vec", "vec_raw")
+    test.AssertNoError(t, pErr)
+    test.AssertFalse(t, legacyBlob)
+
+    mErr := migrateVec1Schema(pool)
+    test.AssertNoError(t, mErr)
+
+    assertCurrentVec1Layout(t, pool)
+    triggerCount := db.Count(
+        pool,
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name = 'embeddings_raw_after_entity_delete'",
+    ) onerr return
+    test.AssertEqual(t, triggerCount as int, 0)
+    meta, qErr := readEmbeddingMeta(pool, "alpha")
+    test.AssertNoError(t, qErr)
+    test.AssertEqual(t, meta.Model, EmbedModel)
+    test.AssertEqual(t, meta.Dim, 3)
+    stored, gErr := getEmbedding(pool, "alpha")
+    test.AssertNoError(t, gErr)
+    assertVecEqual(t, stored, want)
 
 func TestVec1TombstoneCompressionPreservesMetadata(t: reference testing.T)
     t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
@@ -170,7 +246,7 @@ func TestVec1TombstoneCompressionPreservesMetadata(t: reference testing.T)
     test.AssertEqual(t, meta.Dim, EmbedDim)
     stored, gErr := getEmbedding(pool, "cycle")
     test.AssertNoError(t, gErr)
-    test.AssertEqual(t, len(stored), EmbedDim)
+    assertVecEqual(t, stored, vec)
     iErr := sqlite.IntegrityCheck(pool)
     test.AssertNoError(t, iErr)
 

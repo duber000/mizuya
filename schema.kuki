@@ -15,7 +15,6 @@ petiole main
 
 import "stdlib/db"
 import "stdlib/sqlite"
-import "stdlib/string" as strpkg
 
 # --- Table DDL ---
 
@@ -63,7 +62,9 @@ const entityHistorySQL = "CREATE TABLE IF NOT EXISTS entity_history (id TEXT PRI
 #
 # The metadata columns carry provenance (model, dim) without duplicating
 # the vector. Current vec1 builds round-trip constrained vector reads and
-# keep BLOB-valued metadata stable through tombstone compression.
+# preserve TEXT/INTEGER metadata through tombstone compression — both
+# pinned by reembed_test.kuki. BLOB-valued metadata (the old vec_raw
+# column) is neither used here nor verified against that path.
 const embeddingsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_vec USING vec1(vector, entity_id, model, dim)"
 
 const embeddingsRebuildSQL = `INSERT INTO embeddings_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
@@ -217,42 +218,43 @@ func migrateObsSupersedes(pool: db.Pool) error
 # migrateVec1Schema upgrades the two historical vec1 layouts to the
 # current `vector, entity_id, model, dim` schema:
 #
-#   1. `vector, entity_id` plus the old embeddings_raw side store
-#   2. `vector, entity_id, model, dim, vec_raw`, whose BLOB metadata hit
+#   1. `vector, entity_id, model, dim, vec_raw`, whose BLOB metadata hit
 #      a tombstone-compression bug in vec1 wasm v6.3.35304
+#   2. `vector, entity_id` plus the old embeddings_raw side store
 #
-# Vectors are copied out through the old vtab before it is dropped. The
-# migration then installs model/dim metadata, rebuilds the vec1 index, and
-# drops embeddings_raw in the same transaction.
+# Layouts are detected by the vec1 columns themselves, never by matching
+# DDL text: the `vec_raw` layout carries the current column list as a
+# prefix, so a substring probe for `entity_id, model, dim` matches it too
+# and silently skips its migration. Vectors are copied out through the
+# old vtab before it is dropped; the migration then installs model/dim
+# metadata, rebuilds the vec1 index, and drops embeddings_raw in the same
+# transaction. A database already on the current layout only sheds a
+# stale embeddings_raw side store.
 func migrateVec1Schema(pool: db.Pool) error
-    rows := db.Query(pool, "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'embeddings_vec'")
-        |> db.ScanAll of sqlRow
-    if rows is empty
-        return empty
-    if strpkg.Contains(rows[0].SQL, "entity_id, model, dim")
-        db.Transaction(pool, tx =>
-            db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_raw") onerr return
-            db.TxExec(tx, "DROP TRIGGER IF EXISTS embeddings_raw_after_entity_delete") onerr return
-            return empty
-        ) onerr return
+    exists := sqlite.TableExists(pool, "embeddings_vec") onerr return
+    if not exists
         return empty
 
-    if strpkg.Contains(rows[0].SQL, "vec_raw")
+    legacyBlob := sqlite.ColumnExists(pool, "embeddings_vec", "vec_raw") onerr return
+    if legacyBlob
+        return rebuildVec1FromScratch(
+            pool,
+            "CREATE TABLE embeddings_vec_migrate AS SELECT vector, entity_id, model, dim FROM embeddings_vec",
+        )
+
+    # Current layout: the vtab is authoritative, so only a stale side store
+    # (or its trigger) left behind by an intermediate build needs shedding.
+    currentLayout := sqlite.ColumnExists(pool, "embeddings_vec", "model") onerr return
+    if currentLayout
+        stale := db.Count(
+            pool,
+            "SELECT count(*) FROM sqlite_schema WHERE name IN ('embeddings_raw', 'embeddings_raw_after_entity_delete')",
+        ) onerr return
+        if stale as int equals 0
+            return empty
         db.Transaction(pool, tx =>
-            db.TxExec(
-                tx,
-                "CREATE TABLE embeddings_vec_migrate AS SELECT vector, entity_id, model, dim FROM embeddings_vec",
-            ) onerr return
-            db.TxExec(tx, "DROP TABLE embeddings_vec") onerr return
-            db.TxExec(tx, embeddingsSQL) onerr return
-            db.TxExec(
-                tx,
-                "INSERT INTO embeddings_vec(vector, entity_id, model, dim) SELECT vector, entity_id, model, dim FROM embeddings_vec_migrate",
-            ) onerr return
-            db.TxExec(tx, embeddingsRebuildSQL) onerr return
             db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_raw") onerr return
             db.TxExec(tx, "DROP TRIGGER IF EXISTS embeddings_raw_after_entity_delete") onerr return
-            db.TxExec(tx, "DROP TABLE embeddings_vec_migrate") onerr return
             return empty
         ) onerr return
         return empty
@@ -261,11 +263,20 @@ func migrateVec1Schema(pool: db.Pool) error
         pool,
         "CREATE TABLE IF NOT EXISTS embeddings_raw (entity_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)",
     ) onerr return
-    db.Transaction(pool, tx =>
-        db.TxExec(
-            tx,
-            "CREATE TABLE embeddings_vec_migrate AS SELECT v.vector, v.entity_id, COALESCE(r.model, 'unknown') AS model, COALESCE(r.dim, 0) AS dim FROM embeddings_vec v LEFT JOIN embeddings_raw r ON r.entity_id = v.entity_id",
-        ) onerr return
+    return rebuildVec1FromScratch(
+        pool,
+        "CREATE TABLE embeddings_vec_migrate AS SELECT v.vector, v.entity_id, COALESCE(r.model, 'unknown') AS model, COALESCE(r.dim, 0) AS dim FROM embeddings_vec v LEFT JOIN embeddings_raw r ON r.entity_id = v.entity_id",
+    )
+
+# rebuildVec1FromScratch upgrades a legacy vec1 layout in one transaction:
+# copy (vector, entity_id, model, dim) out through a scratch table populated
+# by selectSQL, drop the old vtab, install the current layout, repopulate,
+# rebuild the index, and shed the raw side store. A scratch table left by an
+# interrupted manual attempt is dropped first so it cannot block startup.
+func rebuildVec1FromScratch(pool: db.Pool, selectSQL: string) error
+    return db.Transaction(pool, tx =>
+        db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_vec_migrate") onerr return
+        db.TxExec(tx, selectSQL) onerr return
         db.TxExec(tx, "DROP TABLE embeddings_vec") onerr return
         db.TxExec(tx, embeddingsSQL) onerr return
         db.TxExec(
@@ -277,5 +288,4 @@ func migrateVec1Schema(pool: db.Pool) error
         db.TxExec(tx, "DROP TRIGGER IF EXISTS embeddings_raw_after_entity_delete") onerr return
         db.TxExec(tx, "DROP TABLE embeddings_vec_migrate") onerr return
         return empty
-    ) onerr return
-    return empty
+    )

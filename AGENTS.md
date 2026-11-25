@@ -69,11 +69,20 @@ These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki
 - `getEmbedding` reads `embeddings_vec.vector` directly. Keep migration tests covering both historical vec1 layouts and the repeated delete/insert tombstone-compression path (`reembed_test.kuki`).
 - `media_raw` is still a deliberate side store; do not assume entity-vector changes apply to media until it receives its own migration and regression tests.
 
+### 6. MCP HTTP transport
+`mcp --http <addr>` serves the go-sdk streamable HTTP handler in **stateless** mode behind a bearer-token gate (`mcp_http.kuki`). Fail-closed rules — do not relax without a contract note:
+- HTTP mode never runs unauthenticated. The token comes from `--token-file` → `MIZUYA_MCP_TOKEN_FILE` → `MIZUYA_MCP_TOKEN`, must be ≥ 32 chars, and token files must be 0600 (so systemd `LoadCredential` works). Missing, weak, or loose → refuse to start.
+- A non-loopback bind requires `--allow-remote`; the token travels in plaintext without TLS. Loopback-only is the default posture.
+- Every method passes the gate (401 + `WWW-Authenticate: Bearer`), tokens are compared in constant time over SHA-256 digests, and tokens are never logged. `TestStreamableHTTPBearerGate` drives the real SDK client and handler stacks in-process (no socket) — keep it green when touching `newMCPHTTPHandler`.
+
+### 7. go.mod hygiene
+Generated `*.go` files are the only Go source `go mod tidy` can see. Run `kukicha build --skip-build .` first, then `go mod tidy`, then delete the artifacts — tidy on a tree with no generated Go matches zero packages and **strips every requirement** from `go.mod`/`go.sum` (restore with `git checkout -- go.mod go.sum`). Importing a previously indirect dependency directly (as `mcp_http.kuki` does with the go-sdk) is what requires the move to the direct `require` block; `kukicha check` flags an unused direct dependency, so run tidy when imports change.
+
 ## Releases
 
 1. Keep `CHANGELOG.md` as the release record: move `## Unreleased` to the new semver version and date only when the release is ready.
 2. Verify the `Dockerfile` compiler pin matches the Kukicha version documented in the compiler-owned block above.
-3. Update the embedded CLI and MCP server versions to the release semver.
+3. Bump `Version` in `main.kuki` (CLI and MCP server) and the `skill` block's `version` literal just above it to the release semver.
 4. Run `kukicha check ./...`, `kukicha fmt --check --json .`, and `MIZUYA_EMBED_PROVIDER=hash kukicha test . -count=1`.
 5. Remove generated Go artifacts, commit the release, and create an annotated `vX.Y.Z` tag. The Docker workflow publishes tags matching `v*`.
 6. Remember that Kukicha names its executable after the build directory; the Docker stage builds in `/src` and moves `src` to `/mizuya`.

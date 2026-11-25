@@ -183,10 +183,6 @@ type AttachResult
     BytesScanned: bool as "bytes_scanned"
     EmbedDeferred: bool as "embed_deferred"
 
-# sqlRow scans DDL text out of the sqlite_schema table.
-type sqlRow
-    SQL: string as "sql"
-
 # suggestRow is a single fuzzy-match suggestion from the spellfix1
 # vtab. Word is the matched id; we don't currently surface rank or
 # distance.

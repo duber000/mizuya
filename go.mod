@@ -5,6 +5,7 @@ go 1.27.4
 replace kukicha.org/stdlib => ./.kukicha/stdlib
 
 require (
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/ncruces/go-sqlite3 v0.38.0
 	kukicha.org/stdlib v0.86.12
 )
@@ -12,7 +13,6 @@ require (
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.8.0 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v6 v6.7.35401 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/ncruces/sort v1.0.3 // indirect

@@ -6,6 +6,9 @@
 #   * a deterministic hash embedding fallback so `similar` works offline, plus
 #     real providers (Ollama, OpenAI-compatible, Voyage, Cohere) via
 #     MIZUYA_EMBED_PROVIDER
+#   * `mcp --http <addr>`: the same MCP tools over stateless streamable HTTP
+#     behind a bearer token (MIZUYA_MCP_TOKEN, or a 0600 MIZUYA_MCP_TOKEN_FILE),
+#     for running the server as a daemon
 #
 # Usage:
 #   kukicha run . -- init
@@ -46,6 +49,11 @@ import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
 import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
 import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 
+# Version is what the CLI and the MCP server report. The `skill` block's
+# `version` above is declarative and must be kept in sync by hand — the
+# 0.3.0 release shipped reporting 0.2.0 when the literals drifted.
+const Version = "0.3.1"
+
 # validEntityTypes is surfaced in CLI flag help and MCP tool schemas — the
 # wire values (lowercase), since those are what --type accepts and what is
 # stored. Built from AllEntityType() so it stays in sync with the enum.
@@ -81,7 +89,7 @@ func validateDateFlags(since: string, until: string) error
 func main()
     cli.New("mizuya")
         |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
-        |> cli.Version("0.3.1")
+        |> cli.Version(Version)
         |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
         |> cli.BoolGlobalFlag("json", "JSON output", false)
         |> cli.WithCommands(
@@ -227,7 +235,25 @@ func makeListCmd() reference cli.Command
         |> .ActionE(doList)
 
 func makeMCPCmd() reference cli.Command
-    return cli.NewCommand("mcp", "Start MCP stdio server for AI agent access")
+    return cli.NewCommand(
+        "mcp",
+        "Start MCP server for AI agent access — stdio by default; --http serves stateless streamable HTTP behind a bearer token",
+    )
+        |> .StringFlag(
+            "http",
+            "Listen address for streamable HTTP, e.g. 127.0.0.1:8765 (requires MIZUYA_MCP_TOKEN or --token-file)",
+            "",
+        )
+        |> .StringFlag(
+            "token-file",
+            "Bearer token file for --http (mode 0600); overrides MIZUYA_MCP_TOKEN_FILE",
+            "",
+        )
+        |> .BoolFlag(
+            "allow-remote",
+            "Let --http bind a non-loopback address (the bearer token travels in plaintext without TLS)",
+            false,
+        )
         |> .ActionE(doMCP)
 
 func makeImportOKFCmd() reference cli.Command
@@ -867,7 +893,15 @@ func doList(args: cli.Args) error
 
 func doMCP(args: cli.Args) error
     dbPath := cli.GetString(args, "db")
-    startMCP(dbPath) onerr explain "MCP server error"
+    httpAddr := cli.GetString(args, "http")
+    token := ""
+    if httpAddr isnt empty
+        if not cli.GetBool(args, "allow-remote") and not isLoopbackAddr(httpAddr)
+            return cli.UsageFail(
+                "--http {httpAddr} is not a loopback address; pass --allow-remote to bind beyond loopback (the bearer token travels in plaintext without TLS)",
+            )
+        token = resolveMCPToken(cli.GetString(args, "token-file")) onerr explain "MCP HTTP auth"
+    startMCP(dbPath, httpAddr, token) onerr explain "MCP server error"
     return empty
 
 # OKFDoc holds a parsed bundle concept between the two import passes.
