@@ -112,7 +112,7 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
             return AttachResult{}, cErr
         caption = c
         redacted = redacted + n
-    source := args.Source
+    source := strpkg.ToLower(strpkg.TrimSpace(args.Source))
     if source is empty
         source = "agent"
     srcClean, srcRedacted, sErr := redactSecrets(source)

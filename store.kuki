@@ -78,7 +78,7 @@ func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summar
         "tags": tags,
     })
 
-    insertSQL := "INSERT INTO entities (id, type, name, data) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET type = excluded.type, name = excluded.name, data = json_set(json_set(entities.data, '$.summary', ?), '$.tags', json(?)), updated_at = datetime('now')"
+    insertSQL := "INSERT INTO entities (id, type, name, data) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET type = excluded.type, name = excluded.name, data = json_set(json_set(entities.data, '$.summary', ?), '$.tags', json(?)), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
 
     # Copy the post-update state into the version log, unless it is
     # identical to the latest logged version (latest = newest changed_at,
@@ -109,14 +109,16 @@ func getEntity(pool: db.Pool, id: string) (Entity, error)
     result := db.Query(pool, q, id) |> db.ScanOne of Entity
     return result, empty
 
-# listEntities returns all entities, optionally filtered by type.
+# listEntities returns all non-archived entities, optionally filtered by type.
 func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, error)
     parts := empty list of string
     parts = append(parts, "SELECT id, type, name, json(data) AS data, created_at, updated_at FROM entities")
+    conds := list of string{"archived_at IS NULL"}
     args := empty list of any
     if etype isnt empty
-        parts = append(parts, "WHERE type = ?")
+        conds = append(conds, "type = ?")
         args = append(args, etype)
+    parts = append(parts, "WHERE " + strpkg.Join(conds, " AND "))
     parts = append(parts, "ORDER BY updated_at DESC")
     if limit > 0
         parts = append(parts, "LIMIT ?")
@@ -139,44 +141,67 @@ func listEntities(pool: db.Pool, etype: string, limit: int) (list of Entity, err
 #
 # The text and the source label pass through the fail-closed secret gate
 # (scanner.kuki): secrets are redacted in place and the count is returned;
-# a scanner error refuses the write entirely. Returns the number of secrets
-# redacted and the *stored* (redacted) text, so callers can echo what was
-# actually written rather than the raw input.
-func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") (int, string, error)
+# a scanner error refuses the write entirely. The source label is also
+# normalized (trimmed, lowercased; empty becomes "conversation") so the
+# common labels don't fragment into casing variants — any string is
+# accepted, but the conventional vocabulary is user / session / retro /
+# conversation. Returns an ObsWrite carrying the row's id and timestamp
+# plus the *stored* (redacted) text, so callers can capture the
+# observation's id programmatically (e.g. to pass as supersedes on a
+# later correction) rather than eyeballing get_context.
+func addObservation(pool: db.Pool, id: string, text: string, source: string, supersedes: string = "") (ObsWrite, error)
     exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
     if err isnt empty
-        return 0, "", err
+        return ObsWrite{}, err
     if not exists
-        return 0, "", error "entity not found: {id}"
+        return ObsWrite{}, error "entity not found: {id}"
     if supersedes isnt empty
         ok, serr := db.Exists(pool, "SELECT 1 FROM observations WHERE id = ? AND entity_id = ?", supersedes, id)
         if serr isnt empty
-            return 0, "", serr
+            return ObsWrite{}, serr
         if not ok
-            return 0, "", error "superseded observation not found on entity {id}: {supersedes}"
+            return ObsWrite{}, error "superseded observation not found on entity {id}: {supersedes}"
 
     clean, redacted, rerr := redactSecrets(text)
     if rerr isnt empty
-        return 0, "", rerr
+        return ObsWrite{}, rerr
+    source = strpkg.ToLower(strpkg.TrimSpace(source))
+    if source is empty
+        source = "conversation"
     cleanSource, srcRedacted, rerr2 := redactSecrets(source)
     if rerr2 isnt empty
-        return 0, "", rerr2
+        return ObsWrite{}, rerr2
     source = cleanSource
 
-    _, ierr := db.Exec(
+    rows, qerr := db.Query(
         pool,
-        "INSERT INTO observations (entity_id, text, source, supersedes) VALUES (?, ?, ?, NULLIF(?, ''))",
+        "INSERT INTO observations (entity_id, text, source, supersedes) VALUES (?, ?, ?, NULLIF(?, '')) RETURNING id, at, supersedes",
         id,
         clean,
         source,
         supersedes,
     )
+    if qerr isnt empty
+        return ObsWrite{}, qerr
+    row, ierr := rows |> db.ScanOne of obsInsertRow
     if ierr isnt empty
-        return 0, "", ierr
-    _, uerr := db.Exec(pool, "UPDATE entities SET updated_at = datetime('now') WHERE id = ?", id)
+        return ObsWrite{}, ierr
+    _, uerr := db.Exec(
+        pool,
+        "UPDATE entities SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        id,
+    )
     if uerr isnt empty
-        return 0, "", uerr
-    return redacted + srcRedacted, clean, empty
+        return ObsWrite{}, uerr
+    return ObsWrite{
+        Id: row.Id,
+        EntityId: id,
+        Text: clean,
+        Source: source,
+        At: row.At,
+        Supersedes: row.Supersedes,
+        Redacted: redacted + srcRedacted,
+    }, empty
 
 # listObservations returns the observations for an entity, newest first.
 # Ordering is a pinned contract (docs/output-contract.md): at DESC, id DESC.
@@ -197,14 +222,14 @@ func listObservationsRange(pool: db.Pool, id: string, since: string, until: stri
     parts := empty list of string
     parts = append(
         parts,
-        "SELECT o.id AS id, o.text AS text, o.source AS source, o.at AS at, COALESCE(o.supersedes, '') AS supersedes, COALESCE((SELECT o2.id FROM observations o2 WHERE o2.supersedes = o.id LIMIT 1), '') AS superseded_by FROM observations o WHERE o.entity_id = ?",
+        "SELECT o.id AS id, o.text AS text, o.source AS source, o.at AS at, o.supersedes AS supersedes, (SELECT o2.id FROM observations o2 WHERE o2.supersedes = o.id LIMIT 1) AS superseded_by FROM observations o WHERE o.entity_id = ?",
     )
     args := list of any{id}
     if since isnt empty
-        parts = append(parts, "AND o.at >= datetime(?)")
+        parts = append(parts, "AND o.at >= strftime('%Y-%m-%dT%H:%M:%SZ', ?)")
         args = append(args, since)
     if until isnt empty
-        parts = append(parts, "AND o.at < datetime(?, '+1 day')")
+        parts = append(parts, "AND o.at < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+1 day')")
         args = append(args, until)
     if hideSuperseded
         parts = append(parts, "AND NOT EXISTS (SELECT 1 FROM observations o2 WHERE o2.supersedes = o.id)")
@@ -227,7 +252,9 @@ func entityText(pool: db.Pool, id: string) (string, error)
     if ed.Summary isnt empty
         parts = append(parts, ed.Summary)
 
-    obs := listObservations(pool, id) onerr return "", error
+    # The embedding corpus excludes superseded beliefs — stale facts
+    # should not pull the vector toward retired conceptions.
+    obs := listObservationsRange(pool, id, "", "", true) onerr return "", error
     texts := obs
         |> slice.Filter(o => o.Text isnt empty)
         |> slice.Map(o => o.Text)
@@ -292,7 +319,7 @@ func listEntityHistory(pool: db.Pool, id: string, limit: int) (list of HistoryRo
 func entityStateAt(pool: db.Pool, id: string, at: string) (HistoryRow, error)
     if not validDate(at)
         return HistoryRow{}, error "as-of date must be YYYY-MM-DD, got {at}"
-    q := "SELECT id, entity_id, type, name, json(data) AS data, changed_at FROM entity_history WHERE entity_id = ? AND changed_at < datetime(?, '+1 day') ORDER BY changed_at DESC, id DESC LIMIT 1"
+    q := "SELECT id, entity_id, type, name, json(data) AS data, changed_at FROM entity_history WHERE entity_id = ? AND changed_at < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+1 day') ORDER BY changed_at DESC, id DESC LIMIT 1"
     result := db.Query(pool, q, id, at) |> db.ScanOne of HistoryRow
     return result, empty
 
@@ -331,7 +358,7 @@ func pruneHistory(pool: db.Pool, keep: int, before: string, dryRun: bool) (int, 
         conds = append(conds, "rn > ?")
         args = append(args, keep)
     if before isnt empty
-        conds = append(conds, "changed_at < datetime(?, '+1 day')")
+        conds = append(conds, "changed_at < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+1 day')")
         args = append(args, before)
     where := strpkg.Join(conds, " AND ")
 
@@ -367,7 +394,7 @@ func listDrift(pool: db.Pool, limit: int, includeSuperseded: bool) (list of Drif
     if limit <= 0
         limit = 50
     parts := list of string{
-        "SELECT o.id AS obs_id, o.entity_id AS entity_id, e.name AS entity_name, o.text AS obs_text, o.at AS obs_at, e.updated_at AS entity_updated FROM observations o JOIN entities e ON e.id = o.entity_id WHERE o.distilled = 0 AND EXISTS (SELECT 1 FROM entity_history h WHERE h.entity_id = o.entity_id AND h.changed_at > o.at)",
+        "SELECT o.id AS obs_id, o.entity_id AS entity_id, e.name AS entity_name, o.text AS obs_text, o.at AS obs_at, e.updated_at AS entity_updated FROM observations o JOIN entities e ON e.id = o.entity_id WHERE o.distilled = 0 AND e.archived_at IS NULL AND EXISTS (SELECT 1 FROM entity_history h WHERE h.entity_id = o.entity_id AND h.changed_at > o.at)",
     }
     if not includeSuperseded
         parts = append(parts, "AND NOT EXISTS (SELECT 1 FROM observations o2 WHERE o2.supersedes = o.id)")
@@ -398,13 +425,13 @@ func relate(pool: db.Pool, src: string, rel: string, dst: string) (string, error
 # outgoingContext returns every neighbor reachable in one hop from id
 # along an outgoing edge.
 func outgoingContext(pool: db.Pool, id: string) (list of ContextRow, error)
-    q := "SELECT r.rel AS rel, r.dst AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.dst WHERE r.src = ? ORDER BY r.rel, r.dst"
+    q := "SELECT r.rel AS rel, r.dst AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.dst WHERE r.src = ? AND e.archived_at IS NULL ORDER BY r.rel, r.dst"
     result := db.Query(pool, q, id) |> db.ScanAll of ContextRow
     return result, empty
 
 # incomingContext returns every entity that points to id in one hop.
 func incomingContext(pool: db.Pool, id: string) (list of ContextRow, error)
-    q := "SELECT r.rel AS rel, r.src AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.src WHERE r.dst = ? ORDER BY r.rel, r.src"
+    q := "SELECT r.rel AS rel, r.src AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM relations r JOIN entities e ON e.id = r.src WHERE r.dst = ? AND e.archived_at IS NULL ORDER BY r.rel, r.src"
     result := db.Query(pool, q, id) |> db.ScanAll of ContextRow
     return result, empty
 
@@ -427,8 +454,8 @@ func suggestIds(pool: db.Pool, query: string, k: int) (list of string, error)
 # every command sees up-to-date suggestions even though entities can
 # be inserted between sessions.
 func refreshFuzzyIds(pool: db.Pool) error
-    db.Exec(pool, "DELETE FROM entity_ids_fuzzy") onerr return
-    db.Exec(pool, "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities") onerr return
+    db.Exec(pool, fuzzyIdsClearSQL) onerr return
+    db.Exec(pool, fuzzyIdsPopulateSQL) onerr return
     return empty
 
 # reachable returns every entity reachable from id within `depth` hops,
@@ -447,9 +474,9 @@ func reachable(pool: db.Pool, id: string, depth: int, fromCol: string, toCol: st
         return empty list of ReachableRow, error "invalid toCol: {toCol}"
     var q: string
     if fromCol equals "src"
-        q = "WITH RECURSIVE reach(id, depth) AS (SELECT dst, 1 FROM relations WHERE src = ? UNION SELECT r.dst, reach.depth + 1 FROM relations r JOIN reach ON r.src = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
+        q = "WITH RECURSIVE reach(id, depth) AS (SELECT dst, 1 FROM relations WHERE src = ? UNION SELECT r.dst, reach.depth + 1 FROM relations r JOIN reach ON r.src = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id AND e.archived_at IS NULL GROUP BY e.id ORDER BY depth, e.id"
     else
-        q = "WITH RECURSIVE reach(id, depth) AS (SELECT src, 1 FROM relations WHERE dst = ? UNION SELECT r.src, reach.depth + 1 FROM relations r JOIN reach ON r.dst = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id GROUP BY e.id ORDER BY depth, e.id"
+        q = "WITH RECURSIVE reach(id, depth) AS (SELECT src, 1 FROM relations WHERE dst = ? UNION SELECT r.src, reach.depth + 1 FROM relations r JOIN reach ON r.dst = reach.id WHERE reach.depth < ?) SELECT MIN(reach.depth) AS depth, e.id AS other, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary FROM reach JOIN entities e ON e.id = reach.id AND e.archived_at IS NULL GROUP BY e.id ORDER BY depth, e.id"
     result := db.Query(pool, q, id, depth) |> db.ScanAll of ReachableRow
     return result, empty
 
@@ -458,3 +485,79 @@ func reachableOutgoing(pool: db.Pool, id: string, depth: int) (list of Reachable
 
 func reachableIncoming(pool: db.Pool, id: string, depth: int) (list of ReachableRow, error)
     return reachable(pool, id, depth, "dst", "src")
+
+# --- Observation search ---
+
+# escapeLike escapes the LIKE metacharacters in s so a literal
+# substring match never acts as a wildcard pattern. Pair with ESCAPE '\'.
+func escapeLike(s: string) string
+    s = strpkg.ReplaceAll(s, "\\", "\\\\")
+    s = strpkg.ReplaceAll(s, "%", "\\%")
+    s = strpkg.ReplaceAll(s, "_", "\\_")
+    return s
+
+# searchObservations finds observations whose text contains query as a
+# literal, case-insensitive substring, newest first. entityId, when
+# non-empty, narrows to one entity. The rows carry the same shape as
+# get_context's observations (newest-first; superseded rows flagged via
+# superseded_by; supersedes/superseded_by null when absent). This is the
+# lookup that yields the id to pass as supersedes on a correction.
+func searchObservations(pool: db.Pool, query: string, entityId: string, limit: int) (list of ObsRow, error)
+    if limit <= 0
+        limit = 10
+    parts := list of string{
+        "SELECT o.id AS id, o.text AS text, o.source AS source, o.at AS at, o.supersedes AS supersedes, (SELECT o2.id FROM observations o2 WHERE o2.supersedes = o.id LIMIT 1) AS superseded_by FROM observations o WHERE lower(o.text) LIKE lower('%' || ? || '%') ESCAPE '\\'",
+    }
+    args := list of any{escapeLike(query)}
+    if entityId isnt empty
+        parts = append(parts, "AND o.entity_id = ?")
+        args = append(args, entityId)
+    parts = append(parts, "ORDER BY o.at DESC, o.id DESC LIMIT ?")
+    args = append(args, limit)
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of ObsRow
+    return result, empty
+
+# --- Entity archive (soft delete) ---
+
+# archivedRow scans the entities.archived_at column (nullable).
+type archivedRow
+    ArchivedAt: optional reference string as "archived_at"
+
+# setEntityArchived flips the archived flag on an entity. Archiving is
+# not a content change: updated_at is left alone so recency ranking is
+# unaffected, and no history row is appended. Archived entities are
+# hidden from search, similar, list, drift, suggestions, and neighbor
+# lists, and get_context refuses them — but the row, its observations,
+# relations, and history are kept, and the flag can be cleared
+# (unarchive). The fuzzy-id vocabulary is refreshed so suggestions
+# never name a hidden entity.
+func setEntityArchived(pool: db.Pool, id: string, archived: bool) error
+    exists, err := db.Exists(pool, "SELECT 1 FROM entities WHERE id = ?", id)
+    if err isnt empty
+        return err
+    if not exists
+        return error "entity not found: {id}"
+    if archived
+        db.Exec(
+            pool,
+            "UPDATE entities SET archived_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+            id,
+        ) onerr return
+    else
+        db.Exec(pool, "UPDATE entities SET archived_at = NULL WHERE id = ?", id) onerr return
+    refreshFuzzyIds(pool) onerr return
+    return empty
+
+# isArchived reports whether the entity exists and is archived. Unknown
+# ids report false (callers that need existence checks do their own).
+func isArchived(pool: db.Pool, id: string) (bool, error)
+    rows, qerr := db.Query(pool, "SELECT archived_at FROM entities WHERE id = ?", id)
+    if qerr isnt empty
+        return false, qerr
+    scanned, serr := rows |> db.ScanAll of archivedRow
+    if serr isnt empty
+        return false, serr
+    if scanned is empty
+        return false, empty
+    return scanned[0].ArchivedAt isnt empty, empty

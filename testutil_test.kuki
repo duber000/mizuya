@@ -54,3 +54,35 @@ func openTestPool(tb: testing.TB) (db.Pool, string)
 func closeTestPool(pool: db.Pool, dir: string)
     db.Close(pool) onerr discard
     os.RemoveAll(dir) onerr discard
+
+# obsRefStr flattens an optional observation-id reference (supersedes /
+# superseded_by) to a plain string for assertions: empty when null.
+func obsRefStr(s: optional reference string) string
+    if s is empty
+        return ""
+    return dereference s
+
+# isoStampOK reports whether s looks like an ISO 8601 UTC stamp as the
+# store writes it: "YYYY-MM-DDTHH:MM:SSZ" (millis = false) or
+# "YYYY-MM-DDTHH:MM:SS.sssZ" (millis = true).
+func isoStampOK(s: string, millis: bool) bool
+    want := 20
+    if millis
+        want = 24
+    if len(s) isnt want
+        return false
+    seps := map of int to string{4: "-", 7: "-", 10: "T", 13: ":", 16: ":"}
+    if millis
+        seps[19] = "."
+        seps[23] = "Z"
+    else
+        seps[19] = "Z"
+    for i from 0 to len(s)
+        if i in seps
+            if s[i] isnt seps[i][0]
+                return false
+            continue
+        b := s[i] as uint32
+        if b < "0" as byte as uint32 or b > "9" as byte as uint32
+            return false
+    return true

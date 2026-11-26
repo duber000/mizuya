@@ -1,0 +1,153 @@
+# mizuya — handler-level tests for the MCP tools: the structured payloads
+# and refusal paths that store-level tests can't see. Handlers read the
+# package global mcpDBPath; each test points it at a fresh temp database.
+
+petiole main
+
+import "os"
+import "path/filepath"
+import "stdlib/db"
+import "stdlib/json" as jsonpkg
+import "stdlib/sqlite"
+import "stdlib/test"
+import "testing"
+
+import "github.com/modelcontextprotocol/go-sdk/mcp" as gomcp
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+# obsPayload is the typed shape of the add_observation tool result.
+type obsPayload
+    Status: string as "status"
+    Id: string as "id"
+    ObservationId: string as "observation_id"
+    EntityId: string as "entity_id"
+    Text: string as "text"
+    Source: string as "source"
+    At: string as "at"
+    Redacted: int as "redacted"
+
+# handlerResult unwraps the CallToolResult a handler returns and fails the
+# test otherwise.
+func handlerResult(t: reference testing.T, res: any, err: error) reference gomcp.CallToolResult
+    test.AssertNoError(t, err)
+    if res is reference gomcp.CallToolResult as ctr
+        return ctr
+    t.Fatalf("handler did not return a CallToolResult")
+    return reference of gomcp.CallToolResult{}
+
+# handlerText extracts the body of the first text content block.
+func handlerText(t: reference testing.T, ctr: reference gomcp.CallToolResult) string
+    for c in ctr.Content
+        if c is reference gomcp.TextContent as txt
+            return txt.Text
+    t.Fatalf("handler result has no text content")
+    return ""
+
+func TestUpsertRejectsCommaTags(t: reference testing.T)
+    args := upsertEntityArgs{
+        Id: "duck",
+        Type: "concept",
+        Name: "Donald Duck",
+        Summary: "s",
+        Tags: list of string{"a, b"},
+    }
+    res, err := handleUpsertEntity(args)
+    ctr := handlerResult(t, res, err)
+    test.AssertTrue(t, ctr.IsError, "a tag containing a comma must be rejected")
+
+func TestAddObservationReturnsStructuredPayload(t: reference testing.T)
+    dir, err := os.MkdirTemp("", "mizuya-mcp-test-")
+    test.AssertNoError(t, err)
+    defer
+        os.RemoveAll(dir) onerr discard
+    saved := mcpDBPath
+    mcpDBPath = filepath.Join(dir, "test.db")
+    defer
+        mcpDBPath = saved
+
+    pool := openMCPTestPool(t, dir)
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    db.Close(pool) onerr discard
+
+    res, aerr := handleAddObservation(addObservationArgs{
+        EntityId: "duck",
+        Text: "first belief",
+        Source: "Session",
+        Supersedes: "",
+    })
+    ctr := handlerResult(t, res, aerr)
+    test.AssertFalse(t, ctr.IsError, "add_observation must succeed")
+    body := handlerText(t, ctr)
+    payload, perr := jsonpkg.Parse of obsPayload from body
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, payload.Status, "observed")
+    test.AssertEqual(t, payload.Id, "duck")
+    test.AssertEqual(t, payload.EntityId, "duck")
+    test.AssertEqual(t, payload.Text, "first belief")
+    # source is normalized to lowercase.
+    test.AssertEqual(t, payload.Source, "session")
+    test.AssertTrue(
+        t,
+        payload.ObservationId isnt empty,
+        "observation_id must be present and non-empty",
+    )
+    test.AssertEqual(t, payload.Redacted, 0)
+
+func TestGetContextRefusesArchived(t: reference testing.T)
+    dir, err := os.MkdirTemp("", "mizuya-mcp-test-")
+    test.AssertNoError(t, err)
+    defer
+        os.RemoveAll(dir) onerr discard
+    saved := mcpDBPath
+    mcpDBPath = filepath.Join(dir, "test.db")
+    defer
+        mcpDBPath = saved
+
+    pool := openMCPTestPool(t, dir)
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    db.Close(pool) onerr discard
+
+    archiveRes, aerr := handleArchiveEntity(archiveEntityArgs{Id: "duck", Archived: true})
+    archiveCtr := handlerResult(t, archiveRes, aerr)
+    test.AssertFalse(t, archiveCtr.IsError, "archive must succeed")
+
+    res, gerr := handleGetContext(getContextArgs{Id: "duck", Depth: 1})
+    ctr := handlerResult(t, res, gerr)
+    test.AssertTrue(t, ctr.IsError, "get_context must refuse an archived entity")
+
+    unarchiveRes, uerr2 := handleArchiveEntity(archiveEntityArgs{Id: "duck", Archived: false})
+    unarchiveCtr := handlerResult(t, unarchiveRes, uerr2)
+    test.AssertFalse(t, unarchiveCtr.IsError, "unarchive must succeed")
+
+    res2, gerr2 := handleGetContext(getContextArgs{Id: "duck", Depth: 1})
+    ctr2 := handlerResult(t, res2, gerr2)
+    test.AssertFalse(t, ctr2.IsError, "get_context must work again after unarchive")
+
+# openMCPTestPool opens the temp database the same way the handlers do.
+func openMCPTestPool(t: reference testing.T, dir: string) db.Pool
+    pool, oerr := sqlite.OpenWithExtensions(
+        filepath.Join(dir, "test.db"),
+        map of string to string{"journal_mode": "WAL"},
+        fts5ext.Register,
+        statsext.Register,
+        unicodeext.Register,
+        vec1ext.Register,
+        uuidext.Register,
+        spellfixext.Register,
+        regexpext.Register,
+    )
+    if oerr isnt empty
+        t.Fatalf("open: %v", oerr)
+        var zeroPool: db.Pool
+        return zeroPool
+    if ierr := initDB(pool); ierr isnt empty
+        t.Fatalf("initDB: %v", ierr)
+    return pool

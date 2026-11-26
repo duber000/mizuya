@@ -1,0 +1,166 @@
+# mizuya — MCP over streamable HTTP (stateless) behind a bearer token.
+#
+# `mizuya mcp` speaks stdio by default: the MCP client owns the process and
+# its pipes, so there is nothing to daemonize. `--http <addr>` instead serves
+# the streamable HTTP transport, so the server can run as a daemon (e.g. a
+# user systemd unit) that several clients reach by URL.
+#
+# Transport: the go-sdk StreamableHTTPHandler in stateless mode (protocol
+# 2026-07-28). Every POST is a self-contained request with an ephemeral
+# session — nothing to lose on restart, nothing for a client to re-establish.
+# mizuya's tools never call back into the client (no Elicit/Progress), so
+# stateless gives up nothing.
+#
+# Auth: MCP's HTTP transport carries no authentication of its own, so the
+# whole handler sits behind a bearer-token gate. The token comes from
+# MIZUYA_MCP_TOKEN or a 0600 file (MIZUYA_MCP_TOKEN_FILE / --token-file —
+# what systemd LoadCredential provides). HTTP mode fails closed: a missing
+# or short token, or a token file readable by group/other, refuses to start,
+# and a non-loopback bind needs --allow-remote because the token travels in
+# plaintext without TLS. Tokens are compared in constant time on their
+# SHA-256 digests and are never logged.
+
+petiole main
+
+import "crypto/sha256"
+import "net"
+import "net/http"
+import "os"
+import "stdlib/env"
+import "stdlib/files"
+import "stdlib/http" as httppkg
+import "stdlib/log"
+import "stdlib/mcp"
+import "stdlib/string" as strpkg
+import "time"
+
+import "github.com/modelcontextprotocol/go-sdk/mcp" as gomcp
+
+# minTokenLen is the shortest bearer token accepted: a hex-encoded 128-bit
+# secret. `openssl rand -hex 32` gives 64 chars.
+const minTokenLen = 32
+
+# tokenMatches compares two bearer tokens in constant time. Both sides are
+# hashed first, so the compare runs over fixed-length digests: a length
+# mismatch has already fed different bytes into the hash. Every byte
+# difference is accumulated before the decision — no early exit.
+func tokenMatches(presented: string, expected: string) bool
+    a := sha256.Sum256(presented as list of byte)
+    b := sha256.Sum256(expected as list of byte)
+    diff := 0 as byte
+    for i from 0 to len(a)
+        d := a[i] - b[i]
+        diff = diff | d
+    return diff equals 0 as byte
+
+# bearerToken extracts the token from an Authorization header. RFC 6750 makes
+# the scheme case-insensitive; anything other than "Bearer <token>" yields "".
+func bearerToken(header: string) string
+    parts := strpkg.Fields(header)
+    if len(parts) isnt 2 or not strpkg.EqualFold(parts[0], "Bearer")
+        return ""
+    return parts[1]
+
+# bearerGate is an http.Handler that admits a request only when it carries
+# the bearer token. Every method is checked: the SDK's own 405s for the
+# GET/DELETE requests stateless mode rejects must not leak past the gate.
+type bearerGate
+    token: string
+    next: http.Handler
+
+func ServeHTTP on g: reference bearerGate(w: http.ResponseWriter, r: reference http.Request)
+    presented := bearerToken(r.Header.Get("Authorization"))
+    if (presented is empty) or not tokenMatches(presented, g.token)
+        w.Header().Set("WWW-Authenticate", 'Bearer realm="mizuya"')
+        log.Warn(
+            "mizuya: mcp: rejected request without a valid bearer token",
+            "remote",
+            r.RemoteAddr,
+            "method",
+            r.Method,
+        )
+        http.Error(w, "unauthorized: bearer token required", http.StatusUnauthorized)
+        return
+    g.next.ServeHTTP(w, r)
+
+# bearerAuth wraps next so only requests bearing token reach it.
+func bearerAuth(next: http.Handler, token: string) http.Handler
+    gate := bearerGate{token: token, next: next}
+    return reference of gate
+
+# isLoopbackAddr reports whether an http listen address binds loopback only.
+# An empty host (":8765") binds every interface and is therefore NOT loopback.
+func isLoopbackAddr(addr: string) bool
+    host, _port, err := net.SplitHostPort(addr)
+    if err isnt empty
+        return false
+    if host equals "localhost"
+        return true
+    ip := net.ParseIP(host)
+    if ip is empty
+        return false
+    return ip.IsLoopback()
+
+# validateToken enforces the floor on token entropy.
+func validateToken(token: string) (string, error)
+    if len(token) < minTokenLen
+        return "", error "bearer token is {len(token)} chars; need at least {minTokenLen} (generate one with: openssl rand -hex 32)"
+    return token, empty
+
+# readTokenFile loads the bearer token from a file only its owner may read.
+# Fail-closed on loose permissions, the way ssh treats private keys.
+func readTokenFile(path: string) (string, error)
+    info, serr := os.Stat(path)
+    if serr isnt empty
+        return "", error "cannot stat token file {path}: {serr:w}"
+    perm := info.Mode().Perm() as uint32 & 63
+    if perm isnt 0
+        return "", error "token file {path} is accessible by group/other ({info.Mode().Perm()}); chmod 600 it"
+    raw, rerr := files.ReadString(path) onerr return "", error "cannot read token file {path}: {error:w}"
+    return validateToken(strpkg.TrimSpace(raw))
+
+# resolveMCPToken finds the bearer token for HTTP mode: --token-file wins,
+# then MIZUYA_MCP_TOKEN_FILE, then MIZUYA_MCP_TOKEN. None set is an error —
+# HTTP mode never runs unauthenticated.
+func resolveMCPToken(tokenFile: string) (string, error)
+    path := tokenFile
+    if path is empty
+        path = env.GetOr("MIZUYA_MCP_TOKEN_FILE", "")
+    if path isnt empty
+        return readTokenFile(path)
+    token := strpkg.TrimSpace(env.GetOr("MIZUYA_MCP_TOKEN", ""))
+    if token is empty
+        return "", error "--http requires a bearer token: set MIZUYA_MCP_TOKEN, or point --token-file / MIZUYA_MCP_TOKEN_FILE at a 0600 file (systemd: LoadCredential)"
+    return validateToken(token)
+
+# newMCPHTTPHandler builds the stateless streamable-HTTP handler for server
+# and puts it behind the bearer gate. Tests drive it through httptest.
+func newMCPHTTPHandler(server: reference mcp.Server, token: string) http.Handler
+    sdkOpts := gomcp.StreamableHTTPOptions{
+        Stateless: true,
+        PropagateRequestCancellation: true,
+    }
+    # A client that disconnects mid-call cancels the handler, so an
+    # abandoned slow embed does not keep running.
+
+    getServer := func(_req: reference http.Request) reference gomcp.Server
+        return server
+    return bearerAuth(gomcp.NewStreamableHTTPHandler(getServer, reference of sdkOpts), token)
+
+# startMCPHTTP serves server over streamable HTTP (stateless) behind the
+# bearer gate. WriteTimeout is raised from the stdlib default (10s): a cold
+# embedding-model load can outlive it, and a cut response would tell the
+# client a write failed that actually committed. ReadHeaderTimeout — the
+# Slowloris mitigation — keeps its default.
+func startMCPHTTP(server: reference mcp.Server, addr: string, token: string) error
+    srvOpts := httppkg.DefaultServerOpts() |> httppkg.WriteTimeout(5 * time.Minute)
+    log.Info(
+        "mizuya MCP listening",
+        "addr",
+        addr,
+        "transport",
+        "streamable-http (stateless)",
+        "auth",
+        "bearer",
+    )
+    return httppkg.ServeWith(addr, newMCPHTTPHandler(server, token), srvOpts)

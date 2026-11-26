@@ -140,7 +140,7 @@ func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of Con
             src := o.Source
             if src is empty
                 src = "conversation"
-            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {o.SupersededBy})")}" else ""
+            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {optStr(o.SupersededBy)})")}" else ""
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
     printAttachments(atts)
 
@@ -179,7 +179,7 @@ func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow
             src := o.Source
             if src is empty
                 src = "conversation"
-            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {o.SupersededBy})")}" else ""
+            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {optStr(o.SupersededBy)})")}" else ""
             print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
     printAttachments(atts)
 
@@ -224,6 +224,13 @@ func suggestionsFor(pool: db.Pool, id: string) string
         return ""
     return didYouMean(ids)
 
+# optStr renders an optional reference string as "" when nil — for
+# display and interpolation, where a pointer printout would be noise.
+func optStr(s: optional reference string) string
+    if s is empty
+        return ""
+    return dereference s
+
 # parseTags splits a comma-separated tag string into a trimmed slice,
 # dropping empty entries.
 func parseTags(raw: string) list of string
@@ -232,3 +239,14 @@ func parseTags(raw: string) list of string
     return strpkg.Split(raw, ",")
         |> slice.Map(s => strpkg.TrimSpace(s))
         |> slice.Filter(s => s isnt empty)
+
+# printObservationRows renders search-observations hits: one line per
+# observation with its id (the handle to pass as supersedes on a
+# correction), newest first.
+func printObservationRows(obs: list of ObsRow)
+    if obs is empty
+        print(color.Dim("no matching observations"))
+        return
+    for o in obs
+        mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {optStr(o.SupersededBy)})")}" else ""
+        print("  {color.Cyan(o.Id)} {color.Dim("[{o.At} {o.Source}]")} {o.Text}{mark}")

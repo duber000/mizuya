@@ -29,12 +29,12 @@ func entityFilterClauses(f: SearchFilter) (list of string, list of any, error)
     if f.Since isnt empty
         if not validDate(f.Since)
             return empty list of string, empty list of any, error "since must be YYYY-MM-DD, got {f.Since}"
-        clauses = append(clauses, "e.updated_at >= datetime(?)")
+        clauses = append(clauses, "e.updated_at >= strftime('%Y-%m-%dT%H:%M:%SZ', ?)")
         args = append(args, f.Since)
     if f.Until isnt empty
         if not validDate(f.Until)
             return empty list of string, empty list of any, error "until must be YYYY-MM-DD, got {f.Until}"
-        clauses = append(clauses, "e.updated_at < datetime(?, '+1 day')")
+        clauses = append(clauses, "e.updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+1 day')")
         args = append(args, f.Until)
     return clauses, args, empty
 
@@ -49,7 +49,7 @@ func ftsSearch(pool: db.Pool, query: string, limit: int, filter: SearchFilter = 
     if ferr isnt empty
         return empty list of SearchHit, ferr
     parts := list of string{
-        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ?",
+        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? AND e.archived_at IS NULL",
     }
     args := list of any{query}
     if clauses isnt empty
@@ -75,7 +75,7 @@ func regexSearch(pool: db.Pool, pattern: string, limit: int, filter: SearchFilte
     if ferr isnt empty
         return empty list of SearchHit, ferr
     parts := list of string{
-        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities e WHERE (e.id REGEXP ? OR e.name REGEXP ? OR e.data REGEXP ?)",
+        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities e WHERE (e.id REGEXP ? OR e.name REGEXP ? OR e.data REGEXP ?) AND e.archived_at IS NULL",
     }
     args := list of any{pattern, pattern, pattern}
     if clauses isnt empty
@@ -115,22 +115,30 @@ func upsertEmbedding(pool: db.Pool, id: string, vec: list of float64) error
 # vector under cosine distance. Uses vec1's KNN function-call syntax —
 # `FROM embeddings_vec(BLOB, '{k:N}')` exposes a hidden `distance` column
 # computed inside the extension. Results can be narrowed by a SearchFilter.
+# The KNN scan is brute-force (flat index), so we request every stored
+# vector and apply the archived/filter WHERE outside vec1, then LIMIT —
+# filtering after a k-nearest fetch could silently return fewer than k
+# hits while live matches existed beyond the cut.
 func similar(pool: db.Pool, vec: list of float64, k: int, filter: SearchFilter = SearchFilter{}) (list of SimilarHit, error)
     if k <= 0
         k = 5
     clauses, filterArgs, ferr := entityFilterClauses(filter)
     if ferr isnt empty
         return empty list of SimilarHit, ferr
+    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
+    if count equals 0
+        return empty list of SimilarHit, empty
     blob := serializeVec(vec)
-    knnArg := "\{k: {k}\}"
+    knnArg := "\{k: {count}\}"
     parts := list of string{
-        "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id",
+        "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id WHERE e.archived_at IS NULL",
     }
     args := list of any{blob, knnArg}
     if clauses isnt empty
         parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
         args = append(args, many filterArgs)
-    parts = append(parts, "ORDER BY v.distance ASC")
+    parts = append(parts, "ORDER BY v.distance ASC LIMIT ?")
+    args = append(args, k)
     q := strpkg.Join(parts, " ")
     result := db.Query(pool, q, many args) |> db.ScanAll of SimilarHit
     return result, empty
@@ -143,7 +151,7 @@ func similar(pool: db.Pool, vec: list of float64, k: int, filter: SearchFilter =
 # the stats extension.
 func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int, filter: SearchFilter = SearchFilter{}) (list of SimilarHit, error)
     if pct <= 0 or pct > 100
-        return empty, error "threshold must be in (0, 100], got {pct}"
+        return empty, error "threshold must be in [1, 100], got {pct}"
     count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
     if count equals 0
         return empty list of SimilarHit, empty
@@ -153,7 +161,7 @@ func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int, filter: 
     blob := serializeVec(vec)
     knnArg := "\{k: {count}\}"
     parts := list of string{
-        "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists)",
+        "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists) AND e.archived_at IS NULL",
     }
     args := list of any{blob, knnArg, pct}
     if clauses isnt empty

@@ -115,33 +115,33 @@ func TestObservationSupersedes(t: reference testing.T)
     _, uerr7 := upsertEntity(pool, "other", "concept", "Other", "s", empty list of string)
     test.AssertNoError(t, uerr7)
 
-    _, _, aerr := addObservation(pool, "duck", "first belief", "conversation")
+    _, aerr := addObservation(pool, "duck", "first belief", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 1)
     first := obs[0]
-    test.AssertEqual(t, first.Supersedes, "")
+    test.AssertEqual(t, obsRefStr(first.Supersedes), "")
 
     # Correcting observation links to the one it corrects.
-    _, _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
+    _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
     test.AssertNoError(t, aerr)
     obs, err = listObservations(pool, "duck")
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 2)
-    test.AssertEqual(t, obs[0].Supersedes, first.Id)
+    test.AssertEqual(t, obsRefStr(obs[0].Supersedes), first.Id)
     test.AssertEqual(t, obs[1].Id, first.Id)
 
     # Bogus supersedes id: fail-closed error.
-    _, _, err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
+    _, err = addObservation(pool, "duck", "x", "conversation", "no-such-uuid")
     test.AssertError(t, err)
 
     # Observation on a different entity: also rejected.
-    _, _, aerr = addObservation(pool, "other", "o", "conversation")
+    _, aerr = addObservation(pool, "other", "o", "conversation")
     test.AssertNoError(t, aerr)
     otherObs, err := listObservations(pool, "other")
     test.AssertNoError(t, err)
-    _, _, err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
+    _, err = addObservation(pool, "duck", "x", "conversation", otherObs[0].Id)
     test.AssertError(t, err)
 
 func TestListObservationsRange(t: reference testing.T)
@@ -150,9 +150,9 @@ func TestListObservationsRange(t: reference testing.T)
 
     _, uerr8 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
     test.AssertNoError(t, uerr8)
-    _, _, aerr := addObservation(pool, "duck", "one", "conversation")
+    _, aerr := addObservation(pool, "duck", "one", "conversation")
     test.AssertNoError(t, aerr)
-    _, _, aerr = addObservation(pool, "duck", "two", "conversation")
+    _, aerr = addObservation(pool, "duck", "two", "conversation")
     test.AssertNoError(t, aerr)
 
     today, terr := todayDate(pool)
@@ -255,7 +255,7 @@ func TestListDrift(t: reference testing.T)
 
     _, uerr12 := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
     test.AssertNoError(t, uerr12)
-    _, _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
+    _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
@@ -269,7 +269,7 @@ func TestListDrift(t: reference testing.T)
     # Simulate a later entity change (deterministic future timestamp).
     db.Exec(
         pool,
-        "INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', '{}', datetime('now', '+1 second'))",
+        "INSERT INTO entity_history (entity_id, type, name, data, changed_at) VALUES ('duck', 'concept', 'Donald Duck', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 second'))",
     ) onerr discard
 
     # Now the observation is drifted.
@@ -281,7 +281,7 @@ func TestListDrift(t: reference testing.T)
     # A superseding observation makes the old one a deliberate correction:
     # excluded by default (the new observation is itself drifted by the
     # simulated change), included with includeSuperseded=true.
-    _, _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
+    _, aerr = addObservation(pool, "duck", "corrected belief", "conversation", first.Id)
     test.AssertNoError(t, aerr)
     rows, err = listDrift(pool, 50, false)
     test.AssertNoError(t, err)
@@ -318,11 +318,11 @@ func TestObservationOrderingPinned(t: reference testing.T)
 
     _, uerr13 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
     test.AssertNoError(t, uerr13)
-    _, _, aerr := addObservation(pool, "duck", "first", "conversation")
+    _, aerr := addObservation(pool, "duck", "first", "conversation")
     test.AssertNoError(t, aerr)
-    _, _, aerr = addObservation(pool, "duck", "second", "conversation")
+    _, aerr = addObservation(pool, "duck", "second", "conversation")
     test.AssertNoError(t, aerr)
-    _, _, aerr = addObservation(pool, "duck", "third", "conversation")
+    _, aerr = addObservation(pool, "duck", "third", "conversation")
     test.AssertNoError(t, aerr)
 
     obs, err := listObservations(pool, "duck")
@@ -344,24 +344,24 @@ func TestSupersededByFlag(t: reference testing.T)
 
     _, uerr14 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
     test.AssertNoError(t, uerr14)
-    _, _, aerr := addObservation(pool, "duck", "stale fact", "conversation")
+    _, aerr := addObservation(pool, "duck", "stale fact", "conversation")
     test.AssertNoError(t, aerr)
     obs, err := listObservations(pool, "duck")
     test.AssertNoError(t, err)
     stale := obs[0]
-    test.AssertEqual(t, stale.SupersededBy, "")
+    test.AssertEqual(t, obsRefStr(stale.SupersededBy), "")
 
-    _, _, aerr = addObservation(pool, "duck", "corrected fact", "conversation", stale.Id)
+    _, aerr = addObservation(pool, "duck", "corrected fact", "conversation", stale.Id)
     test.AssertNoError(t, aerr)
 
     obs, err = listObservations(pool, "duck")
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(obs), 2)
     # obs[0] = corrected (newest), obs[1] = stale, flagged.
-    test.AssertEqual(t, obs[0].Supersedes, stale.Id)
-    test.AssertEqual(t, obs[0].SupersededBy, "")
+    test.AssertEqual(t, obsRefStr(obs[0].Supersedes), stale.Id)
+    test.AssertEqual(t, obsRefStr(obs[0].SupersededBy), "")
     test.AssertEqual(t, obs[1].Id, stale.Id)
-    test.AssertEqual(t, obs[1].SupersededBy, obs[0].Id)
+    test.AssertEqual(t, obsRefStr(obs[1].SupersededBy), obs[0].Id)
 
     # hideSuperseded drops the stale one.
     obs, err = listObservationsRange(pool, "duck", "", "", true)
@@ -502,7 +502,7 @@ func TestOpenPoolAtSelfInitializes(t: reference testing.T)
 
     _, uerr18 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
     test.AssertNoError(t, uerr18)
-    _, _, aerr := addObservation(pool, "duck", "hello", "conversation")
+    _, aerr := addObservation(pool, "duck", "hello", "conversation")
     test.AssertNoError(t, aerr)
 
     rows, lerr := listEntities(pool, "", 10)
@@ -527,3 +527,190 @@ func TestOpenPoolAtSelfInitializes(t: reference testing.T)
     rows, lerr = listEntities(pool2, "", 10)
     test.AssertNoError(t, lerr)
     test.AssertEqual(t, len(rows), 1)
+
+# --- archive (soft delete) ---
+
+# TestArchiveExcludesFromReadPaths: an archived entity disappears from
+# list/search/drift but keeps its row, and unarchive restores it.
+func TestArchiveExcludesFromReadPaths(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "pond creature", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, aerr := addObservation(pool, "duck", "likes bread", "conversation")
+    test.AssertNoError(t, aerr)
+
+    archived, aerr2 := isArchived(pool, "duck")
+    test.AssertNoError(t, aerr2)
+    test.AssertFalse(t, archived)
+
+    test.AssertNoError(t, setEntityArchived(pool, "duck", true))
+
+    archived, aerr3 := isArchived(pool, "duck")
+    test.AssertNoError(t, aerr3)
+    test.AssertTrue(t, archived)
+
+    rows, lerr := listEntities(pool, "", 10)
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(rows), 0)
+
+    hits, herr := ftsSearch(pool, "pond", 10, SearchFilter{})
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hits), 0)
+
+    # get_context's underlying reads are unaffected — the handler refuses
+    # archived entities; the data itself is kept.
+    e, gerr := getEntity(pool, "duck")
+    test.AssertNoError(t, gerr)
+    test.AssertEqual(t, e.Id, "duck")
+    obs, oerr := listObservations(pool, "duck")
+    test.AssertNoError(t, oerr)
+    test.AssertEqual(t, len(obs), 1)
+
+    # Writes to an archived entity are still allowed.
+    _, aerr4 := addObservation(pool, "duck", "still writable", "conversation")
+    test.AssertNoError(t, aerr4)
+
+    # Unarchive restores every read path.
+    test.AssertNoError(t, setEntityArchived(pool, "duck", false))
+    rows, lerr = listEntities(pool, "", 10)
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(rows), 1)
+    hits, herr = ftsSearch(pool, "pond", 10, SearchFilter{})
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hits), 1)
+
+# TestArchiveUnknownId: archiving a missing entity is an error, and
+# isArchived reports false rather than failing.
+func TestArchiveUnknownId(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    aerr := setEntityArchived(pool, "no-such-entity", true)
+    test.AssertError(t, aerr)
+    archived, ierr := isArchived(pool, "no-such-entity")
+    test.AssertNoError(t, ierr)
+    test.AssertFalse(t, archived)
+
+# --- searchObservations ---
+
+# TestSearchObservations: literal substring, newest first, entity filter,
+# and LIKE-wildcard escaping (a query of "100%" must not match everything).
+func TestSearchObservations(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, uerr2 := upsertEntity(pool, "goose", "concept", "Grey Goose", "s", empty list of string)
+    test.AssertNoError(t, uerr2)
+    _, aerr := addObservation(pool, "duck", "migration to 100% cloud done", "conversation")
+    test.AssertNoError(t, aerr)
+    _, aerr2 := addObservation(pool, "goose", "migration done", "conversation")
+    test.AssertNoError(t, aerr2)
+    _, aerr3 := addObservation(pool, "duck", "100 percent certain", "conversation")
+    test.AssertNoError(t, aerr3)
+
+    # Substring match across entities, newest first.
+    rows, err := searchObservations(pool, "migration", "", 10)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 2)
+
+    # Entity filter narrows to one entity.
+    rows, err = searchObservations(pool, "migration", "duck", 10)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 1)
+    test.AssertContains(t, rows[0].Text, "100%")
+
+    # A bare % in the query is a literal, not a wildcard.
+    rows, err = searchObservations(pool, "100%", "", 10)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 1)
+    test.AssertContains(t, rows[0].Text, "100% cloud")
+
+    # A bare _ in the query is a literal, not a single-char wildcard.
+    rows, err = searchObservations(pool, "100_percent", "", 10)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 0)
+
+    # Limit is honored.
+    rows, err = searchObservations(pool, "migration", "", 1)
+    test.AssertNoError(t, err)
+    test.AssertEqual(t, len(rows), 1)
+
+# --- timestamp format ---
+
+# TestObservationTimestampISO: fresh writes carry ISO 8601 UTC stamps
+# with millisecond precision and a Z suffix.
+func TestObservationTimestampISO(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    obsWrite, aerr := addObservation(pool, "duck", "hello", "conversation")
+    test.AssertNoError(t, aerr)
+    test.AssertTrue(
+        t,
+        isoStampOK(obsWrite.At, true),
+        "observation at must be ISO 8601 Z, got {obsWrite.At}",
+    )
+
+    obs, lerr := listObservations(pool, "duck")
+    test.AssertNoError(t, lerr)
+    test.AssertEqual(t, len(obs), 1)
+    test.AssertTrue(t, isoStampOK(obs[0].At, true), "listed at must be ISO 8601 Z, got {obs[0].At}")
+
+    e, gerr := getEntity(pool, "duck")
+    test.AssertNoError(t, gerr)
+    test.AssertTrue(
+        t,
+        isoStampOK(e.UpdatedAt, false),
+        "entity updated_at must be ISO 8601 Z, got {e.UpdatedAt}",
+    )
+
+# TestAddObservationReturnsWrite: the ObsWrite carries the new
+# observation's id (for supersedes), entity, and source.
+func TestAddObservationReturnsWrite(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    first, aerr := addObservation(pool, "duck", "one", "Conversation")
+    test.AssertNoError(t, aerr)
+    test.AssertTrue(t, first.Id isnt empty)
+    test.AssertEqual(t, first.EntityId, "duck")
+    test.AssertEqual(t, first.Source, "conversation")
+    test.AssertTrue(t, obsRefStr(first.Supersedes) is empty)
+
+    second, aerr2 := addObservation(pool, "duck", "two", "conversation", first.Id)
+    test.AssertNoError(t, aerr2)
+    test.AssertEqual(t, obsRefStr(second.Supersedes), first.Id)
+
+# --- hide_superseded ---
+
+# TestHideSupersededRange: hideSuperseded drops superseded observations;
+# listObservations (the contract path) keeps them flagged.
+func TestHideSupersededRange(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, aerr := addObservation(pool, "duck", "stale belief", "conversation")
+    test.AssertNoError(t, aerr)
+    obs, lerr := listObservations(pool, "duck")
+    test.AssertNoError(t, lerr)
+    _, aerr2 := addObservation(pool, "duck", "corrected belief", "conversation", obs[0].Id)
+    test.AssertNoError(t, aerr2)
+
+    hidden, herr := listObservationsRange(pool, "duck", "", "", true)
+    test.AssertNoError(t, herr)
+    test.AssertEqual(t, len(hidden), 1)
+    test.AssertEqual(t, hidden[0].Text, "corrected belief")
+
+    shown, serr := listObservationsRange(pool, "duck", "", "", false)
+    test.AssertNoError(t, serr)
+    test.AssertEqual(t, len(shown), 2)

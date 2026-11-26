@@ -60,7 +60,7 @@ Never silently overwrite what an entity was. `upsertEntity` appends the post-upd
 ### 4. Consumer-facing contracts (since 2518f4d)
 These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki` / `store_test.kuki` — do not change them without a contract note:
 - `context`/`get_context` observations are ALWAYS newest-first (`at DESC, id DESC`); consumers take the first N as "most recent".
-- Every `ObsRow` carries `supersedes` and `superseded_by`; superseded observations stay visible (flagged) unless `hide_superseded` is passed.
+- Every `ObsRow` carries `supersedes` and `superseded_by` as `null` when absent; superseded observations are hidden by default (`hide_superseded` defaults true; CLI `--show-superseded`, MCP `hide_superseded: false` include them, flagged).
 - `prune-history` is the ONLY deliberate deletion from `entity_history` (retention policy in `docs/STORAGE.md`); it always keeps the newest version per entity and fails closed with neither `--keep` nor `--before`.
 - Secret redaction must stay visible in every mode: observe `--json` `redacted` count and text-mode note, and a stderr `WARN` for *every* redacted field on any write (name, summary, tags, observation text/source, relation labels; detector names only — never log `SecretFinding.Raw`). Upsert echoes the redacted `Entity` it stored.
 
@@ -83,9 +83,10 @@ Generated `*.go` files are the only Go source `go mod tidy` can see. Run `kukich
 1. Keep `CHANGELOG.md` as the release record: move `## Unreleased` to the new semver version and date only when the release is ready.
 2. Verify the `Dockerfile` compiler pin matches the Kukicha version documented in the compiler-owned block above.
 3. Bump `Version` in `main.kuki` (CLI and MCP server) and the `skill` block's `version` literal just above it to the release semver.
-4. Run `kukicha check ./...`, `kukicha fmt --check --json .`, and `MIZUYA_EMBED_PROVIDER=hash kukicha test . -count=1`.
-5. Remove generated Go artifacts, commit the release, and create an annotated `vX.Y.Z` tag. The Docker workflow publishes tags matching `v*`.
-6. Remember that Kukicha names its executable after the build directory; the Docker stage builds in `/src` and moves `src` to `/mizuya`.
+4. Regenerate the packed skill with `kukicha pack .` and commit the updated `skills/` tree — `kukicha skills add duber000/mizuya` installs from that path, and it goes stale silently otherwise.
+5. Run `kukicha check ./...`, `kukicha fmt --check --json .`, and `MIZUYA_EMBED_PROVIDER=hash kukicha test . -count=1`.
+6. Remove generated Go artifacts, commit the release, and create an annotated `vX.Y.Z` tag. The Docker workflow publishes tags matching `v*`.
+7. Remember that Kukicha names its executable after the build directory; the Docker stage builds in `/src` and moves `src` to `/mizuya`.
 
 <!-- kukicha:start -->
 # Kukicha

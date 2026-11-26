@@ -2,14 +2,16 @@
 # All DDL statements and initDB. Uses FTS5 with content=entities so the
 # virtual table mirrors the base table row-for-row via triggers.
 #
-# Timestamp contract: *_at columns are stamped in UTC with no offset
-# suffix. entities/relations use second precision (datetime('now'));
-# observations.at and entity_history.changed_at use millisecond
-# precision (strftime %f) so same-second ordering is exact. The
-# fixed-width formats compare correctly against each other and against
-# plain datetime('now', ...) thresholds — but add 'localtime' to
+# Timestamp contract: *_at columns are stamped in UTC ISO 8601 with an
+# explicit Z suffix. entities/relations use second precision
+# (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')); observations.at,
+# entity_history.changed_at, and media.at use millisecond precision
+# (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) so same-second ordering is
+# exact. The fixed-width formats compare correctly against each other
+# and against ISO strftime() thresholds — but add 'localtime' to
 # neither side: mixing it into only the threshold skews the window by
-# the local UTC offset (4h in EDT).
+# the local UTC offset (4h in EDT). initDB rewrites pre-ISO stamps
+# (space separator, no Z) in place; see migrateTimestamps.
 
 petiole main
 
@@ -23,9 +25,9 @@ import "stdlib/sqlite"
 # regeneration when the corpus hasn't changed — important for the
 # ollama/openai providers where every embed is a network round-trip.
 # Nullable so pre-hash rows just re-embed once on next touch.
-const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', content_hash TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', content_hash TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), archived_at TEXT)"
 
-const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (src, rel, dst))"
+const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), PRIMARY KEY (src, rel, dst))"
 
 # Observations are first-class rows — timestamped, sourced, and linkable
 # to the correction that supersedes them. The id default uses uuid(7) for
@@ -41,7 +43,7 @@ const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL RE
 # command, which fed an openwiki -p run). The column is kept so existing
 # databases with distilled=1 rows behave identically — `drift` skips them.
 # Nothing sets it anymore.
-const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')), distilled INTEGER NOT NULL DEFAULT 0, supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL)"
+const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), distilled INTEGER NOT NULL DEFAULT 0, supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL)"
 
 # entity_history is the append-only version log for entities. Every
 # upsert appends the post-update state; the entities row remains the
@@ -49,11 +51,11 @@ const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMAR
 # "what did we think before date X" is always answerable. The id
 # default uses uuid(7), same as observations.
 #
-# changed_at uses millisecond precision (strftime %f) so drift detection
+# changed_at uses millisecond precision so drift detection
 # can tell "entity changed after this observation" apart within the same
 # second; the fixed-width format still compares correctly against the
-# second-precision datetime('now') stamps on other tables.
-const entityHistorySQL = "CREATE TABLE IF NOT EXISTS entity_history (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')))"
+# second-precision stamps on other tables.
+const entityHistorySQL = "CREATE TABLE IF NOT EXISTS entity_history (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
 
 # Embeddings live in a vec1 virtual table. The 'flat' index does brute-force
 # scan inside vec1 (no training step) — fine for thousands of entities.
@@ -78,7 +80,7 @@ const embeddingsRebuildSQL = `INSERT INTO embeddings_vec(cmd, arg) VALUES('rebui
 # re-attaching the same file to the same entity a no-op.
 # Media vectors get their own vec1 vtab + raw side store, mirroring the
 # embeddings pair — the entity-embedding contract stays untouched.
-const mediaSQL = "CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, kind TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, caption TEXT NOT NULL DEFAULT '', scanned INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'agent', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')))"
+const mediaSQL = "CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, kind TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, caption TEXT NOT NULL DEFAULT '', scanned INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'agent', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
 
 const mediaUniqueSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_entity_sha ON media(entity_id, sha256)"
 
@@ -150,9 +152,12 @@ const migrateObsSupersedesSQL = "ALTER TABLE observations ADD COLUMN supersedes 
 # maintenance if entity churn ever makes this hot.
 const fuzzyIdsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS entity_ids_fuzzy USING spellfix1"
 
+# refreshFuzzyIds rebuilds the spellfix1 vtab from the non-archived
+# entities table. Cheap on small graphs; called from initDB and the
+# archive/unarchive paths so suggestions never name a hidden entity.
 const fuzzyIdsClearSQL = "DELETE FROM entity_ids_fuzzy"
 
-const fuzzyIdsPopulateSQL = "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities"
+const fuzzyIdsPopulateSQL = "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities WHERE archived_at IS NULL"
 
 # initDB creates all tables, the FTS5 virtual table, triggers, and indexes
 # inside a single transaction. Safe to call repeatedly.
@@ -185,14 +190,17 @@ func initDB(pool: db.Pool) error
         db.TxExec(tx, idxObsSupersedes) onerr return
         db.TxExec(tx, idxEntityHistoryEntity) onerr return
         db.TxExec(tx, fuzzyIdsSQL) onerr return
-        db.TxExec(tx, fuzzyIdsClearSQL) onerr return
-        db.TxExec(tx, fuzzyIdsPopulateSQL) onerr return
         return empty
     )
 
     migrateVec1Schema(pool) onerr return
     migrateObsDistilled(pool) onerr return
     migrateObsSupersedes(pool) onerr return
+    migrateArchivedAt(pool) onerr return
+    migrateTimestamps(pool) onerr return
+    # The spellfix vocabulary excludes archived entities; refresh it now
+    # that the archived_at column is guaranteed to exist.
+    refreshFuzzyIds(pool) onerr return
     return empty
 
 # migrateObsDistilled adds the observations.distilled column for databases
@@ -211,6 +219,35 @@ func migrateObsSupersedes(pool: db.Pool) error
     if exists
         return empty
     db.Exec(pool, migrateObsSupersedesSQL) onerr return
+    return empty
+
+# migrateArchivedAt adds the entities.archived_at column for databases
+# created before soft-delete/archive support. NULL = live; a stamp =
+# the archive time. Archived entities are hidden from search, similar,
+# list, drift, fuzzy suggestions, and context neighbor lists; the row
+# and its history are kept, and the flag can be cleared (unarchive).
+func migrateArchivedAt(pool: db.Pool) error
+    exists := sqlite.ColumnExists(pool, "entities", "archived_at") onerr return
+    if exists
+        return empty
+    db.Exec(pool, "ALTER TABLE entities ADD COLUMN archived_at TEXT") onerr return
+    return empty
+
+# migrateTimestamps rewrites pre-ISO-8601 stamps (space separator, no
+# Z suffix) in place: 'YYYY-MM-DD HH:MM:SS[.SSS]' becomes
+# 'YYYY-MM-DDTHH:MM:SS[.SSS]Z'. Idempotent — only rows matching the
+# old shape are touched, so it is safe to run on every initDB.
+func migrateTimestamps(pool: db.Pool) error
+    stmts := list of string{
+        "UPDATE entities SET created_at = substr(created_at, 1, 10) || 'T' || substr(created_at, 12) || 'Z' WHERE created_at LIKE '____-__-__ __:__:__'",
+        "UPDATE entities SET updated_at = substr(updated_at, 1, 10) || 'T' || substr(updated_at, 12) || 'Z' WHERE updated_at LIKE '____-__-__ __:__:__'",
+        "UPDATE relations SET created_at = substr(created_at, 1, 10) || 'T' || substr(created_at, 12) || 'Z' WHERE created_at LIKE '____-__-__ __:__:__'",
+        "UPDATE observations SET at = substr(at, 1, 10) || 'T' || substr(at, 12) || 'Z' WHERE at LIKE '____-__-__ __:__:__.%'",
+        "UPDATE entity_history SET changed_at = substr(changed_at, 1, 10) || 'T' || substr(changed_at, 12) || 'Z' WHERE changed_at LIKE '____-__-__ __:__:__.%'",
+        "UPDATE media SET at = substr(at, 1, 10) || 'T' || substr(at, 12) || 'Z' WHERE at LIKE '____-__-__ __:__:__.%'",
+    }
+    for s in stmts
+        db.Exec(pool, s) onerr return
     return empty
 
 # --- vec1 schema migration ---

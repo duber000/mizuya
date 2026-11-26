@@ -42,11 +42,13 @@ binary at ./mizuya
 | `init`    | Create the database file and schema (also implicit: every command self-initializes an uninitialized `--db` path via idempotent `initDB` on open) |
 | `upsert`  | Create/update an entity (`--id --type --name --summary --tags`); every change is appended to the entity's version history |
 | `observe` | Append an observation (`--id --text [--source] [--supersedes <obs-id>]`) and re-embed |
+| `search-observations` | Find observations by literal substring (`--text [--entity-id] [--limit]`) — the way to learn an observation's id for `--supersedes`; newest-first |
+| `archive` / `unarchive` | Soft-delete an entity (`--id`): hidden from `list`, `search`, `similar`, `drift`, fuzzy suggestions, and neighbor lists; `context` refuses it. The row, observations, relations, and history are kept — `unarchive` restores every read path |
 | `attach`  | Attach a media file (`--file [--id entity] [--kind image\|audio\|video] [--caption ...] [--name ...]`); omits `--id` to auto-create a content-addressed media-native entity; bytes are sha256-stored and never scanned — the caption passes the same fail-closed gate as observations |
 | `similar-media` | Similarity search over stored media attachments (`--file [--limit] [--kind image\|audio\|video]`); returns attachments (id, entity, kind, caption, distance) instead of entities |
 | `relate`  | Create a typed edge (`--src --rel --dst`)                               |
 | `search`  | Hybrid search: BM25 + vector RRF (`--query [--limit] [--regex] [--type] [--tag] [--since] [--until]`) |
-| `context` | Entity + neighbors + observations (always newest-first) + media attachments (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--hide-superseded]`) |
+| `context` | Entity + neighbors + observations (always newest-first; superseded ones hidden unless `--show-superseded`) + media attachments (`--id [--depth] [--history] [--since] [--until] [--as-of YYYY-MM-DD] [--show-superseded]`) |
 | `prune-history` | Compact the append-only version log: `--keep N` and/or `--before YYYY-MM-DD`, `--dry-run`; a version is pruned only when it breaks **both** bounds; newest version per entity always kept |
 | `similar` | Cosine similarity search (`--id` *or* `--text` *or* `--media <file>`, `[--limit]`, `[--threshold 1-100]`, same filters as `search`); `--media` needs a multimodal provider (`embeddinggemma-2:740m`) so the store and the media query share one vector space |
 | `list`    | List entities, optionally filtered by `--type`                          |
@@ -152,18 +154,26 @@ and ranking instead of trusting rank alone.
 ## MCP Server
 
 The `mcp` subcommand starts a Model Context Protocol stdio server with
-8 tools that AI agents can use to read and write the knowledge graph:
+10 tools that AI agents can use to read and write the knowledge graph:
 
 | MCP Tool         | Description                                               |
 |------------------|-----------------------------------------------------------|
-| `upsert_entity`  | Create or update an entity (id, type, name, summary, tags); appends to version history |
-| `add_observation`| Append an observation (entity_id, text, source, supersedes) |
-| `relate`         | Create a typed edge between two entities                  |
+| `upsert_entity`  | Create or update an entity (id, type, name, summary, tags); appends to version history. `tags` is a JSON array of strings — a tag containing a comma is rejected (the CLI takes a comma-separated list) |
+| `add_observation`| Append an observation (entity_id, text, source, supersedes). Returns a structured object with `observation_id` (pass it as `supersedes` to correct this observation later), `at`, `supersedes`, `redacted` |
+| `relate`         | Create a typed edge between two entities. Returns `{"status":"related","src","rel","dst"}` |
 | `search`         | Hybrid search (BM25 + vector RRF; optional type/tag/since/until) |
-| `get_context`    | Entity + neighbors + observations (newest-first; `superseded_by` flags stale ones) + media `attachments` (each marked unscanned); optional `history`, `since`, `until`, `hide_superseded` |
-| `similar`        | Vector similarity search by entity id or text; same filters as `search` |
+| `search_observations` | Literal substring search over observation texts (text, entity_id?, limit?); newest-first. The lookup that yields the `observation_id` to pass as `supersedes` |
+| `get_context`    | Entity + neighbors + observations (newest-first; superseded ones hidden by default — pass `hide_superseded: false` to include them, flagged via `superseded_by`) + media `attachments` (each marked unscanned); optional `history`, `since`, `until`. Refuses archived entities |
+| `similar`        | Vector similarity search by entity id or text; same filters as `search`. `threshold` (1–100) = closest N percentile of cosine distances after filters (100 = everything stored; overrides `limit`) |
 | `attach_media`   | Attach a media file (image, audio, or video) — `file` (host-local path) or `data_base64` — to an entity, or auto-create a media-native one; bytes are sha256-stored and never secret-scanned; caption passes the text gate |
 | `similar_media`  | Vector similarity search over stored media attachments (file or data_base64 query; `kind` filter; returns attachments, not entities) |
+| `archive_entity` | Soft-delete an entity (id, archived): hidden from every read path (`search`, `similar`, `list`, `drift`, suggestions, neighbors) and refused by `get_context`; restorable with `archived: false`. Row and history are kept; writes stay allowed |
+
+Notes for agents: `source` labels are normalized to lowercase on write
+(conventional vocabulary: `user`, `session`, `retro`, `conversation`).
+Write tools never report failure after a commit — an unreachable embedding
+provider yields a `"embedding": "deferred"` marker in the structured result,
+not an error.
 
 ### MCP resources
 
@@ -171,8 +181,8 @@ In addition to the tools, the server exposes two read-only resources:
 
 | Resource | Contents |
 |----------|----------|
-| `entity://list` | Snapshot of all entities (name, type, summary) as JSON — up to 500, newest-updated first |
-| `entity://{id}` | Full context for one entity — same payload as the `get_context` tool (entity, outgoing/incoming relations, observations, newest-first) |
+| `entity://list` | Snapshot of all entities (name, type, summary) as JSON — up to 500, newest-updated first (archived excluded) |
+| `entity://{id}` | Full context for one entity — same payload as the `get_context` tool (entity, outgoing/incoming relations, observations, newest-first, superseded hidden; refuses archived entities) |
 
 ### Claude Desktop configuration
 
@@ -382,6 +392,20 @@ Expected: the `search` query ranks `sqlite` first (hybrid RRF boosts it
 via both keyword and vector match); `context --history` shows the
 `uses → sqlite` edge, the observation you just recorded, and the entity's
 version log; `similar` puts `sqlite` first for a database query.
+
+## Agent skill
+
+The repo ships a [Kukicha skill](https://kukicha.org) (`skills/mizuya/`)
+that teaches an agent how to use mizuya as persistent memory — when to
+reach for it, the MCP tools, and the conventions (append-only observations,
+`supersedes` corrections, redaction, archive). Install it with:
+
+```
+kukicha skills add duber000/mizuya
+```
+
+The skill source of truth is the `skill Mizuya` block in `main.kuki`;
+`skills/` is regenerated with `kukicha pack .` on every release.
 
 ## Architecture
 

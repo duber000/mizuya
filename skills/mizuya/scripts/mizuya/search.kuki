@@ -1,0 +1,245 @@
+# mizuya — FTS5 search, embedding storage, and vector similarity.
+# Vectors are stored in a vec1 virtual table as float32 LE BLOBs (vec1
+# requires 4-byte-aligned vectors). vec1 ships native KNN + cosine
+# distance so we don't host a Kukicha-side UDF.
+
+petiole main
+
+import "math"
+import "stdlib/db"
+import "stdlib/sqlite"
+import "stdlib/string" as strpkg
+
+# --- Search filters ---
+
+# entityFilterClauses turns a SearchFilter into WHERE fragments (written
+# against the entities alias `e`) plus their bound args. Since/Until are
+# YYYY-MM-DD dates applied to e.updated_at, whole days inclusive; empty
+# bounds are unbounded. Invalid dates are an error, never a silent
+# match-nothing filter.
+func entityFilterClauses(f: SearchFilter) (list of string, list of any, error)
+    clauses := empty list of string
+    args := empty list of any
+    if f.Type isnt empty
+        clauses = append(clauses, "e.type = ?")
+        args = append(args, f.Type)
+    if f.Tag isnt empty
+        clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(e.data, '$.tags') t WHERE t.value = ?)")
+        args = append(args, f.Tag)
+    if f.Since isnt empty
+        if not validDate(f.Since)
+            return empty list of string, empty list of any, error "since must be YYYY-MM-DD, got {f.Since}"
+        clauses = append(clauses, "e.updated_at >= strftime('%Y-%m-%dT%H:%M:%SZ', ?)")
+        args = append(args, f.Since)
+    if f.Until isnt empty
+        if not validDate(f.Until)
+            return empty list of string, empty list of any, error "until must be YYYY-MM-DD, got {f.Until}"
+        clauses = append(clauses, "e.updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+1 day')")
+        args = append(args, f.Until)
+    return clauses, args, empty
+
+# --- FTS5 keyword search ---
+
+# ftsSearch runs a BM25-ranked full-text search over entities, optionally
+# narrowed by a SearchFilter (type, tag, since/until on updated_at).
+func ftsSearch(pool: db.Pool, query: string, limit: int, filter: SearchFilter = SearchFilter{}) (list of SearchHit, error)
+    if limit <= 0
+        limit = 10
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SearchHit, ferr
+    parts := list of string{
+        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities_fts fts JOIN entities e ON e.rowid = fts.rowid WHERE entities_fts MATCH ? AND e.archived_at IS NULL",
+    }
+    args := list of any{query}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY bm25(entities_fts, 10.0, 5.0, 2.0, 1.0) LIMIT ?")
+    args = append(args, limit)
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SearchHit
+    return result, empty
+
+# --- Regex search ---
+
+# regexSearch matches `pattern` against entity id, name, and the JSON
+# data column using the REGEXP operator from
+# github.com/ncruces/go-sqlite3/ext/regexp. Useful for code identifiers,
+# version strings, and other tokens that FTS5's porter stemmer mangles.
+# A row matches if any of the three columns matches the pattern.
+func regexSearch(pool: db.Pool, pattern: string, limit: int, filter: SearchFilter = SearchFilter{}) (list of SearchHit, error)
+    if limit <= 0
+        limit = 10
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SearchHit, ferr
+    parts := list of string{
+        "SELECT e.id AS id, e.type AS type, e.name AS name, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at FROM entities e WHERE (e.id REGEXP ? OR e.name REGEXP ? OR e.data REGEXP ?) AND e.archived_at IS NULL",
+    }
+    args := list of any{pattern, pattern, pattern}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY e.updated_at DESC LIMIT ?")
+    args = append(args, limit)
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SearchHit
+    return result, empty
+
+# --- Binary vector serialization ---
+
+# serializeVec packs a float64 slice into a vec1-compatible BLOB using sqlite.PackVector64.
+func serializeVec(v: list of float64) list of byte
+    return sqlite.PackVector64(v)
+
+# deserializeVec unpacks a little-endian float32 BLOB into a float64
+# slice using sqlite.UnpackVector64. Returns nil if the BLOB length is not a multiple of 4.
+func deserializeVec(b: list of byte) list of float64
+    vec := sqlite.UnpackVector64(b) onerr return empty
+    return vec
+
+# --- Embedding storage ---
+
+# upsertEmbedding stores (or replaces) the embedding for an entity. The
+# vec1 virtual table carries the vector plus entity/model/dim metadata.
+# vec1 has no UPSERT, so we delete + insert on the vtab side.
+func upsertEmbedding(pool: db.Pool, id: string, vec: list of float64) error
+    blob := serializeVec(vec)
+    db.Exec(pool, "DELETE FROM embeddings_vec WHERE entity_id = ?", id) onerr return
+    q := "INSERT INTO embeddings_vec(vector, entity_id, model, dim) VALUES (?, ?, ?, ?)"
+    db.Exec(pool, q, blob, id, embedModel(), len(vec)) onerr return
+    return empty
+
+# similar returns the k entities whose embeddings are closest to the query
+# vector under cosine distance. Uses vec1's KNN function-call syntax —
+# `FROM embeddings_vec(BLOB, '{k:N}')` exposes a hidden `distance` column
+# computed inside the extension. Results can be narrowed by a SearchFilter.
+# The KNN scan is brute-force (flat index), so we request every stored
+# vector and apply the archived/filter WHERE outside vec1, then LIMIT —
+# filtering after a k-nearest fetch could silently return fewer than k
+# hits while live matches existed beyond the cut.
+func similar(pool: db.Pool, vec: list of float64, k: int, filter: SearchFilter = SearchFilter{}) (list of SimilarHit, error)
+    if k <= 0
+        k = 5
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SimilarHit, ferr
+    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
+    if count equals 0
+        return empty list of SimilarHit, empty
+    blob := serializeVec(vec)
+    knnArg := "\{k: {count}\}"
+    parts := list of string{
+        "SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, v.distance AS distance FROM embeddings_vec(?, ?) v JOIN entities e ON e.id = v.entity_id WHERE e.archived_at IS NULL",
+    }
+    args := list of any{blob, knnArg}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY v.distance ASC LIMIT ?")
+    args = append(args, k)
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SimilarHit
+    return result, empty
+
+# similarByPercentile returns entities whose distance to `vec` falls
+# within the closest `pct` percentile of all distances. Useful when
+# the desired neighborhood size is unknown — `--threshold 10` returns
+# everything in the closest 10%, which can be one row or fifty
+# depending on the distribution. Uses the percentile() aggregate from
+# the stats extension.
+func similarByPercentile(pool: db.Pool, vec: list of float64, pct: int, filter: SearchFilter = SearchFilter{}) (list of SimilarHit, error)
+    if pct <= 0 or pct > 100
+        return empty, error "threshold must be in [1, 100], got {pct}"
+    count := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
+    if count equals 0
+        return empty list of SimilarHit, empty
+    clauses, filterArgs, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SimilarHit, ferr
+    blob := serializeVec(vec)
+    knnArg := "\{k: {count}\}"
+    parts := list of string{
+        "WITH dists AS (SELECT v.distance AS d, v.entity_id AS eid FROM embeddings_vec(?, ?) v) SELECT e.id AS id, e.name AS name, e.type AS type, COALESCE(e.data ->> '$.summary', '') AS summary, e.updated_at AS updated_at, d.d AS distance FROM dists d JOIN entities e ON e.id = d.eid WHERE d.d <= (SELECT percentile(d, ?) FROM dists) AND e.archived_at IS NULL",
+    }
+    args := list of any{blob, knnArg, pct}
+    if clauses isnt empty
+        parts = append(parts, "AND " + strpkg.Join(clauses, " AND "))
+        args = append(args, many filterArgs)
+    parts = append(parts, "ORDER BY d.d ASC")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of SimilarHit
+    return result, empty
+
+# searchMedia returns the k media attachments whose embeddings are
+# closest to the query vector under cosine distance (vec1 KNN). Kind
+# narrows to "image", "audio", or "video" (empty = any). Reads media_vec
+# directly — unlike entities, attachments carry no FTS side.
+func searchMedia(pool: db.Pool, vec: list of float64, k: int, kind: string) (list of MediaHit, error)
+    if k <= 0
+        k = 5
+    if kind isnt empty
+        kind = strpkg.ToLower(kind)
+        if kind isnt "image" and kind isnt "audio" and kind isnt "video"
+            return empty list of MediaHit, error "--kind must be image, audio, or video, got {kind}"
+    blob := serializeVec(vec)
+    knnArg := "\{k: {k}\}"
+    parts := list of string{
+        "SELECT m.id AS id, m.entity_id AS entity_id, m.kind AS kind, m.caption AS caption, m.path AS path, m.at AS at, v.distance AS distance FROM media_vec(?, ?) v JOIN media m ON m.id = v.media_id",
+    }
+    args := list of any{blob, knnArg}
+    if kind isnt empty
+        parts = append(parts, "WHERE m.kind = ?")
+        args = append(args, kind)
+    parts = append(parts, "ORDER BY v.distance ASC")
+    q := strpkg.Join(parts, " ")
+    result := db.Query(pool, q, many args) |> db.ScanAll of MediaHit
+    return result, empty
+
+# getEmbedding fetches the stored embedding for an entity (for the
+# "similar --id ..." path where we use an entity's own vector as the
+# query). The current vec1 build returns the original vector bytes through
+# metadata-constrained scans.
+func getEmbedding(pool: db.Pool, id: string) (list of float64, error)
+    result := db.Query(pool, "SELECT vector AS vec FROM embeddings_vec WHERE entity_id = ?", id)
+        |> db.ScanOne of vecRow
+    vec := deserializeVec(result.Vec)
+    if vec equals empty
+        return empty, error "invalid embedding blob for entity {id}"
+    return vec, empty
+
+# --- Hash embedding fallback ---
+
+# hashEmbed maps text to a deterministic L2-normalized vector of the given
+# dimensionality. Tokens are lowercased and split on whitespace; each token
+# bumps v[djb2(token) % dim]. Not semantic — a deterministic offline fallback
+# for when no provider is configured (fast database queries still cluster
+# near the sqlite entity, Go tooling near kukicha).
+func hashEmbed(text: string, dim: int) list of float64
+    v := make(list of float64, dim)
+    lowered := strpkg.ToLower(text)
+    tokens := strpkg.Fields(lowered)
+    for _, tok in tokens
+        h := djb2Hash(tok)
+        idx := (h % dim as uint32) as int
+        v[idx] = v[idx] + 1.0
+
+    # L2 normalize so cosine similarity behaves.
+    sum := 0.0
+    for i from 0 to len(v)
+        sum = sum + v[i] * v[i]
+    if sum equals 0.0
+        return v
+    norm := math.Sqrt(sum)
+    for i from 0 to len(v)
+        v[i] = v[i] / norm
+    return v
+
+# djb2Hash is a simple DJB2 hash (h*33 + c). We don't need cryptographic
+# strength — just stable, well-distributed bucket indices per token.
+func djb2Hash(s: string) uint32
+    h := 5381 as uint32
+    for i from 0 to len(s)
+        h = h * 33 + s[i] as uint32
+    return h

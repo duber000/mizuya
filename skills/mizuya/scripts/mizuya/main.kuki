@@ -1,0 +1,1310 @@
+# mizuya — SQLite-backed knowledge graph with FTS5 + cosine similarity.
+#
+#   * stdlib/sqlite + stdlib/db for schema, CRUD, and JSON columns
+#   * native SQLite FTS5 (BM25 ranking, content= virtual tables, triggers)
+#   * the vec1 SQLite extension for native cosine-distance KNN vector search
+#   * a deterministic hash embedding fallback so `similar` works offline, plus
+#     real providers (Ollama, OpenAI-compatible, Voyage, Cohere) via
+#     MIZUYA_EMBED_PROVIDER
+#   * `mcp --http <addr>`: the same MCP tools over stateless streamable HTTP
+#     behind a bearer token (MIZUYA_MCP_TOKEN, or a 0600 MIZUYA_MCP_TOKEN_FILE),
+#     for running the server as a daemon
+#
+# Usage:
+#   kukicha run . -- init
+#   kukicha run . -- upsert --id kukicha --type project --name "Kukicha Language" --summary "Go superset with pipes and onerr" --tags lang,compiler
+#   kukicha run . -- upsert --id sqlite  --type tool    --name "SQLite"            --summary "Embedded SQL database" --tags db,embedded
+#   kukicha run . -- relate --src kukicha --rel uses --dst sqlite
+#   kukicha run . -- observe --id kukicha --text "Added pipe operator support"
+#   kukicha run . -- search --query "embedded database"
+#   kukicha run . -- context --id kukicha
+#   kukicha run . -- similar --text "fast database"
+
+petiole main
+
+skill Mizuya
+    description: "Persistent memory for AI agents: a SQLite-backed knowledge graph (FTS5 + cosine-vector search) for entities, typed relations, and append-only observations. Use it to remember projects, tools, people, concepts and their connections across sessions. Access via MCP (mizuya mcp) with 10 tools: upsert_entity, add_observation (returns observation_id; pass supersedes to correct), relate, search, search_observations, get_context, similar, attach_media, similar_media, archive_entity — or the CLI (mizuya <subcommand>). Conventions: observations are append-only — correct with supersedes; superseded observations are hidden by default (hide_superseded: false to include). Free text passes a fail-closed secret gate (redacted in place; echoes are post-redaction). Deletion is soft (archive_entity): archived entities are invisible to reads and get_context refuses them. Tags over MCP are a JSON array of strings; the CLI takes comma-separated tags. source labels are normalized to lowercase. Timestamps are ISO 8601 UTC."
+    version: "0.3.1"
+
+import "os"
+import "path/filepath"
+import "stdlib/cli"
+import "stdlib/color"
+import "stdlib/db"
+import "stdlib/errors" as errs
+import "stdlib/files"
+import "stdlib/input"
+import "stdlib/log"
+import "stdlib/parse"
+import "stdlib/regex"
+import "stdlib/sqlite"
+import "stdlib/string" as strpkg
+import "stdlib/term"
+
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+# Version is what the CLI and the MCP server report. The `skill` block's
+# `version` above is declarative and must be kept in sync by hand — the
+# 0.3.0 release shipped reporting 0.2.0 when the literals drifted.
+const Version = "0.3.1"
+
+# validEntityTypes is surfaced in CLI flag help and MCP tool schemas — the
+# wire values (lowercase), since those are what --type accepts and what is
+# stored. Built from AllEntityType() so it stays in sync with the enum.
+func validEntityTypes() string
+    types := empty list of string
+    for t in AllEntityType()
+        types = append(types, strpkg.ToLower(t.String()))
+    return strpkg.Join(types, ", ")
+
+# parseTypeFilter reads and validates the --type flag against the entity
+# type enum. Empty means "no filter"; anything else must be a known type
+# (lowercased first, so "Tool" and "tool" are equivalent). Invalid values
+# are usage errors (exit 2).
+func parseTypeFilter(args: cli.Args) (string, error)
+    raw := strpkg.TrimSpace(cli.GetString(args, "type"))
+    if raw is empty
+        return "", empty
+    t := strpkg.ToLower(raw)
+    if _, perr := ParseEntityType(t); perr isnt empty
+        return "", cli.UsageFail("invalid --type {raw} (valid: {validEntityTypes()})")
+    return t, empty
+
+# validateDateFlags checks --since/--until against the calendar (real
+# dates, not just the right shape). Empty bounds are unbounded. Invalid
+# values are usage errors (exit 2).
+func validateDateFlags(since: string, until: string) error
+    if since isnt empty and not validDate(since)
+        return cli.UsageFail("--since must be YYYY-MM-DD, got {since}")
+    if until isnt empty and not validDate(until)
+        return cli.UsageFail("--until must be YYYY-MM-DD, got {until}")
+    return empty
+
+func main()
+    cli.New("mizuya")
+        |> cli.Description("mizuya — SQLite-backed knowledge graph (FTS5 + cosine similarity)")
+        |> cli.Version(Version)
+        |> cli.GlobalFlag("db", "Database path", ".mizuya/mizuya.db")
+        |> cli.BoolGlobalFlag("json", "JSON output", false)
+        |> cli.WithCommands(
+            makeInitCmd(),
+            makeUpsertCmd(),
+            makeObserveCmd(),
+            makeAttachCmd(),
+            makeRelateCmd(),
+            makeSearchCmd(),
+            makeContextCmd(),
+            makeSimilarCmd(),
+            makeSimilarMediaCmd(),
+            makeListCmd(),
+            makeMCPCmd(),
+            makeImportOKFCmd(),
+            makeImportOpenWikiCmd(),
+            makeDriftCmd(),
+            makePruneHistoryCmd(),
+            makeReembedCmd(),
+            makeArchiveCmd(),
+            makeUnarchiveCmd(),
+            makeSearchObservationsCmd(),
+        )
+        |> cli.Run()
+
+func makeInitCmd() reference cli.Command
+    return cli.NewCommand("init", "Initialize a new mizuya database")
+        |> .ActionE(doInit)
+
+func makeUpsertCmd() reference cli.Command
+    return cli.NewCommand("upsert", "Create or update an entity")
+        |> .RequiredFlag("id", "Entity id (slug)")
+        |> .StringFlag("type", "Entity type ({validEntityTypes()})", "concept")
+        |> .RequiredFlag("name", "Human-readable name")
+        |> .StringFlag("summary", "One-line summary", "")
+        |> .StringFlag("tags", "Comma-separated tags", "")
+        |> .ActionE(doUpsert)
+
+func makeObserveCmd() reference cli.Command
+    return cli.NewCommand("observe", "Append an observation to an entity")
+        |> .RequiredFlag("id", "Entity id")
+        |> .RequiredFlag("text", "Observation text")
+        |> .StringFlag(
+            "source",
+            "Observation source (trimmed, lowercased; conventional: user, session, retro, conversation)",
+            "conversation",
+        )
+        |> .StringFlag("supersedes", "Id of an observation on this entity that this one corrects", "")
+        |> .ActionE(doObserve)
+
+func makeReembedCmd() reference cli.Command
+    return cli.NewCommand(
+        "reembed",
+        "Rebuild the entire vector store with the configured provider (all-or-nothing; required after switching embedding models or dimensions)",
+    )
+        |> .ActionE(doReembed)
+
+func makeAttachCmd() reference cli.Command
+    return cli.NewCommand(
+        "attach",
+        "Attach a media file (image or audio) to an entity — or auto-create a media-native entity when --id is omitted",
+    )
+        |> .RequiredFlag("file", "Path to the media file")
+        |> .StringFlag("id", "Entity to attach to (omit to create a media-native entity)", "")
+        |> .StringFlag("kind", "image, audio, or video (default: inferred from extension)", "")
+        |> .StringFlag(
+            "caption",
+            "Free-text caption (passes the same secret gate as observations)",
+            "",
+        )
+        |> .StringFlag("name", "Media-native entity name (default: file basename)", "")
+        |> .StringFlag("source", "Attachment source label", "agent")
+        |> .ActionE(doAttach)
+
+func makeRelateCmd() reference cli.Command
+    return cli.NewCommand("relate", "Create a typed edge between two entities")
+        |> .RequiredFlag("src", "Source entity id")
+        |> .StringFlag("rel", "Relation label (uses, depends_on, part_of, ...)", "related_to")
+        |> .RequiredFlag("dst", "Destination entity id")
+        |> .ActionE(doRelate)
+
+func makeSearchCmd() reference cli.Command
+    return cli.NewCommand(
+        "search",
+        "Hybrid search across entities (BM25 + vector RRF, or regex with --regex)",
+    )
+        |> .RequiredFlag("query", "FTS5 query (or regex pattern with --regex)")
+        |> .IntFlag("limit", "Max results", 10)
+        |> .BoolFlag("regex", "Treat --query as a regex pattern (matches id, name, data)", false)
+        |> .StringFlag("type", "Restrict to this entity type", "")
+        |> .StringFlag("tag", "Restrict to entities with this tag", "")
+        |> .StringFlag("since", "Only entities updated on/after this YYYY-MM-DD", "")
+        |> .StringFlag("until", "Only entities updated on/before this YYYY-MM-DD", "")
+        |> .ActionE(doSearch)
+
+func makeContextCmd() reference cli.Command
+    return cli.NewCommand("context", "Show an entity with its N-hop neighbors and observations")
+        |> .RequiredFlag("id", "Entity id")
+        |> .IntFlag(
+            "depth",
+            "Hops to traverse via recursive CTEs over relations (1 = immediate neighbors)",
+            1,
+        )
+        |> .BoolFlag("history", "Include the entity's append-only version history", false)
+        |> .StringFlag("since", "Only observations on/after this YYYY-MM-DD", "")
+        |> .StringFlag("until", "Only observations on/before this YYYY-MM-DD", "")
+        |> .StringFlag("as-of", "Show the entity's state as of this YYYY-MM-DD instead of current", "")
+        |> .BoolFlag(
+            "hide-superseded",
+            "Omit observations that a newer observation explicitly supersedes (default true; they stay flagged via superseded_by otherwise)",
+            true,
+        )
+        |> .BoolFlag(
+            "show-superseded",
+            "Include observations that a newer observation supersedes (overrides --hide-superseded)",
+            false,
+        )
+        |> .ActionE(doContext)
+
+func makeSimilarCmd() reference cli.Command
+    return cli.NewCommand("similar", "Vector similarity search (cosine distance)")
+        |> .StringFlag("id", "Use this entity's embedding as the query", "")
+        |> .StringFlag("text", "Embed this text and use it as the query", "")
+        |> .StringFlag(
+            "media",
+            "Embed this media file and use it as the query (needs a multimodal provider embedding into the same space)",
+            "",
+        )
+        |> .IntFlag("limit", "Max results (ignored when --threshold is set)", 5)
+        |> .IntFlag(
+            "threshold",
+            "Return everything in the closest N percentile of distances (1-100, 0 = use --limit instead)",
+            0,
+        )
+        |> .StringFlag("type", "Restrict to this entity type", "")
+        |> .StringFlag("tag", "Restrict to entities with this tag", "")
+        |> .StringFlag("since", "Only entities updated on/after this YYYY-MM-DD", "")
+        |> .StringFlag("until", "Only entities updated on/before this YYYY-MM-DD", "")
+        |> .ActionE(doSimilar)
+
+func makeSimilarMediaCmd() reference cli.Command
+    return cli.NewCommand(
+        "similar-media",
+        "Vector similarity search over stored media attachments (cosine distance, like similar but for attachments)",
+    )
+        |> .RequiredFlag("file", "Media file to embed as the query (image or audio)")
+        |> .IntFlag("limit", "Max results", 5)
+        |> .StringFlag("kind", "Narrow to image, audio, or video (default: any)", "")
+        |> .ActionE(doSimilarMedia)
+
+func makeListCmd() reference cli.Command
+    return cli.NewCommand("list", "List entities (optionally filtered by --type)")
+        |> .StringFlag("type", "Filter by type", "")
+        |> .IntFlag("limit", "Max results", 50)
+        |> .ActionE(doList)
+
+func makeMCPCmd() reference cli.Command
+    return cli.NewCommand(
+        "mcp",
+        "Start MCP server for AI agent access — stdio by default; --http serves stateless streamable HTTP behind a bearer token",
+    )
+        |> .StringFlag(
+            "http",
+            "Listen address for streamable HTTP, e.g. 127.0.0.1:8765 (requires MIZUYA_MCP_TOKEN or --token-file)",
+            "",
+        )
+        |> .StringFlag(
+            "token-file",
+            "Bearer token file for --http (mode 0600); overrides MIZUYA_MCP_TOKEN_FILE",
+            "",
+        )
+        |> .BoolFlag(
+            "allow-remote",
+            "Let --http bind a non-loopback address (the bearer token travels in plaintext without TLS)",
+            false,
+        )
+        |> .ActionE(doMCP)
+
+func makeImportOKFCmd() reference cli.Command
+    return cli.NewCommand(
+        "import-okf",
+        "Import an OKF knowledge bundle (SPEC v0.2: index.md + log.md + concept dirs with OKF front matter) into the knowledge graph",
+    )
+        |> .RestArg("dir", "Path to a directory containing the OKF bundle")
+        |> .StringFlag(
+            "bundle",
+            "Bundle root, relative to <dir> (SPEC §3; index.md/log.md are skipped)",
+            "docs",
+        )
+        |> .ActionE(doImportOKF)
+
+func makeImportOpenWikiCmd() reference cli.Command
+    return cli.NewCommand("import-openwiki", "Deprecated alias for import-okf with --bundle openwiki")
+        |> .RestArg("dir", "Path to a directory containing an openwiki/ folder")
+        |> .ActionE(doImportOpenWiki)
+
+func makeDriftCmd() reference cli.Command
+    return cli.NewCommand(
+        "drift",
+        "Detect observations whose source entity has changed since they were recorded",
+    )
+        |> .IntFlag("limit", "Max drift rows to report", 50)
+        |> .BoolFlag(
+            "include-superseded",
+            "Also report observations that a newer observation explicitly supersedes",
+            false,
+        )
+        |> .ActionE(doDrift)
+
+func makePruneHistoryCmd() reference cli.Command
+    return cli.NewCommand(
+        "prune-history",
+        "Compact the append-only entity_history log (retention/GC): a version is pruned only when it breaks BOTH the --keep rank limit and the --before date limit. The newest version per entity is always kept.",
+    )
+        |> .IntFlag("keep", "Keep only the newest N versions per entity (0 = no rank limit)", 0)
+        |> .StringFlag(
+            "before",
+            "Drop versions from before this YYYY-MM-DD (end of day; everything on/after it survives regardless of rank)",
+            "",
+        )
+        |> .BoolFlag("dry-run", "Count what would be pruned without deleting", false)
+        |> .ActionE(doPruneHistory)
+
+# --- Command handlers ---
+
+# pickSuggestion prompts the operator to choose among fuzzy id matches;
+# returns "" when non-interactive (JSON mode or no TTY), on cancel, or
+# when there are no candidates. The MCP server never uses this — its
+# stdio surface is not interactive.
+func pickSuggestion(pool: db.Pool, args: cli.Args, id: string) string
+    if cli.IsJSON(args) or not term.IsTTY(os.Stdin)
+        return ""
+    ids, serr := suggestIds(pool, id, 3)
+    if serr isnt empty or (ids is empty)
+        return ""
+    picked := input.ChooseValue("'{id}' not found — did you mean:", ids) onerr return ""
+    return picked
+
+# resolveEntity fetches an entity by id; on a miss with an interactive TTY
+# (outside JSON mode), offers fuzzy matches for selection and re-fetches.
+func resolveEntity(pool: db.Pool, args: cli.Args, id: string) (Entity, error)
+    e := getEntity(pool, id) onerr
+        picked := pickSuggestion(pool, args, id)
+        if picked is empty
+            return Entity{}, error "entity not found: {id}"
+        refetched, rerr := getEntity(pool, picked)
+        if rerr isnt empty
+            return Entity{}, rerr
+        return refetched, empty
+
+    return e, empty
+
+# resolveEmbedding fetches an embedding vector by id; on a miss with an
+# interactive TTY (outside JSON mode), offers fuzzy matches and re-fetches.
+func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float64, error)
+    v := getEmbedding(pool, id) onerr
+        picked := pickSuggestion(pool, args, id)
+        if picked is empty
+            return empty list of float64, error "no embedding for {id}"
+        refetched, rerr := getEmbedding(pool, picked)
+        if rerr isnt empty
+            return empty list of float64, rerr
+        return refetched, empty
+
+    return v, empty
+
+# observeResolved adds an observation for id; on a miss with an interactive
+# TTY (outside JSON mode), offers fuzzy matches and retries with the pick.
+# Returns the committed row's receipt (id, stored text, redaction count).
+func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) (ObsWrite, error)
+    res, aerr := addObservation(pool, id, text, source, supersedes)
+    if aerr equals empty
+        return res, empty
+    picked := pickSuggestion(pool, args, id)
+    if picked is empty
+        return ObsWrite{}, aerr
+    return addObservation(pool, picked, text, source, supersedes)
+
+# openPool opens the database named by --db.
+func openPool(args: cli.Args) (db.Pool, error)
+    return openPoolAt(cli.GetString(args, "db"))
+
+# openPoolAt opens (or creates) the database at dbPath, registers the
+# extensions, and ensures the schema exists. initDB is idempotent (CREATE
+# IF NOT EXISTS + guarded migrations + spellfix re-population), so a path
+# that was never `mizuya init`'d self-initializes on first use instead of
+# failing later with "no such table: entity_ids_fuzzy" (or entities, ...)
+# while leaving a bare file behind.
+func openPoolAt(dbPath: string) (db.Pool, error)
+    files.MkDirAll(files.Dirname(dbPath)) onerr return
+    pool := sqlite.OpenWithExtensions(
+        dbPath,
+        map of string to string{"journal_mode": "WAL"},
+        vec1ext.Register,
+        regexpext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        statsext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    ) onerr return
+    initDB(pool) onerr return
+    return pool, empty
+
+func doInit(args: cli.Args) error
+    dbPath := cli.GetString(args, "db")
+    files.MkDirAll(files.Dirname(dbPath)) onerr explain "cannot create database directory"
+
+    pool := sqlite.OpenWithExtensions(
+        dbPath,
+        map of string to string{"journal_mode": "WAL"},
+        vec1ext.Register,
+        fts5ext.Register,
+        uuidext.Register,
+        spellfixext.Register,
+        unicodeext.Register,
+    ) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    initDB(pool) onerr explain "cannot initialize schema"
+
+    if cli.IsJSON(args)
+        printJSON({"status": "initialized", "db": dbPath})
+    else
+        print(color.Green("Initialized mizuya database at {dbPath}"))
+    return empty
+
+func doUpsert(args: cli.Args) error
+    id := cli.GetString(args, "id")
+    name := cli.GetString(args, "name")
+    etype := strpkg.ToLower(strpkg.TrimSpace(cli.GetString(args, "type")))
+    if _, perr := ParseEntityType(etype); perr isnt empty
+        return cli.UsageFail("invalid --type {etype} (valid: {validEntityTypes()})")
+    summary := cli.GetString(args, "summary")
+    tags := parseTags(cli.GetString(args, "tags"))
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    redacted, uerr := upsertEntity(pool, id, etype, name, summary, tags)
+    if uerr isnt empty
+        return errs.Wrap(uerr, "cannot upsert entity")
+
+    # Regenerate the embedding only if the corpus actually changed. A
+    # provider outage must not fail the command — the write committed, and
+    # exit-non-zero would tell a retrying caller its write was lost. The
+    # row keeps its text and gains a vector on a later touch (content_hash
+    # only advances on a successful embed), so report the deferral instead.
+    _, embedErr := reEmbedIfChanged(pool, id)
+    if embedErr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            id,
+            "err",
+            "{embedErr}",
+        )
+
+    e := getEntity(pool, id) onerr explain "cannot fetch upserted entity"
+
+    if cli.IsJSON(args)
+        if embedErr isnt empty
+            # Additive-only marker keys on the Entity payload (the contract
+            # allows optional fields): consumers learn the embedding is
+            # deferred instead of reading exit 1 as "write failed".
+            printJSON(map of string to any{
+                "id": e.Id,
+                "type": e.Type,
+                "name": e.Name,
+                "data": e.Data,
+                "created_at": e.CreatedAt,
+                "updated_at": e.UpdatedAt,
+                "embedding": "deferred",
+                "embedding_error": "{embedErr}",
+            })
+        else
+            printJSON(e)
+    else
+        note := if redacted > 0 then "  {color.Yellow("(redacted {redacted} secret(s))")}" else ""
+        embedNote := if embedErr isnt empty then "  {color.Yellow("(embedding deferred)")}" else ""
+        print(
+            "{color.Green("upserted")} {color.Bold(id)}  {color.Dim("({etype})")} {e.Name}{note}{embedNote}",
+        )
+    return empty
+
+func doObserve(args: cli.Args) error
+    id := cli.GetString(args, "id")
+    text := cli.GetString(args, "text")
+    source := strpkg.Or(cli.GetString(args, "source"), "conversation")
+    supersedes := cli.GetString(args, "supersedes")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    obs, oerr := observeResolved(pool, args, id, text, source, supersedes)
+    if oerr isnt empty
+        return error "cannot add observation: {oerr:w}{suggestionsFor(pool, id)}"
+
+    # Re-embed: observations are part of the entity's text corpus. A
+    # provider outage must not fail the command — the write committed, and
+    # exit-non-zero would tell a retrying caller its write was lost (an
+    # append-only store would gain a duplicate observation). The row keeps
+    # its text and gains a vector on a later touch, so report the deferral
+    # instead.
+    _, embedErr := reEmbedIfChanged(pool, id)
+    if embedErr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            id,
+            "err",
+            "{embedErr}",
+        )
+
+    if cli.IsJSON(args)
+        payload := map of string to any{
+            "status": "observed",
+            "id": id,
+            "observation_id": obs.Id,
+            "entity_id": id,
+            "text": obs.Text,
+            "source": obs.Source,
+            "at": obs.At,
+            "supersedes": obs.Supersedes,
+            "redacted": obs.Redacted,
+        }
+        if embedErr isnt empty
+            payload["embedding"] = "deferred"
+            payload["embedding_error"] = "{embedErr}"
+        printJSON(payload)
+    else
+        note := if obs.Redacted > 0 then "  {color.Yellow("(redacted {obs.Redacted} secret(s))")}" else ""
+        embedNote := if embedErr isnt empty then "  {color.Yellow("(embedding deferred)")}" else ""
+        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(obs.Text)}{note}{embedNote}")
+    return empty
+
+# doReembed recomputes every entity (and media, when a provider is
+# configured) vector with the CURRENT configured provider and atomically
+# swaps the vector stores. Explicit and all-or-nothing: every vector is
+# computed before the store is dropped, so a provider outage aborts with
+# the store untouched. Required after switching providers/models — vec1
+# bakes its dimension at first insert.
+func doReembed(args: cli.Args) error
+    pool := openPool(args) onerr explain "cannot open database"
+    defer
+        db.Close(pool) onerr discard
+
+    log.Info("mizuya: reembedding with configured provider; this may take a while on large graphs")
+    res, rerr := reembedEverything(pool)
+    if rerr isnt empty
+        return rerr
+
+    if cli.IsJSON(args)
+        printJSON(res)
+        return empty
+
+    print(
+        "{color.Green("reembedded")} {color.Bold("{res.Entities} entities, {res.Media} media")} (model {res.Model}, dim {res.Dim})",
+    )
+    if res.Note isnt empty
+        print("  {color.Dim(res.Note)}")
+    print(
+        color.Dim("  vector stores rebuilt (embeddings_vec, media_vec/raw); entity_history untouched"),
+    )
+    return empty
+
+# doAttach stores a media file as an attachment. Media bytes are stored
+# sha256-addressed under <db dir>/assets/ (deduped); the caption passes the
+# same fail-closed gate as observations; the bytes themselves are never
+# scanned — every mode says so. When --id is omitted a content-addressed
+# media-native entity is auto-created. A provider outage never fails a
+# write that committed — the vector is deferred and reported.
+func doAttach(args: cli.Args) error
+    dbPath := cli.GetString(args, "db")
+    pool := openPool(args) onerr explain "cannot open database"
+    defer
+        db.Close(pool) onerr discard
+
+    res, aerr := attachMediaFile(pool, dbPath, AttachArgs{
+        Id: cli.GetString(args, "id"),
+        File: cli.GetString(args, "file"),
+        Kind: cli.GetString(args, "kind"),
+        Mime: "",
+        Caption: cli.GetString(args, "caption"),
+        Name: cli.GetString(args, "name"),
+        Source: cli.GetString(args, "source"),
+    })
+    if aerr isnt empty
+        return aerr
+
+    if cli.IsJSON(args)
+        printJSON(res)
+        return empty
+
+    print(
+        "{color.Green(res.Status)} media {color.Bold(res.MediaId)} on entity {color.Bold(res.EntityId)}  {color.Dim("{res.Kind}, {res.Bytes} B")}",
+    )
+    print("  asset: {color.Dim(res.Path)}")
+    print("  sha256: {color.Dim(res.Sha256)}")
+    print(color.Yellow("  bytes are not secret-scanned (regex gate covers text only)"))
+    if res.Status equals "already-attached" and res.Redacted > 0
+        print("  {color.Dim(
+            "candidate caption had {res.Redacted} secret(s); nothing was stored (identical bytes already on this entity)",
+        )}"
+        )
+    else if res.Redacted > 0
+        print("  {color.Yellow("redacted {res.Redacted} secret(s) before storing")}")
+    if res.EmbedDeferred
+        print(color.Yellow(
+            "  embedding deferred (provider unavailable); vector lands on the next touch with a provider configured",
+        ))
+    print(color.Dim("→ context --id {res.EntityId}"))
+    return empty
+
+func doRelate(args: cli.Args) error
+    src := cli.GetString(args, "src")
+    rel := cli.GetString(args, "rel")
+    dst := cli.GetString(args, "dst")
+    if rel is empty
+        return cli.UsageFail("--rel must not be empty")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    storedRel, rerr := relate(pool, src, rel, dst)
+    if rerr isnt empty
+        return error "cannot create relation: {rerr:w}"
+
+    if cli.IsJSON(args)
+        printJSON({"status": "related", "src": src, "rel": storedRel, "dst": dst})
+    else
+        print(
+            "{color.Green("related")} {color.Bold(src)} {color.Dim("--{storedRel}->")} {color.Bold(dst)}",
+        )
+    return empty
+
+func doSearch(args: cli.Args) error
+    query := cli.GetString(args, "query")
+    limit := cli.GetIntOr(args, "limit", 10)
+
+    typeFilter, tfErr := parseTypeFilter(args)
+    if tfErr isnt empty
+        return tfErr
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    if dErr := validateDateFlags(since, until); dErr isnt empty
+        return dErr
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    useRegex := cli.GetBool(args, "regex")
+    filter := SearchFilter{
+        Type: typeFilter,
+        Tag: cli.GetString(args, "tag"),
+        Since: since,
+        Until: until,
+    }
+    hits := empty list of SearchHit
+    if useRegex
+        hits = regexSearch(pool, query, limit, filter) onerr explain "regex search failed"
+    else
+        hits = hybridSearch(pool, query, limit, filter) onerr explain "search failed"
+
+    if cli.IsJSON(args)
+        printJSON(hits)
+    else
+        if useRegex
+            print("{color.Bold("regex:")} {query}")
+        else
+            print("{color.Bold("search:")} {query}")
+        printSearchHits(hits)
+    return empty
+
+func doContext(args: cli.Args) error
+    id := cli.GetString(args, "id")
+
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    asOf := cli.GetString(args, "as-of")
+    if dErr := validateDateFlags(since, until); dErr isnt empty
+        return dErr
+    if asOf isnt empty and not validDate(asOf)
+        return cli.UsageFail("--as-of must be YYYY-MM-DD, got {asOf}")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    depth := cli.GetIntOr(args, "depth", 1)
+    if depth < 1
+        depth = 1
+    showHistory := cli.GetBool(args, "history")
+    hideSuperseded := cli.GetBool(args, "hide-superseded")
+    if cli.GetBool(args, "show-superseded")
+        hideSuperseded = false
+
+    e := resolveEntity(pool, args, id) onerr error "{error:w}{suggestionsFor(pool, id)}"
+
+    arch, archErr := isArchived(pool, id)
+    if archErr isnt empty
+        return error "cannot check archive state: {archErr:w}"
+    if arch
+        return error "entity {id} is archived — `mizuya unarchive --id {id}` restores it"
+
+    obs := listObservationsRange(pool, id, since, until, hideSuperseded) onerr explain "cannot read observations"
+    atts := listMedia(pool, id) onerr explain "cannot read media attachments"
+
+    hist := empty list of HistoryRow
+    if showHistory
+        hist = listEntityHistory(pool, id, 50) onerr explain "cannot read entity history"
+
+    # --as-of: time-travel. Show the latest logged version from before the
+    # end of that day instead of the current row — the append-only log
+    # makes "what did we think then" answerable.
+    display := e
+    if asOf isnt empty
+        h := entityStateAt(pool, id, asOf) onerr error "no logged state of {id} as of {asOf}: {error:w}"
+
+        display = Entity{
+            Id: h.EntityId,
+            Type: h.Type,
+            Name: h.Name,
+            Data: h.Data,
+            CreatedAt: "",
+            UpdatedAt: h.ChangedAt,
+        }
+
+    if depth > 1
+        renderDeepContext(args, pool, display, id, depth, obs, hist, atts) onerr return
+        return
+    renderShallowContext(args, pool, display, id, obs, hist, atts) onerr return
+    return empty
+
+func renderShallowContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, obs: list of ObsRow, hist: list of HistoryRow, atts: list of MediaRow) error
+    outgoing := outgoingContext(pool, id) onerr explain "cannot read outgoing"
+
+    incoming := incomingContext(pool, id) onerr explain "cannot read incoming"
+
+    if cli.IsJSON(args)
+        payload := map of string to any{
+            "entity": e,
+            "outgoing": outgoing,
+            "incoming": incoming,
+            "observations": obs,
+            "attachments": atts,
+        }
+        if hist isnt empty
+            payload["history"] = hist
+        printJSON(payload)
+        return
+    printContext(e, outgoing, incoming, obs, atts)
+    printHistory(hist)
+    return empty
+
+func renderDeepContext(args: cli.Args, pool: db.Pool, e: Entity, id: string, depth: int, obs: list of ObsRow, hist: list of HistoryRow, atts: list of MediaRow) error
+    outReach := reachableOutgoing(pool, id, depth) onerr explain "cannot read outgoing neighbors"
+
+    inReach := reachableIncoming(pool, id, depth) onerr explain "cannot read incoming neighbors"
+
+    if cli.IsJSON(args)
+        payload := map of string to any{
+            "entity": e,
+            "depth": depth,
+            "outgoing": outReach,
+            "incoming": inReach,
+            "observations": obs,
+            "attachments": atts,
+        }
+        if hist isnt empty
+            payload["history"] = hist
+        printJSON(payload)
+        return
+    printReachableContext(e, depth, outReach, inReach, obs, atts)
+    printHistory(hist)
+    return empty
+
+func doSimilar(args: cli.Args) error
+    id := cli.GetString(args, "id")
+    text := cli.GetString(args, "text")
+    media := cli.GetString(args, "media")
+    given := 0
+    if id isnt empty
+        given = given + 1
+    if text isnt empty
+        given = given + 1
+    if media isnt empty
+        given = given + 1
+    if given isnt 1
+        return cli.UsageFail("exactly one of --id, --text, --media is required")
+    limit := cli.GetIntOr(args, "limit", 5)
+    threshold := cli.GetIntOr(args, "threshold", 0)
+
+    if threshold < 0 or threshold > 100
+        return cli.UsageFail("--threshold must be in (0, 100], got {threshold}")
+    typeFilter, tfErr := parseTypeFilter(args)
+    if tfErr isnt empty
+        return tfErr
+    since := cli.GetString(args, "since")
+    until := cli.GetString(args, "until")
+    if dErr := validateDateFlags(since, until); dErr isnt empty
+        return dErr
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    vec := empty list of float64
+    if id isnt empty
+        v := resolveEmbedding(pool, args, id) onerr error "{error:w}{suggestionsFor(pool, id)}"
+
+        vec = v
+    else if text isnt empty
+        vec = embedText(text) onerr explain "cannot compute embedding"
+    else
+        v, _, vErr := embedFileQuery(media)
+        if vErr isnt empty
+            return vErr
+        probe := db.Query(pool, "SELECT dim FROM embeddings_vec LIMIT 1") |> db.ScanAll of dimRow
+        if probe isnt empty and probe[0].Dim isnt len(v)
+            return cli.UsageFail(
+                "cross-modal --media needs the text store embedded with the same multimodal model (store holds {probe[0].Dim}d vectors); set MIZUYA_EMBED_PROVIDER=ollama MIZUYA_EMBED_MODEL=embeddinggemma-2:740m, then run `mizuya reembed`",
+            )
+        vec = v
+
+    filter := SearchFilter{
+        Type: typeFilter,
+        Tag: cli.GetString(args, "tag"),
+        Since: since,
+        Until: until,
+    }
+    hits := empty list of SimilarHit
+    if threshold > 0
+        hits = similarByPercentile(pool, vec, threshold, filter) onerr explain "similarity query failed"
+    else
+        hits = similar(pool, vec, limit, filter) onerr explain "similarity query failed"
+
+    if cli.IsJSON(args)
+        printJSON(hits)
+    else
+        header := "similar to media: {media}"
+        if id isnt empty
+            header = "similar to: {id}"
+        else if text isnt empty
+            header = "similar to text: {text}"
+        if threshold > 0
+            header = header + " (closest {threshold}%)"
+        print(color.Bold(header))
+        printSimilarHits(hits)
+    return empty
+
+# doSimilarMedia embeds a media file and KNN-searches the media index.
+# Mirrors `similar` but over media_vec — the "which attachment is this
+# like?" query. Requires a multimodal provider; the dim is guarded
+# against media_raw the same way `similar --media` guards embeddings_vec.
+func doSimilarMedia(args: cli.Args) error
+    file := cli.GetString(args, "file")
+    kind := strpkg.ToLower(strpkg.TrimSpace(cli.GetString(args, "kind")))
+    if kind isnt empty and kind isnt "image" and kind isnt "audio" and kind isnt "video"
+        return cli.UsageFail("--kind must be image, audio, or video, got {kind}")
+    limit := cli.GetIntOr(args, "limit", 5)
+    if limit <= 0
+        return cli.UsageFail("--limit must be > 0, got {limit}")
+
+    if not files.Exists(file)
+        return error "file not found: {file}"
+    vec, _, vErr := embedFileQuery(file)
+    if vErr isnt empty
+        return vErr
+
+    pool := openPool(args) onerr explain "cannot open database"
+    defer
+        db.Close(pool) onerr discard
+
+    probe := db.Query(pool, "SELECT dim FROM media_raw LIMIT 1") |> db.ScanAll of dimRow
+    if probe isnt empty and probe[0].Dim isnt len(vec)
+        return cli.UsageFail(
+            "media query ({len(vec)}d) and media index ({probe[0].Dim}d) disagree; run `mizuya reembed` with the multimodal provider",
+        )
+
+    hits := searchMedia(pool, vec, limit, kind) onerr explain "media similarity search failed"
+
+    if cli.IsJSON(args)
+        printJSON(hits)
+    else
+        print(color.Bold("similar media to: {file}"))
+        printSimilarMediaHits(hits)
+    return empty
+
+func doList(args: cli.Args) error
+    etype := cli.GetString(args, "type")
+    limit := cli.GetIntOr(args, "limit", 50)
+    if etype isnt empty
+        t := strpkg.ToLower(strpkg.TrimSpace(etype))
+        if _, perr := ParseEntityType(t); perr isnt empty
+            return cli.UsageFail("invalid --type {etype} (valid: {validEntityTypes()})")
+        etype = t
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    rows := listEntities(pool, etype, limit) onerr explain "list failed"
+
+    if cli.IsJSON(args)
+        printJSON(rows)
+    else
+        printEntityList(rows)
+    return empty
+
+func doMCP(args: cli.Args) error
+    dbPath := cli.GetString(args, "db")
+    httpAddr := cli.GetString(args, "http")
+    token := ""
+    if httpAddr isnt empty
+        if not cli.GetBool(args, "allow-remote") and not isLoopbackAddr(httpAddr)
+            return cli.UsageFail(
+                "--http {httpAddr} is not a loopback address; pass --allow-remote to bind beyond loopback (the bearer token travels in plaintext without TLS)",
+            )
+        token = resolveMCPToken(cli.GetString(args, "token-file")) onerr explain "MCP HTTP auth"
+    startMCP(dbPath, httpAddr, token) onerr explain "MCP server error"
+    return empty
+
+# OKFDoc holds a parsed bundle concept between the two import passes.
+type OKFDoc
+    Slug: string
+    Body: string
+
+# --- import-okf ---
+
+# doImportOKF parses an OKF knowledge bundle (<dir>/<bundle>, default
+# docs/) into mizuya entities + relations. Each concept doc becomes an
+# entity (id = path relative to the bundle root minus .md, e.g.
+# "reference/ARCHITECTURE"; type = concept or from front matter, tagged
+# with the source, the front-matter type/status, and its section dir);
+# each markdown link [text](other.md) becomes a `references` edge.
+# Re-importing is idempotent — upsertEntity is ON CONFLICT, and
+# reEmbedIfChanged short-circuits when the content hash hasn't changed.
+func doImportOKF(args: cli.Args) error
+    rest := cli.GetRest(args, "dir")
+    if rest is empty
+        return cli.UsageFail("import-okf requires a <dir> path argument")
+    baseDir := rest[0]
+    bundle := cli.GetString(args, "bundle")
+    if strpkg.TrimSpace(bundle) is empty
+        bundle = "docs"
+
+    if not files.Exists(files.Join(baseDir, bundle))
+        return error "no {bundle}/ directory found at {baseDir}"
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    imported, linked, ierr := importOKF(pool, baseDir, bundle, "okf")
+    if ierr isnt empty
+        return ierr
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
+    else
+        print("{color.Green("imported")} {imported} entities, {linked} links")
+    return empty
+
+# doImportOpenWiki is the deprecated pre-OKF entry point; it imports the
+# legacy openwiki/ corpus through the same core.
+func doImportOpenWiki(args: cli.Args) error
+    log.Warn("import-openwiki is deprecated; use import-okf (--bundle docs)")
+    rest := cli.GetRest(args, "dir")
+    if rest is empty
+        return cli.UsageFail("import-openwiki requires a <dir> path argument")
+    baseDir := rest[0]
+
+    if not files.Exists(files.Join(baseDir, "openwiki"))
+        return error "no openwiki/ directory found at {baseDir}"
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    imported, linked, ierr := importOpenWiki(pool, baseDir)
+    if ierr isnt empty
+        return ierr
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{"status": "imported", "entities": imported, "links": linked})
+    else
+        print("{color.Green("imported")} {imported} entities, {linked} links")
+    return empty
+
+# importOKF is the testable core of doImportOKF: parse the OKF bundle at
+# baseDir/bundleDir into entities + references edges. It is idempotent —
+# upsertEntity is ON CONFLICT (and skips the history append when the state
+# is unchanged), relate is INSERT OR IGNORE, and summaries pass through
+# the fail-closed secret gate. sourceTag labels imported entities (e.g.
+# "okf"). The bundle's index.md/log.md (SPEC §8/§9) are metadata, not
+# concepts, and are skipped.
+func importOKF(pool: db.Pool, baseDir: string, bundleDir: string, sourceTag: string) (int, int, error)
+    bundleRoot := files.Join(baseDir, bundleDir)
+    entries, lErr := files.WalkEntries(bundleRoot)
+    if lErr isnt empty
+        return 0, 0, errs.Wrap(lErr, "cannot walk bundle dir")
+
+    imported := 0
+    linked := 0
+    # First pass: upsert all entities so links can resolve to any doc
+    # regardless of Walk order.
+    docs := empty list of OKFDoc
+    for entry in entries
+        if entry.IsDir or not strpkg.HasSuffix(entry.Name, ".md")
+            continue
+        # slug = path relative to the bundle root with .md stripped (e.g.
+        # "reference/ARCHITECTURE" for docs/reference/ARCHITECTURE.md).
+        relPath := filepath.ToSlash(strpkg.TrimPrefix(entry.Path, bundleRoot + "/"))
+        if relPath equals "index.md" or relPath equals "log.md"
+            continue
+        slug := strpkg.TrimSuffix(relPath, ".md")
+        raw := files.ReadString(entry.Path) onerr
+            log.Warn("import-okf: skipping unreadable file", "file", entry.Path, "err", error)
+            continue
+
+        fmBlock, body := splitFrontMatter(raw)
+        var fm: OKFFrontMatter
+        if fmBlock isnt empty
+            fm = parse.YAML of OKFFrontMatter from fmBlock onerr
+                log.Warn(
+                    "import-okf: skipping file with bad front matter",
+                    "file",
+                    entry.Path,
+                    "err",
+                    error,
+                )
+                continue
+
+        name := strpkg.Or(fm.Title, slug)
+        summary := strpkg.Or(fm.Description, firstParagraph(body))
+        # Validate through the enum so the accepted set stays in sync
+        # with EntityType; anything outside it (e.g. OKF front-matter
+        # "Reference", "Guide") files as a concept.
+        etype := strpkg.Or(strpkg.ToLower(fm.Type), "concept")
+        if _, perr := ParseEntityType(etype); perr isnt empty
+            etype = "concept"
+        tags := list of string{sourceTag}
+        if fm.Type isnt empty
+            tags = append(tags, strpkg.ToLower(fm.Type))
+        # The section dir (guides/, reference/, design/, ...) is a tag.
+        if slashIdx := strpkg.Index(slug, "/"); slashIdx > 0
+            tags = append(tags, slug[:slashIdx])
+        if fm.Status isnt empty
+            tags = append(tags, "status:" + strpkg.ToLower(fm.Status))
+        for t in fm.Tags
+            t = strpkg.TrimSpace(t)
+            if t is empty
+                continue
+            dup := false
+            for existing in tags
+                if existing equals t
+                    dup = true
+            if not dup
+                tags = append(tags, t)
+
+        _, uerr := upsertEntity(pool, slug, etype, name, summary, tags)
+        if uerr isnt empty
+            log.Warn("import-okf: upsert failed", "slug", slug, "err", "{uerr}")
+            continue
+
+        reEmbedIfChanged(pool, slug) onerr discard
+        docs = append(docs, OKFDoc{Slug: slug, Body: body})
+        imported = imported + 1
+
+    # Second pass: create references edges now that all entities exist.
+    for doc in docs
+        slug := doc.Slug
+        body := doc.Body
+        srcDir := ""
+        if slashIdx := strpkg.LastIndex(slug, "/"); slashIdx >= 0
+            srcDir = slug[:slashIdx + 1]
+        links := extractMarkdownLinks(body)
+        for dst in links
+            # Skip external URLs, anchors, absolute paths, and directory links.
+            if strpkg.HasPrefix(dst, "http") or strpkg.HasPrefix(dst, "#") or strpkg.HasPrefix(dst, "/") or strpkg.HasSuffix(dst, "/")
+                continue
+            # Resolve relative to the source doc's directory (cleaning
+            # ../ segments), then strip .md to get the full slug.
+            dstPath := dst
+            if srcDir isnt empty
+                dstPath = srcDir + dst
+            dstPath = filepath.ToSlash(filepath.Clean(dstPath))
+            dstSlug := strpkg.TrimSuffix(dstPath, ".md")
+            if dstSlug equals slug
+                continue
+            # Only relate if the target entity exists (avoid FK violations).
+            _, dErr := getEntity(pool, dstSlug)
+            if dErr isnt empty
+                continue
+            relate(pool, slug, "references", dstSlug) onerr
+                log.Warn("import-okf: relate failed", "src", slug, "dst", dstSlug, "err", error)
+                continue
+
+            linked = linked + 1
+
+    return imported, linked, empty
+
+# importOpenWiki is the legacy openwiki-corpus entry point kept for the
+# deprecated import-openwiki alias; it runs the OKF core over openwiki/.
+func importOpenWiki(pool: db.Pool, baseDir: string) (int, int, error)
+    return importOKF(pool, baseDir, "openwiki", "openwiki")
+
+# --- drift ---
+
+# doDrift finds observations whose entity has a logged version newer than
+# the observation — i.e. the entity's conception changed after the
+# observation was recorded (append-only model: the change lives in
+# entity_history, not in an overwritten field). Observations that a newer
+# observation explicitly supersedes are deliberate corrections, not
+# drift, and are excluded unless --include-superseded is passed.
+func doDrift(args: cli.Args) error
+    limit := cli.GetIntOr(args, "limit", 50)
+    includeSuperseded := cli.GetBool(args, "include-superseded")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    rows := listDrift(pool, limit, includeSuperseded) onerr explain "drift query failed"
+
+    if rows is empty
+        if cli.IsJSON(args)
+            printJSON(map of string to any{"status": "no-drift", "count": 0})
+        else
+            print(color.Dim("no drift detected"))
+        return
+
+    if cli.IsJSON(args)
+        printJSON(rows)
+    else
+        print(color.Bold("drift: {len(rows)} stale observations"))
+        for r in rows
+            print("  {color.Bold(r.EntityId)}  {color.Dim(r.ObsAt)} -> {r.EntityUpdated}")
+            print("    {color.Dim(strpkg.Truncate(r.ObsText, 80))}")
+    return empty
+
+# --- prune-history ---
+
+# doPruneHistory compacts entity_history per the retention policy in
+# docs/STORAGE.md. This is the deliberate-deletion exception to the
+# append-only model: the log is the source of truth for as-of reads, so
+# pruning means as-of dates older than the oldest retained version will
+# error afterwards.
+func doPruneHistory(args: cli.Args) error
+    keep := cli.GetIntOr(args, "keep", 0)
+    before := cli.GetString(args, "before")
+    dryRun := cli.GetBool(args, "dry-run")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    n, err := pruneHistory(pool, keep, before, dryRun)
+    if err isnt empty
+        return err
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{
+            "status": if dryRun then "dry-run" else "pruned",
+            "keep": keep,
+            "before": before,
+            "versions": n,
+        })
+    else
+        verb := if dryRun then "would prune" else "pruned"
+        beforeLabel := strpkg.Or(before, "-")
+        print(
+            "{color.Green(verb)} {n} entity_history version(s) (keep={keep}, before={beforeLabel})",
+        )
+    return empty
+
+# OKFGenerated is the OKF SPEC §4 `generated:` block (last change + actor).
+type OKFGenerated
+    By: string
+    At: string
+
+# OKFFrontMatter is the OKF v0.2 concept front-matter shape the importer
+# reads. Unknown keys are ignored; tags accepts both [a, b] and block-list
+# YAML. Field names are chosen so their lowercased forms ARE the OKF wire
+# keys — kukicha's `as "..."` aliases transpile to Go json tags, which
+# yaml.v3 (behind parse.YAML) ignores, so the names must match natively.
+type OKFFrontMatter
+    Type: string
+    Title: string
+    Description: string
+    Resource: string
+    Tags: list of string
+    Status: string
+    Stale_after: string
+    Generated: OKFGenerated
+
+# splitFrontMatter splits raw markdown into the front-matter YAML text
+# (the block between --- delimiters; "" when absent) and the body.
+func splitFrontMatter(raw: string) (string, string)
+    lines := strpkg.Split(raw, "\n")
+    if (lines is empty) or lines[0] isnt "---"
+        return "", raw
+    i := 1
+    for i < len(lines)
+        if lines[i] equals "---"
+            break
+        i = i + 1
+    if i >= len(lines)
+        return "", raw
+    return strpkg.Join(lines[1:i], "\n"), strpkg.Join(lines[i + 1:], "\n")
+
+# firstParagraph returns the first non-heading, non-empty line of the body,
+# as a plain-text summary fallback when the description front-matter is absent.
+func firstParagraph(body: string) string
+    lines := strpkg.Split(body, "\n")
+    for line in lines
+        t := strpkg.TrimSpace(line)
+        if t isnt empty and not strpkg.HasPrefix(t, "#")
+            return t
+    return ""
+
+# markdownLinkPattern matches [text](target.md) wiki links; used by
+# extractMarkdownLinks. Compiled once at package level.
+var markdownLinkPattern = regex.MustCompile('\[([^\]]*)\]\(([^)]+\.md)\)')
+
+# extractMarkdownLinks scans body text for [text](target.md) patterns and
+# returns the list of target paths.
+func extractMarkdownLinks(body: string) list of string
+    links := empty list of string
+    for groups in markdownLinkPattern.FindAllGroups(body)
+        links = append(links, groups[2])
+    return links
+
+func makeArchiveCmd() reference cli.Command
+    return cli.NewCommand(
+        "archive",
+        "Archive an entity (soft delete — hidden from search/context/list/drift, restorable; row and history kept)",
+    )
+        |> .RequiredFlag("id", "Entity id to archive")
+        |> .ActionE(doArchive)
+
+func makeUnarchiveCmd() reference cli.Command
+    return cli.NewCommand("unarchive", "Restore an archived entity")
+        |> .RequiredFlag("id", "Entity id to restore")
+        |> .ActionE(doUnarchive)
+
+func makeSearchObservationsCmd() reference cli.Command
+    return cli.NewCommand(
+        "search-observations",
+        "Search observation text (literal substring, case-insensitive, newest first)",
+    )
+        |> .RequiredFlag("query", "Literal substring to find in observation text")
+        |> .StringFlag("id", "Restrict to this entity", "")
+        |> .IntFlag("limit", "Max results", 10)
+        |> .ActionE(doSearchObservations)
+
+func doArchive(args: cli.Args) error
+    return setArchived(args, true)
+
+func doUnarchive(args: cli.Args) error
+    return setArchived(args, false)
+
+func setArchived(args: cli.Args, archived: bool) error
+    id := cli.GetString(args, "id")
+    if id is empty
+        return cli.UsageFail("--id is required")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    setEntityArchived(pool, id, archived) onerr explain "cannot update archive state"
+    status := "archived"
+    if not archived
+        status = "unarchived"
+    if cli.IsJSON(args)
+        printJSON(map of string to any{"status": status, "id": id})
+    else
+        print("{color.Green(status)} {color.Bold(id)}")
+    return empty
+
+func doSearchObservations(args: cli.Args) error
+    query := cli.GetString(args, "query")
+    if query is empty
+        return cli.UsageFail("--query is required")
+    limit := cli.GetIntOr(args, "limit", 10)
+    entityId := cli.GetString(args, "id")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    obs, err := searchObservations(pool, query, entityId, limit) onerr explain "search failed"
+    if cli.IsJSON(args)
+        printJSON(obs)
+    else
+        printObservationRows(obs)
+    return empty

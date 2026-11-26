@@ -104,9 +104,9 @@ func TestObservationRedactedAtWrite(t: reference testing.T)
 
     _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
     test.AssertNoError(t, uerr)
-    n, _, err := addObservation(pool, "duck", "aws key AKIAIOSFODNN7EXAMPLE was used", "conversation")
+    obsWrite, err := addObservation(pool, "duck", "aws key AKIAIOSFODNN7EXAMPLE was used", "conversation")
     test.AssertNoError(t, err)
-    test.AssertEqual(t, n, 1)
+    test.AssertEqual(t, obsWrite.Redacted, 1)
 
     obs, lerr := listObservations(pool, "duck")
     test.AssertNoError(t, lerr)
@@ -392,18 +392,18 @@ func TestObservationRedactsSourceAndReturnsStoredText(t: reference testing.T)
 
     _, uerr2 := upsertEntity(pool, "duck", "concept", "Donald Duck", "s", empty list of string)
     test.AssertNoError(t, uerr2)
-    n, stored, err := addObservation(
+    obsWrite, err := addObservation(
         pool,
         "duck",
         "aws key AKIAIOSFODNN7EXAMPLE was used",
         "ghp_abcdefghijklmnopqrstuvwxyz0123456789ab",
     )
     test.AssertNoError(t, err)
-    test.AssertEqual(t, n, 2)
-    test.AssertContains(t, stored, "[REDACTED:aws-access-key]")
+    test.AssertEqual(t, obsWrite.Redacted, 2)
+    test.AssertContains(t, obsWrite.Text, "[REDACTED:aws-access-key]")
     test.AssertFalse(
         t,
-        strContains(stored, "AKIAIOSFODNN7EXAMPLE"),
+        strContains(obsWrite.Text, "AKIAIOSFODNN7EXAMPLE"),
         "returned text must be the stored (redacted) text",
     )
     obs, lerr := listObservations(pool, "duck")

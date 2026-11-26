@@ -1,0 +1,328 @@
+# mizuya — database schema
+# All DDL statements and initDB. Uses FTS5 with content=entities so the
+# virtual table mirrors the base table row-for-row via triggers.
+#
+# Timestamp contract: *_at columns are stamped in UTC ISO 8601 with an
+# explicit Z suffix. entities/relations use second precision
+# (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')); observations.at,
+# entity_history.changed_at, and media.at use millisecond precision
+# (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) so same-second ordering is
+# exact. The fixed-width formats compare correctly against each other
+# and against ISO strftime() thresholds — but add 'localtime' to
+# neither side: mixing it into only the threshold skews the window by
+# the local UTC offset (4h in EDT). initDB rewrites pre-ISO stamps
+# (space separator, no Z) in place; see migrateTimestamps.
+
+petiole main
+
+import "stdlib/db"
+import "stdlib/sqlite"
+
+# --- Table DDL ---
+
+# content_hash is a hex sha256 over the entity's text corpus
+# (name + summary + observations). Used to short-circuit embedding
+# regeneration when the corpus hasn't changed — important for the
+# ollama/openai providers where every embed is a network round-trip.
+# Nullable so pre-hash rows just re-embed once on next touch.
+const entitiesSQL = "CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', content_hash TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), archived_at TEXT)"
+
+const relationsSQL = "CREATE TABLE IF NOT EXISTS relations (src TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, rel TEXT NOT NULL, dst TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), PRIMARY KEY (src, rel, dst))"
+
+# Observations are first-class rows — timestamped, sourced, and linkable
+# to the correction that supersedes them. The id default uses uuid(7) for
+# time-ordered UUIDs (better B-tree locality than v4) — requires the uuid
+# extension registered before any INSERT.
+#
+# supersedes links an observation to the earlier observation it corrects
+# or replaces (append-only belief model: the old row stays, the new one
+# points at it, and the reader resolves which is current). ON DELETE SET
+# NULL keeps the log intact if the old row is ever scrubbed.
+#
+# distilled is a legacy marker (set to 1 by the removed `distill`
+# command, which fed an openwiki -p run). The column is kept so existing
+# databases with distilled=1 rows behave identically — `drift` skips them.
+# Nothing sets it anymore.
+const observationsSQL = "CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), distilled INTEGER NOT NULL DEFAULT 0, supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL)"
+
+# entity_history is the append-only version log for entities. Every
+# upsert appends the post-update state; the entities row remains the
+# fast "current view" but nothing is ever overwritten in the log, so
+# "what did we think before date X" is always answerable. The id
+# default uses uuid(7), same as observations.
+#
+# changed_at uses millisecond precision so drift detection
+# can tell "entity changed after this observation" apart within the same
+# second; the fixed-width format still compares correctly against the
+# second-precision stamps on other tables.
+const entityHistorySQL = "CREATE TABLE IF NOT EXISTS entity_history (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, type TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+
+# Embeddings live in a vec1 virtual table. The 'flat' index does brute-force
+# scan inside vec1 (no training step) — fine for thousands of entities.
+# Bump to a trained IVFADC model later by replacing the rebuild config.
+# Vector column accepts 4-byte-aligned BLOBs (float32 LE).
+#
+# The metadata columns carry provenance (model, dim) without duplicating
+# the vector. Current vec1 builds round-trip constrained vector reads and
+# preserve TEXT/INTEGER metadata through tombstone compression — both
+# pinned by reembed_test.kuki. BLOB-valued metadata (the old vec_raw
+# column) is neither used here nor verified against that path.
+const embeddingsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_vec USING vec1(vector, entity_id, model, dim)"
+
+const embeddingsRebuildSQL = `INSERT INTO embeddings_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
+
+# --- Media attachments ---
+# Media lives in its own table: the regex secret gate cannot scan bytes,
+# so the row records that honestly (scanned = 0 always) and stores only
+# derived, safe data — the sha256 (bytes-addressed asset path under
+# <db dir>/assets/), byte count, mime, and a caption that passes the
+# same fail-closed gate as observations. UNIQUE(entity_id, sha256) makes
+# re-attaching the same file to the same entity a no-op.
+# Media vectors get their own vec1 vtab + raw side store, mirroring the
+# embeddings pair — the entity-embedding contract stays untouched.
+const mediaSQL = "CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY DEFAULT (uuid(7)), entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, kind TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, caption TEXT NOT NULL DEFAULT '', scanned INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'agent', at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+
+const mediaUniqueSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_entity_sha ON media(entity_id, sha256)"
+
+const idxMediaEntitySQL = "CREATE INDEX IF NOT EXISTS idx_media_entity ON media(entity_id)"
+
+const mediaVecSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS media_vec USING vec1(vector, media_id)"
+
+const mediaRawSQL = "CREATE TABLE IF NOT EXISTS media_raw (media_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)"
+
+const mediaRebuildSQL = `INSERT INTO media_vec(cmd, arg) VALUES('rebuild', '{index:"flat"}')`
+
+# Virtual tables can't carry FK cascades. Triggers keep both vector stores
+# in sync: one on media delete, one on entity delete (media rows go with the
+# entity via the FK cascade; the media_id IN-subquery catches them on the
+# entity path). No delete path for entities exists in mizuya today, but the
+# trigger pair costs nothing and keeps the stores consistent however rows
+# disappear.
+const mediaCascadeSQL = "CREATE TRIGGER IF NOT EXISTS media_vec_after_media_delete AFTER DELETE ON media BEGIN DELETE FROM media_vec WHERE media_id = old.id; DELETE FROM media_raw WHERE media_id = old.id; END"
+
+const mediaEntityCascadeSQL = "CREATE TRIGGER IF NOT EXISTS media_vec_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM media_vec WHERE media_id IN (SELECT id FROM media WHERE entity_id = old.id); DELETE FROM media_raw WHERE media_id IN (SELECT id FROM media WHERE entity_id = old.id); END"
+
+# Virtual tables can't carry foreign-key cascades. A trigger keeps the
+# vector index in sync when an entity is deleted.
+const embeddingsCascadeSQL = "CREATE TRIGGER IF NOT EXISTS embeddings_after_entity_delete AFTER DELETE ON entities BEGIN DELETE FROM embeddings_vec WHERE entity_id = old.id; END"
+
+# --- FTS5 index ---
+# Vectors (embeddings) are deliberately NOT indexed here — FTS5 covers text
+# lookups; similarity search uses the registered vec_cosine_distance function.
+const entitiesFtsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(id, name, type, data, content=entities, content_rowid=rowid, tokenize='porter unicode61')"
+
+# --- FTS5 triggers keep the virtual table in sync ---
+
+const triggerAI = "CREATE TRIGGER IF NOT EXISTS entities_ai AFTER INSERT ON entities BEGIN INSERT INTO entities_fts(rowid, id, name, type, data) VALUES (new.rowid, new.id, new.name, new.type, new.data); END"
+
+const triggerAD = "CREATE TRIGGER IF NOT EXISTS entities_ad AFTER DELETE ON entities BEGIN INSERT INTO entities_fts(entities_fts, rowid, id, name, type, data) VALUES ('delete', old.rowid, old.id, old.name, old.type, old.data); END"
+
+const triggerAU = "CREATE TRIGGER IF NOT EXISTS entities_au AFTER UPDATE ON entities BEGIN INSERT INTO entities_fts(entities_fts, rowid, id, name, type, data) VALUES ('delete', old.rowid, old.id, old.name, old.type, old.data); INSERT INTO entities_fts(rowid, id, name, type, data) VALUES (new.rowid, new.id, new.name, new.type, new.data); END"
+
+# --- Indexes ---
+
+const idxRelDst = "CREATE INDEX IF NOT EXISTS idx_relations_dst ON relations(dst)"
+
+const idxEntityType = "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)"
+
+const idxEntityUpdated = "CREATE INDEX IF NOT EXISTS idx_entities_updated ON entities(updated_at)"
+
+# Observations are queried by entity in newest-first order; this
+# composite index serves listObservations without a sort.
+const idxObsEntity = "CREATE INDEX IF NOT EXISTS idx_observations_entity_at ON observations(entity_id, at DESC)"
+
+# Index for the drift command's distilled = 0 filter.
+const idxObsDistilled = "CREATE INDEX IF NOT EXISTS idx_observations_distilled ON observations(distilled, at DESC) WHERE distilled = 0"
+
+# Version log lookups: newest-first history per entity, and as-of reads.
+const idxEntityHistoryEntity = "CREATE INDEX IF NOT EXISTS idx_entity_history_entity ON entity_history(entity_id, changed_at DESC)"
+
+# Supersession chains: "which observation supersedes this one" (drift).
+const idxObsSupersedes = "CREATE INDEX IF NOT EXISTS idx_observations_supersedes ON observations(supersedes)"
+
+const migrateObsDistilledSQL = "ALTER TABLE observations ADD COLUMN distilled INTEGER NOT NULL DEFAULT 0"
+
+const migrateObsSupersedesSQL = "ALTER TABLE observations ADD COLUMN supersedes TEXT REFERENCES observations(id) ON DELETE SET NULL"
+
+# --- Spellfix1 fuzzy index over entity ids ---
+# spellfix1 is a virtual table that supports approximate-match lookups
+# against a vocabulary. We populate it from entities.id at startup so a
+# typo on the CLI ("--id sqilte") can suggest "sqlite". Rebuilt on every
+# initDB call (cheap at the scale we care about); switch to incremental
+# maintenance if entity churn ever makes this hot.
+const fuzzyIdsSQL = "CREATE VIRTUAL TABLE IF NOT EXISTS entity_ids_fuzzy USING spellfix1"
+
+# refreshFuzzyIds rebuilds the spellfix1 vtab from the non-archived
+# entities table. Cheap on small graphs; called from initDB and the
+# archive/unarchive paths so suggestions never name a hidden entity.
+const fuzzyIdsClearSQL = "DELETE FROM entity_ids_fuzzy"
+
+const fuzzyIdsPopulateSQL = "INSERT INTO entity_ids_fuzzy(word) SELECT id FROM entities WHERE archived_at IS NULL"
+
+# initDB creates all tables, the FTS5 virtual table, triggers, and indexes
+# inside a single transaction. Safe to call repeatedly.
+func initDB(pool: db.Pool) error
+    db.Transaction(pool, tx =>
+        db.TxExec(tx, entitiesSQL) onerr return
+        db.TxExec(tx, relationsSQL) onerr return
+        db.TxExec(tx, observationsSQL) onerr return
+        db.TxExec(tx, entityHistorySQL) onerr return
+        db.TxExec(tx, embeddingsSQL) onerr return
+        db.TxExec(tx, embeddingsRebuildSQL) onerr return
+        db.TxExec(tx, embeddingsCascadeSQL) onerr return
+        db.TxExec(tx, mediaSQL) onerr return
+        db.TxExec(tx, mediaUniqueSQL) onerr return
+        db.TxExec(tx, idxMediaEntitySQL) onerr return
+        db.TxExec(tx, mediaVecSQL) onerr return
+        db.TxExec(tx, mediaRawSQL) onerr return
+        db.TxExec(tx, mediaRebuildSQL) onerr return
+        db.TxExec(tx, mediaCascadeSQL) onerr return
+        db.TxExec(tx, mediaEntityCascadeSQL) onerr return
+        db.TxExec(tx, entitiesFtsSQL) onerr return
+        db.TxExec(tx, triggerAI) onerr return
+        db.TxExec(tx, triggerAD) onerr return
+        db.TxExec(tx, triggerAU) onerr return
+        db.TxExec(tx, idxRelDst) onerr return
+        db.TxExec(tx, idxEntityType) onerr return
+        db.TxExec(tx, idxEntityUpdated) onerr return
+        db.TxExec(tx, idxObsEntity) onerr return
+        db.TxExec(tx, idxObsDistilled) onerr return
+        db.TxExec(tx, idxObsSupersedes) onerr return
+        db.TxExec(tx, idxEntityHistoryEntity) onerr return
+        db.TxExec(tx, fuzzyIdsSQL) onerr return
+        return empty
+    )
+
+    migrateVec1Schema(pool) onerr return
+    migrateObsDistilled(pool) onerr return
+    migrateObsSupersedes(pool) onerr return
+    migrateArchivedAt(pool) onerr return
+    migrateTimestamps(pool) onerr return
+    # The spellfix vocabulary excludes archived entities; refresh it now
+    # that the archived_at column is guaranteed to exist.
+    refreshFuzzyIds(pool) onerr return
+    return empty
+
+# migrateObsDistilled adds the observations.distilled column for databases
+# created before it was folded into the CREATE TABLE statement.
+func migrateObsDistilled(pool: db.Pool) error
+    exists := sqlite.ColumnExists(pool, "observations", "distilled") onerr return
+    if exists
+        return empty
+    db.Exec(pool, migrateObsDistilledSQL) onerr return
+    return empty
+
+# migrateObsSupersedes adds the observations.supersedes column for
+# databases created before it was folded into the CREATE TABLE statement.
+func migrateObsSupersedes(pool: db.Pool) error
+    exists := sqlite.ColumnExists(pool, "observations", "supersedes") onerr return
+    if exists
+        return empty
+    db.Exec(pool, migrateObsSupersedesSQL) onerr return
+    return empty
+
+# migrateArchivedAt adds the entities.archived_at column for databases
+# created before soft-delete/archive support. NULL = live; a stamp =
+# the archive time. Archived entities are hidden from search, similar,
+# list, drift, fuzzy suggestions, and context neighbor lists; the row
+# and its history are kept, and the flag can be cleared (unarchive).
+func migrateArchivedAt(pool: db.Pool) error
+    exists := sqlite.ColumnExists(pool, "entities", "archived_at") onerr return
+    if exists
+        return empty
+    db.Exec(pool, "ALTER TABLE entities ADD COLUMN archived_at TEXT") onerr return
+    return empty
+
+# migrateTimestamps rewrites pre-ISO-8601 stamps (space separator, no
+# Z suffix) in place: 'YYYY-MM-DD HH:MM:SS[.SSS]' becomes
+# 'YYYY-MM-DDTHH:MM:SS[.SSS]Z'. Idempotent — only rows matching the
+# old shape are touched, so it is safe to run on every initDB.
+func migrateTimestamps(pool: db.Pool) error
+    stmts := list of string{
+        "UPDATE entities SET created_at = substr(created_at, 1, 10) || 'T' || substr(created_at, 12) || 'Z' WHERE created_at LIKE '____-__-__ __:__:__'",
+        "UPDATE entities SET updated_at = substr(updated_at, 1, 10) || 'T' || substr(updated_at, 12) || 'Z' WHERE updated_at LIKE '____-__-__ __:__:__'",
+        "UPDATE relations SET created_at = substr(created_at, 1, 10) || 'T' || substr(created_at, 12) || 'Z' WHERE created_at LIKE '____-__-__ __:__:__'",
+        "UPDATE observations SET at = substr(at, 1, 10) || 'T' || substr(at, 12) || 'Z' WHERE at LIKE '____-__-__ __:__:__.%'",
+        "UPDATE entity_history SET changed_at = substr(changed_at, 1, 10) || 'T' || substr(changed_at, 12) || 'Z' WHERE changed_at LIKE '____-__-__ __:__:__.%'",
+        "UPDATE media SET at = substr(at, 1, 10) || 'T' || substr(at, 12) || 'Z' WHERE at LIKE '____-__-__ __:__:__.%'",
+    }
+    for s in stmts
+        db.Exec(pool, s) onerr return
+    return empty
+
+# --- vec1 schema migration ---
+#
+# migrateVec1Schema upgrades the two historical vec1 layouts to the
+# current `vector, entity_id, model, dim` schema:
+#
+#   1. `vector, entity_id, model, dim, vec_raw`, whose BLOB metadata hit
+#      a tombstone-compression bug in vec1 wasm v6.3.35304
+#   2. `vector, entity_id` plus the old embeddings_raw side store
+#
+# Layouts are detected by the vec1 columns themselves, never by matching
+# DDL text: the `vec_raw` layout carries the current column list as a
+# prefix, so a substring probe for `entity_id, model, dim` matches it too
+# and silently skips its migration. Vectors are copied out through the
+# old vtab before it is dropped; the migration then installs model/dim
+# metadata, rebuilds the vec1 index, and drops embeddings_raw in the same
+# transaction. A database already on the current layout only sheds a
+# stale embeddings_raw side store.
+func migrateVec1Schema(pool: db.Pool) error
+    exists := sqlite.TableExists(pool, "embeddings_vec") onerr return
+    if not exists
+        return empty
+
+    legacyBlob := sqlite.ColumnExists(pool, "embeddings_vec", "vec_raw") onerr return
+    if legacyBlob
+        return rebuildVec1FromScratch(
+            pool,
+            "CREATE TABLE embeddings_vec_migrate AS SELECT vector, entity_id, model, dim FROM embeddings_vec",
+        )
+
+    # Current layout: the vtab is authoritative, so only a stale side store
+    # (or its trigger) left behind by an intermediate build needs shedding.
+    currentLayout := sqlite.ColumnExists(pool, "embeddings_vec", "model") onerr return
+    if currentLayout
+        stale := db.Count(
+            pool,
+            "SELECT count(*) FROM sqlite_schema WHERE name IN ('embeddings_raw', 'embeddings_raw_after_entity_delete')",
+        ) onerr return
+        if stale as int equals 0
+            return empty
+        db.Transaction(pool, tx =>
+            db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_raw") onerr return
+            db.TxExec(tx, "DROP TRIGGER IF EXISTS embeddings_raw_after_entity_delete") onerr return
+            return empty
+        ) onerr return
+        return empty
+
+    db.Exec(
+        pool,
+        "CREATE TABLE IF NOT EXISTS embeddings_raw (entity_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)",
+    ) onerr return
+    return rebuildVec1FromScratch(
+        pool,
+        "CREATE TABLE embeddings_vec_migrate AS SELECT v.vector, v.entity_id, COALESCE(r.model, 'unknown') AS model, COALESCE(r.dim, 0) AS dim FROM embeddings_vec v LEFT JOIN embeddings_raw r ON r.entity_id = v.entity_id",
+    )
+
+# rebuildVec1FromScratch upgrades a legacy vec1 layout in one transaction:
+# copy (vector, entity_id, model, dim) out through a scratch table populated
+# by selectSQL, drop the old vtab, install the current layout, repopulate,
+# rebuild the index, and shed the raw side store. A scratch table left by an
+# interrupted manual attempt is dropped first so it cannot block startup.
+func rebuildVec1FromScratch(pool: db.Pool, selectSQL: string) error
+    return db.Transaction(pool, tx =>
+        db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_vec_migrate") onerr return
+        db.TxExec(tx, selectSQL) onerr return
+        db.TxExec(tx, "DROP TABLE embeddings_vec") onerr return
+        db.TxExec(tx, embeddingsSQL) onerr return
+        db.TxExec(
+            tx,
+            "INSERT INTO embeddings_vec(vector, entity_id, model, dim) SELECT vector, entity_id, model, dim FROM embeddings_vec_migrate",
+        ) onerr return
+        db.TxExec(tx, embeddingsRebuildSQL) onerr return
+        db.TxExec(tx, "DROP TABLE IF EXISTS embeddings_raw") onerr return
+        db.TxExec(tx, "DROP TRIGGER IF EXISTS embeddings_raw_after_entity_delete") onerr return
+        db.TxExec(tx, "DROP TABLE embeddings_vec_migrate") onerr return
+        return empty
+    )

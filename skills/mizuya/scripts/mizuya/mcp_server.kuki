@@ -1,0 +1,998 @@
+# mizuya — MCP server: stdio by default, or stateless streamable HTTP behind
+# a bearer token (`--http`, see mcp_http.kuki). Registers 10 tools so AI
+# agents (Claude Desktop, etc.) can interact with the knowledge graph over
+# the Model Context Protocol.
+
+petiole main
+
+import "stdlib/db"
+import "stdlib/encoding"
+import "stdlib/env"
+import "stdlib/files"
+import "stdlib/json" as jsonpkg
+import "stdlib/jsonschema"
+import "stdlib/log"
+import "stdlib/mcp"
+import "stdlib/profile"
+import "stdlib/slice"
+import "stdlib/sqlite"
+import "stdlib/string" as strpkg
+
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+type ToolArgs = map of string to any
+
+# Tool argument structs — bound to each tool at registration via `mcp.ToolWithOpts of T`.
+# JSON tags match the snake_case property names declared in the tool's schema.
+
+type upsertEntityArgs
+    Id: string as "id"
+    Type: string as "type"
+    Name: string as "name"
+    Summary: string as "summary"
+    Tags: list of string as "tags"
+
+type addObservationArgs
+    EntityId: string as "entity_id"
+    Text: string as "text"
+    Source: string as "source"
+    Supersedes: string as "supersedes"
+
+type relateArgs
+    Src: string as "src"
+    Rel: string as "rel"
+    Dst: string as "dst"
+
+type searchArgs
+    Query: string as "query"
+    Limit: int as "limit"
+    Type: string as "type"
+    Tag: string as "tag"
+    Since: string as "since"
+    Until: string as "until"
+
+type getContextArgs
+    Id: string as "id"
+    Depth: int as "depth"
+    History: bool as "history"
+    Since: string as "since"
+    Until: string as "until"
+    HideSuperseded: optional reference bool as "hide_superseded"
+
+type searchObservationsArgs
+    Text: string as "text"
+    EntityId: string as "entity_id"
+    Limit: int as "limit"
+
+type archiveEntityArgs
+    Id: string as "id"
+    Archived: bool as "archived"
+
+type attachMediaArgs
+    Id: string as "id"
+    File: string as "file"
+    DataBase64: string as "data_base64"
+    Mime: string as "mime"
+    Kind: string as "kind"
+    Caption: string as "caption"
+    Name: string as "name"
+    Source: string as "source"
+
+type similarMediaArgs
+    File: string as "file"
+    DataBase64: string as "data_base64"
+    Mime: string as "mime"
+    Kind: string as "kind"
+    Limit: int as "limit"
+
+type similarArgs
+    Id: string as "id"
+    Text: string as "text"
+    Limit: int as "limit"
+    Threshold: int as "threshold"
+    Type: string as "type"
+    Tag: string as "tag"
+    Since: string as "since"
+    Until: string as "until"
+
+# mcpDBPath is the database path used by the MCP server, set from the
+# --db flag before starting the server.
+var mcpDBPath = ".mizuya/mizuya.db"
+
+# startMCP creates the MCP server, registers all tools, and runs it. With
+# httpAddr empty it speaks stdio (blocking) — the MCP client owns the
+# process. Otherwise it serves stateless streamable HTTP at httpAddr behind
+# the bearer token (see mcp_http.kuki); token is already validated.
+func startMCP(dbPath: string, httpAddr: string, token: string) error
+    mcpDBPath = dbPath
+
+    router := mcp.NewRouter()
+    entityTemplate := 'entity://{id}'
+    router.AddResource(entityTemplate, func(argName: string, partial: string, prevArgs: map of string to string) list of string
+        # Self-initializes and registers extensions, like every other pool.
+        pool := openMCPPool() onerr return empty list of string
+        defer
+            db.Close(pool) onerr discard
+        entities := listEntities(pool, "", 500) onerr return empty list of string
+        return entities
+            |> slice.Filter(e => strpkg.HasPrefix(e.Id, partial))
+            |> slice.Map(e => e.Id)
+    )
+
+    server := mcp.NewWithCompletion("mizuya", Version, router.Handler())
+    registerTools(server)
+    registerResources(server)
+    serve := func() error
+        if httpAddr isnt empty
+            return startMCPHTTP(server, httpAddr, token)
+        return mcp.Serve(server)
+    # CPU profiling is opt-in: MIZUYA_CPU_PROFILE names the output path.
+    profilePath := env.GetOr("MIZUYA_CPU_PROFILE", "")
+    if profilePath isnt empty
+        log.Info("CPU profile enabled", "path", profilePath)
+        profile.CPU(profilePath, serve) onerr return
+        return empty
+    return serve()
+
+# registerResources exposes knowledge graph data as MCP resources.
+# entity://list — snapshot of all entities (name, type, summary).
+# entity://{id} — full context for one entity (data + observations + relations).
+func registerResources(server: reference mcp.Server)
+    mcp.TextResource(
+        server,
+        "entity://list",
+        "Entity list",
+        "All knowledge-graph entities",
+        mcp.TextResourceFunc(listEntitiesResource),
+    )
+    entityTemplate := 'entity://{id}'
+    mcp.TextResourceTemplate(
+        server,
+        entityTemplate,
+        "Entity context",
+        "Full context: data, observations, and relations for an entity",
+        mcp.TextResourceFunc(entityContextResource),
+    )
+
+func listEntitiesResource(uri: string) (string, error)
+    pool := openMCPPool() onerr return "", error
+    defer
+        db.Close(pool) onerr discard
+    entities := listEntities(pool, "", 500) onerr return "", error
+    data := jsonpkg.PrettyBytes(entities) onerr return "", error
+    return data as string, empty
+
+func entityContextResource(uri: string) (string, error)
+    id := strpkg.TrimPrefix(uri, "entity://")
+    if id is empty
+        return "", error "missing entity ID in URI: {uri}"
+
+    pool := openMCPPool() onerr return "", error
+    defer
+        db.Close(pool) onerr discard
+
+    archived, aerr := isArchived(pool, id)
+    if aerr isnt empty
+        return "", aerr
+    if archived
+        return "", error "entity {id} is archived; unarchive it first (archive_entity with archived=false)"
+    e := getEntity(pool, id) onerr explain "entity not found: {id}"
+    outgoing := outgoingContext(pool, id) onerr return "", error
+    incoming := incomingContext(pool, id) onerr return "", error
+    obs := listObservationsRange(pool, id, "", "", true) onerr return "", error
+    atts := listMedia(pool, id) onerr return "", error
+
+    payload := ToolArgs{
+        "entity": e,
+        "outgoing": outgoing,
+        "incoming": incoming,
+        "observations": obs,
+        "attachments": atts,
+    }
+    data := jsonpkg.PrettyBytes(payload) onerr return "", error
+    return data as string, empty
+
+# registerTools adds all 10 knowledge graph tools to the MCP server.
+func registerTools(server: reference mcp.Server)
+    registerUpsertEntity(server)
+    registerAddObservation(server)
+    registerRelate(server)
+    registerSearchTool(server)
+    registerSearchObservations(server)
+    registerGetContext(server)
+    registerSimilarTool(server)
+    registerAttachMedia(server)
+    registerSimilarMedia(server)
+    registerArchiveEntity(server)
+
+# --- Tool: upsert_entity ---
+
+func registerUpsertEntity(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "id",
+            jsonschema.String,
+            "Unique slug, e.g. 'kukicha' or 'vllm-h100-deploy'",
+        ),
+        jsonschema.Prop("type", jsonschema.String, "Entity type: {validEntityTypes()}"),
+        jsonschema.Prop("name", jsonschema.String, "Human-readable name"),
+        jsonschema.Prop("summary", jsonschema.String, "One-line description"),
+        jsonschema.Prop(
+            "tags",
+            jsonschema.Array,
+            "JSON array of string tags, e.g. [\"mcp\", \"memory\"]. The CLI takes a comma-separated list; over MCP a tag containing a comma is rejected.",
+        ),
+    })
+        |> jsonschema.Required(list of string{"id", "type", "name"})
+
+    mcp.ToolWithOpts of upsertEntityArgs(
+        server,
+        "upsert_entity",
+        "Create or update a knowledge graph entity. Use for projects, tools, people, concepts.",
+        schema,
+        mcp.ToolOpts{Idempotent: true},
+        handleUpsertEntity,
+    )
+
+func handleUpsertEntity(args: upsertEntityArgs) (any, error)
+    if (args.Id is empty) or (args.Name is empty)
+        return mcp.ErrorResult("id and name are required"), empty
+
+    for _, tag in args.Tags
+        if strpkg.Contains(tag, ",")
+            return mcp.ErrorResult(
+                "tag {tag} contains a comma; tags must be a JSON array of strings, e.g. [\"a\", \"b\"] — split it or drop the comma",
+            ), empty
+
+    etype := strpkg.ToLower(strpkg.TrimSpace(args.Type))
+    if etype is empty
+        etype = "concept"
+    if _, perr := ParseEntityType(etype); perr isnt empty
+        return mcp.ErrorResult("invalid type {etype} (valid: {validEntityTypes()})"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    _, uerr := upsertEntity(pool, args.Id, etype, args.Name, args.Summary, args.Tags)
+    if uerr isnt empty
+        return mcp.ErrorResult("upsert failed: {uerr}"), empty
+
+    # The write committed; a provider outage must not report failure —
+    # an agent that retries on failure would append a duplicate. Log the
+    # deferral (stderr) and return the stored entity; the vector refreshes
+    # on a later touch (content_hash only advances on a successful embed).
+    if rerr := reEmbed(pool, args.Id); rerr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            args.Id,
+            "err",
+            "{rerr}",
+        )
+
+    e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("fetch failed: {error}"), empty
+    return entityJSON(e), empty
+
+# --- Tool: add_observation ---
+
+func registerAddObservation(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop("entity_id", jsonschema.String, "Entity to observe"),
+        jsonschema.Prop("text", jsonschema.String, "The observation text"),
+        jsonschema.Prop(
+            "source",
+            jsonschema.String,
+            "Source label (default: conversation). Normalized to lowercase with surrounding whitespace stripped; conventional vocabulary: user, session, retro, conversation.",
+        ),
+        jsonschema.Prop(
+            "supersedes",
+            jsonschema.String,
+            "Id of an observation on this entity that this one corrects. The old observation is kept (append-only); this link marks it superseded. Omit when correcting nothing.",
+        ),
+    })
+        |> jsonschema.Required(list of string{"entity_id", "text"})
+
+    mcp.ToolWithOpts of addObservationArgs(
+        server,
+        "add_observation",
+        "Record a fact or note about an entity. Appended to the entity's observation history — never overwrites; pass supersedes to correct an earlier observation. Returns a JSON object with status, id (entity id), observation_id, entity_id, text, source, at, supersedes (null when not correcting), and redacted (secrets scrubbed before storing).",
+        schema,
+        mcp.ToolOpts{Destructive: true},
+        handleAddObservation,
+    )
+
+func handleAddObservation(args: addObservationArgs) (any, error)
+    if (args.EntityId is empty) or (args.Text is empty)
+        return mcp.ErrorResult("entity_id and text are required"), empty
+
+    source := args.Source
+    if source is empty
+        source = "conversation"
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    obs, oerr := addObservation(pool, args.EntityId, args.Text, source, args.Supersedes)
+    if oerr isnt empty
+        return mcp.ErrorResult("observe failed: {oerr}{suggestionsFor(pool, args.EntityId)}"), empty
+
+    # The write committed; a provider outage must not report failure —
+    # an agent that retries on failure would append a duplicate observation.
+    # Surface the deferral as a field instead of an error.
+    embedDeferred := false
+    if rerr := reEmbed(pool, args.EntityId); rerr isnt empty
+        log.Warn(
+            "mizuya: write committed; embedding refresh failed, vector deferred until next touch",
+            "id",
+            args.EntityId,
+            "err",
+            "{rerr}",
+        )
+        embedDeferred = true
+
+    payload := ToolArgs{
+        "status": "observed",
+        "id": obs.EntityId,
+        "observation_id": obs.Id,
+        "entity_id": obs.EntityId,
+        "text": obs.Text,
+        "source": obs.Source,
+        "at": obs.At,
+        "supersedes": obs.Supersedes,
+        "redacted": obs.Redacted,
+    }
+    if embedDeferred
+        payload["embedding"] = "deferred"
+    data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: relate ---
+
+func registerRelate(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop("src", jsonschema.String, "Source entity id"),
+        jsonschema.Prop(
+            "rel",
+            jsonschema.String,
+            "Relation label: uses, depends_on, part_of, related_to, authored_by",
+        ),
+        jsonschema.Prop("dst", jsonschema.String, "Destination entity id"),
+    })
+        |> jsonschema.Required(list of string{"src", "rel", "dst"})
+
+    mcp.ToolWithOpts of relateArgs(
+        server,
+        "relate",
+        "Create a typed edge between two entities in the knowledge graph.",
+        schema,
+        mcp.ToolOpts{Idempotent: true},
+        handleRelate,
+    )
+
+func handleRelate(args: relateArgs) (any, error)
+    if (args.Src is empty) or (args.Rel is empty) or (args.Dst is empty)
+        return mcp.ErrorResult("src, rel, and dst are required"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    storedRel, rerr := relate(pool, args.Src, args.Rel, args.Dst)
+    if rerr isnt empty
+        return mcp.ErrorResult("relate failed: {rerr}"), empty
+
+    payload := ToolArgs{
+        "status": "related",
+        "src": args.Src,
+        "rel": storedRel,
+        "dst": args.Dst,
+    }
+    data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: search ---
+
+func registerSearchTool(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "query",
+            jsonschema.String,
+            "Search query (keywords for BM25, also embedded for semantic similarity in hybrid mode)",
+        ),
+        jsonschema.Prop(
+            "limit",
+            jsonschema.Integer,
+            "Hits returned (default 10). Each hit is a full entity record, so limit is what this call costs in tokens to read.",
+        ),
+        jsonschema.Prop(
+            "type",
+            jsonschema.String,
+            "Restrict to this entity type (" + validEntityTypes() + "); omit for any",
+        ),
+        jsonschema.Prop(
+            "tag",
+            jsonschema.String,
+            "Restrict to entities carrying this tag; omit for any",
+        ),
+        jsonschema.Prop(
+            "since",
+            jsonschema.String,
+            "Only entities updated on/after this YYYY-MM-DD. Ranking weighs relevance, not age — pass this for the latest word on a topic.",
+        ),
+        jsonschema.Prop(
+            "until",
+            jsonschema.String,
+            "Only entities updated on/before this YYYY-MM-DD (whole day inclusive)",
+        ),
+    })
+        |> jsonschema.Required(list of string{"query"})
+
+    mcp.ToolWithOpts of searchArgs(
+        server,
+        "search",
+        "Search the knowledge graph. Returns entities matching the query using hybrid search (BM25 keyword + cosine vector similarity merged by RRF). Each hit carries id, type, name, summary, updated_at, and its RRF score; drill into a hit with get_context.",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSearch,
+    )
+
+func handleSearch(args: searchArgs) (any, error)
+    if args.Query is empty
+        return mcp.ErrorResult("query is required"), empty
+
+    limit := args.Limit
+    if limit equals 0
+        limit = 10
+
+    typeFilter, tfErr := mcpTypeFilter(args.Type)
+    if tfErr isnt empty
+        return mcp.ErrorResult("{tfErr}"), empty
+    if dErr := mcpDateFilter(args.Since, args.Until); dErr isnt empty
+        return mcp.ErrorResult("{dErr}"), empty
+
+    filter := SearchFilter{Type: typeFilter, Tag: args.Tag, Since: args.Since, Until: args.Until}
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    hits := hybridSearch(pool, args.Query, limit, filter) onerr return mcp.ErrorResult("search failed: {error}"), empty
+
+    data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: get_context ---
+
+func registerGetContext(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop("id", jsonschema.String, "Entity id to get context for"),
+        jsonschema.Prop(
+            "depth",
+            jsonschema.Integer,
+            "Hops to traverse (1 = immediate neighbors, default 1)",
+        ),
+        jsonschema.Prop(
+            "history",
+            jsonschema.Boolean,
+            "Also return the entity's append-only version history (how its conception changed over time, newest first). Default false.",
+        ),
+        jsonschema.Prop("since", jsonschema.String, "Only observations on/after this YYYY-MM-DD"),
+        jsonschema.Prop(
+            "until",
+            jsonschema.String,
+            "Only observations on/before this YYYY-MM-DD (whole day inclusive)",
+        ),
+        jsonschema.Prop(
+            "hide_superseded",
+            jsonschema.Boolean,
+            "Omit observations that a newer observation supersedes. Default true: superseded observations are omitted unless you pass false, in which case they are included, flagged via their superseded_by field. Observations are always newest-first.",
+        ),
+    })
+        |> jsonschema.Required(list of string{"id"})
+
+    mcp.ToolWithOpts of getContextArgs(
+        server,
+        "get_context",
+        "Get full context for an entity: its data, observations (each with id, text, source, at, supersedes, superseded_by; always newest-first; superseded ones hidden unless hide_superseded=false), and related entities up to depth hops (default 1). Set history=true to also see how the entity's stored state changed over time. Refuses archived entities.",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleGetContext,
+    )
+
+func handleGetContext(args: getContextArgs) (any, error)
+    if args.Id is empty
+        return mcp.ErrorResult("id is required"), empty
+
+    depth := args.Depth
+    if depth < 1
+        depth = 1
+
+    if dErr := mcpDateFilter(args.Since, args.Until); dErr isnt empty
+        return mcp.ErrorResult("{dErr}"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    hideSuperseded := true
+    if args.HideSuperseded isnt empty
+        hideSuperseded = dereference args.HideSuperseded
+
+    archived, aerr := isArchived(pool, args.Id)
+    if aerr isnt empty
+        return mcp.ErrorResult("cannot check archive state: {aerr}"), empty
+    if archived
+        return mcp.ErrorResult(
+            "entity {args.Id} is archived; unarchive it first (archive_entity with archived=false)",
+        ), empty
+
+    e := getEntity(pool, args.Id) onerr return mcp.ErrorResult("entity not found: {error}{suggestionsFor(pool, args.Id)}"), empty
+    obs := listObservationsRange(pool, args.Id, args.Since, args.Until, hideSuperseded) onerr return mcp.ErrorResult("cannot read observations: {error}"), empty
+    atts := listMedia(pool, args.Id) onerr return mcp.ErrorResult("cannot read media attachments: {error}"), empty
+
+    hist := empty list of HistoryRow
+    if args.History
+        hist = listEntityHistory(pool, args.Id, 50) onerr return mcp.ErrorResult("cannot read history: {error}"), empty
+
+    if depth > 1
+        outReach := reachableOutgoing(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read outgoing neighbors: {error}"), empty
+        inReach := reachableIncoming(pool, args.Id, depth) onerr return mcp.ErrorResult("cannot read incoming neighbors: {error}"), empty
+
+        payload := ToolArgs{
+            "entity": e,
+            "depth": depth,
+            "outgoing": outReach,
+            "incoming": inReach,
+            "observations": obs,
+            "attachments": atts,
+        }
+        if args.History
+            payload["history"] = hist
+        data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+        return mcp.TextResult(data as string), empty
+
+    outgoing := outgoingContext(pool, args.Id) onerr return mcp.ErrorResult("cannot read outgoing: {error}"), empty
+    incoming := incomingContext(pool, args.Id) onerr return mcp.ErrorResult("cannot read incoming: {error}"), empty
+
+    payload := ToolArgs{
+        "entity": e,
+        "outgoing": outgoing,
+        "incoming": incoming,
+        "observations": obs,
+        "attachments": atts,
+    }
+    if args.History
+        payload["history"] = hist
+
+    data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: similar ---
+
+func registerSimilarTool(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop("id", jsonschema.String, "Use this entity's embedding as the query vector"),
+        jsonschema.Prop("text", jsonschema.String, "Embed this text and use it as the query vector"),
+        jsonschema.Prop(
+            "limit",
+            jsonschema.Integer,
+            "Maximum results (default: 5; ignored when threshold is set)",
+        ),
+        jsonschema.Prop(
+            "threshold",
+            jsonschema.Integer,
+            "Return every stored entity whose cosine distance to the query falls within the closest N percentile of all distances (integer 1-100; 100 = every stored entity after filters). Overrides limit when set. Omit or 0 to use limit (default 5).",
+        ),
+        jsonschema.Prop("type", jsonschema.String, "Restrict to this entity type; omit for any"),
+        jsonschema.Prop(
+            "tag",
+            jsonschema.String,
+            "Restrict to entities carrying this tag; omit for any",
+        ),
+        jsonschema.Prop(
+            "since",
+            jsonschema.String,
+            "Only entities updated on/after this YYYY-MM-DD",
+        ),
+        jsonschema.Prop(
+            "until",
+            jsonschema.String,
+            "Only entities updated on/before this YYYY-MM-DD (whole day inclusive)",
+        ),
+    })
+
+    mcp.ToolWithOpts of similarArgs(
+        server,
+        "similar",
+        "Vector similarity search. Provide either id (use entity's embedding) or text (embed on the fly). Use threshold for percentile-based cutoff when k is unknown.",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSimilar,
+    )
+
+func handleSimilar(args: similarArgs) (any, error)
+    if (args.Id is empty) and (args.Text is empty)
+        return mcp.ErrorResult("either id or text is required"), empty
+
+    limit := args.Limit
+    if limit equals 0
+        limit = 5
+
+    if args.Threshold < 0 or args.Threshold > 100
+        return mcp.ErrorResult("threshold must be in [1, 100], got {args.Threshold}"), empty
+    typeFilter, tfErr := mcpTypeFilter(args.Type)
+    if tfErr isnt empty
+        return mcp.ErrorResult("{tfErr}"), empty
+    if dErr := mcpDateFilter(args.Since, args.Until); dErr isnt empty
+        return mcp.ErrorResult("{dErr}"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    vec := empty list of float64
+    if args.Id isnt empty
+        vec = getEmbedding(pool, args.Id) onerr return mcp.ErrorResult("no embedding for {args.Id}: {error}{suggestionsFor(pool, args.Id)}"), empty
+    else
+        vec = embedText(args.Text) onerr return mcp.ErrorResult("embed failed: {error}"), empty
+
+    filter := SearchFilter{Type: typeFilter, Tag: args.Tag, Since: args.Since, Until: args.Until}
+    hits := empty list of SimilarHit
+    if args.Threshold > 0
+        hits = similarByPercentile(pool, vec, args.Threshold, filter) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+    else
+        hits = similar(pool, vec, limit, filter) onerr return mcp.ErrorResult("similarity search failed: {error}"), empty
+
+    data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: attach_media ---
+
+func registerAttachMedia(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "id",
+            jsonschema.String,
+            "Entity to attach the media to. Omit to auto-create a media-native entity (type=media, id = media-<sha256>).",
+        ),
+        jsonschema.Prop(
+            "file",
+            jsonschema.String,
+            "Host-local path to the media file (preferred for stdio MCP). Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "data_base64",
+            jsonschema.String,
+            "Base64-encoded bytes (for non-shared filesystems). Requires mime. Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "mime",
+            jsonschema.String,
+            "MIME type (required with data_base64; inferred from extension otherwise)",
+        ),
+        jsonschema.Prop(
+            "kind",
+            jsonschema.String,
+            "image, audio, or video (default: inferred from extension). Video is frame-sampled (≤10 evenly spaced keyframes) and mean-pooled.",
+        ),
+        jsonschema.Prop(
+            "caption",
+            jsonschema.String,
+            "Free-text caption. Passes the same fail-closed secret gate as observations — redacted in place; the stored caption is what gets embedded/returned. Bytes themselves are never scanned.",
+        ),
+        jsonschema.Prop(
+            "name",
+            jsonschema.String,
+            "Name for an auto-created media-native entity (default: file basename)",
+        ),
+        jsonschema.Prop("source", jsonschema.String, "Source label (default: agent)"),
+    })
+
+    mcp.ToolWithOpts of attachMediaArgs(
+        server,
+        "attach_media",
+        "Attach a media file (image, audio, or video) to the knowledge graph — to an existing entity, or as a new media-native entity when id is omitted. Bytes are stored sha256-addressed and embedded via the configured provider; the bytes are never secret-scanned and the caption gate is the only text-redaction path. Video is frame-sampled with ffmpeg and mean-pooled into one vector. Returns confirmation text; get_context lists attachments.",
+        schema,
+        mcp.ToolOpts{Idempotent: true, Destructive: true},
+        handleAttachMedia,
+    )
+
+func handleAttachMedia(args: attachMediaArgs) (any, error)
+    hasFile := args.File isnt empty
+    hasB64 := args.DataBase64 isnt empty
+    if hasFile and hasB64
+        return mcp.ErrorResult("pass only one of file and data_base64"), empty
+    if not hasFile and not hasB64
+        return mcp.ErrorResult("either file or data_base64 is required"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    aa := AttachArgs{
+        Id: args.Id,
+        File: args.File,
+        Kind: args.Kind,
+        Mime: args.Mime,
+        Caption: args.Caption,
+        Name: args.Name,
+        Source: args.Source,
+    }
+
+    if hasFile
+        res, aerr := attachMediaFile(pool, mcpDBPath, aa)
+        if aerr isnt empty
+            return mcp.ErrorResult("attach failed: {aerr}"), empty
+        return attachMediaText(res)
+
+    if args.Mime is empty
+        return mcp.ErrorResult("mime is required with data_base64"), empty
+    raw, dErr := encoding.Base64Decode(args.DataBase64)
+    if dErr isnt empty
+        return mcp.ErrorResult("data_base64 is not valid base64: {dErr}"), empty
+    res, aerr := attachMediaBytes(pool, mcpDBPath, aa, raw, "")
+    if aerr isnt empty
+        return mcp.ErrorResult("attach failed: {aerr}"), empty
+    return attachMediaText(res)
+
+# queryMediaVector computes the query vector for the similar_media tool:
+# file input goes through the shared query path (image/audio embed
+# directly; video is frame-sampled and mean-pooled); data_base64 input
+# supports image/audio only — a video needs a host file path.
+func queryMediaVector(args: similarMediaArgs) (list of float64, error)
+    if args.File isnt empty
+        if not files.Exists(args.File)
+            return empty list of float64, error "file not found: {args.File}"
+        vec, _, err := embedFileQuery(args.File)
+        if err isnt empty
+            return empty list of float64, err
+        return vec, empty
+    if args.Mime is empty
+        return empty list of float64, error "mime is required with data_base64"
+    raw := encoding.Base64Decode(args.DataBase64) onerr return empty list of float64, error "data_base64 is not valid base64: {error:w}"
+    kind, err := inferMediaKind("", args.Mime)
+    if err isnt empty
+        return empty list of float64, err
+    if kind equals "video"
+        return empty list of float64, error "video via data_base64 is not supported yet; pass a host-local file path instead"
+    return embedMedia(kind, raw)
+
+# attachMediaText renders the attach_media confirmation. A no-op
+# (already-attached) says so explicitly instead of crediting a redaction
+# of text that was never stored.
+func attachMediaText(res: AttachResult) (any, error)
+    if res.Status equals "already-attached"
+        return mcp.TextResult(
+            "already-attached: media {res.MediaId} already on entity {res.EntityId}; nothing stored. [bytes unscanned]",
+        ), empty
+    redactNote := ""
+    if res.Redacted > 0
+        redactNote = " (redacted {res.Redacted} secret(s) before storing)"
+    embedNote := ""
+    if res.EmbedDeferred
+        embedNote = " (embedding deferred)"
+    return mcp.TextResult(
+        "{res.Status}: media {res.MediaId} on entity {res.EntityId} ({res.Kind}, {res.Bytes} B){redactNote}{embedNote} [bytes unscanned]",
+    ), empty
+
+# --- Tool: similar_media ---
+
+func registerSimilarMedia(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "file",
+            jsonschema.String,
+            "Host-local path to the query media file (preferred). Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "data_base64",
+            jsonschema.String,
+            "Base64-encoded query media (for non-shared filesystems). Requires mime. Pass exactly one of file / data_base64.",
+        ),
+        jsonschema.Prop(
+            "mime",
+            jsonschema.String,
+            "MIME type (required with data_base64; inferred from the file extension otherwise)",
+        ),
+        jsonschema.Prop(
+            "kind",
+            jsonschema.String,
+            "Narrow hits to image, audio, or video (default: any)",
+        ),
+        jsonschema.Prop("limit", jsonschema.Integer, "Max results (default: 5)"),
+    })
+
+    mcp.ToolWithOpts of similarMediaArgs(
+        server,
+        "similar_media",
+        "Vector similarity search over stored media attachments (cosine distance, nearest first). Unlike `similar` (which returns entities), this returns the attachments themselves — ids, owning entity, kind, caption, distance — so you can drill into an attachment with get_context on its entity_id. Bytes are embedded via the configured provider; media and text must live in one space (reembed).",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSimilarMedia,
+    )
+
+func handleSimilarMedia(args: similarMediaArgs) (any, error)
+    hasFile := args.File isnt empty
+    hasB64 := args.DataBase64 isnt empty
+    if hasFile and hasB64
+        return mcp.ErrorResult("pass only one of file and data_base64"), empty
+    if not hasFile and not hasB64
+        return mcp.ErrorResult("either file or data_base64 is required"), empty
+    limit := args.Limit
+    if limit <= 0
+        limit = 5
+    kind := strpkg.ToLower(strpkg.TrimSpace(args.Kind))
+    if kind isnt empty and kind isnt "image" and kind isnt "audio" and kind isnt "video"
+        return mcp.ErrorResult("kind must be image, audio, or video, got {args.Kind}"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    vec, qErr := queryMediaVector(args)
+    if qErr isnt empty
+        return mcp.ErrorResult("{qErr}"), empty
+
+    probe := db.Query(pool, "SELECT dim FROM media_raw LIMIT 1") |> db.ScanAll of dimRow
+    if probe isnt empty and probe[0].Dim isnt len(vec)
+        return mcp.ErrorResult(
+            "media query ({len(vec)}d) and media index ({probe[0].Dim}d) disagree; run `mizuya reembed` with the multimodal provider",
+        ), empty
+
+    hits := searchMedia(pool, vec, limit, kind) onerr return mcp.ErrorResult("media similarity search failed: {error}"), empty
+
+    data := jsonpkg.PrettyBytes(hits) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: search_observations ---
+
+func registerSearchObservations(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop(
+            "text",
+            jsonschema.String,
+            "Literal case-insensitive substring to find in observation text (not a regex)",
+        ),
+        jsonschema.Prop(
+            "entity_id",
+            jsonschema.String,
+            "Narrow to observations on this entity; omit to search across all entities",
+        ),
+        jsonschema.Prop(
+            "limit",
+            jsonschema.Integer,
+            "Max observations returned (default 10), newest first",
+        ),
+    })
+        |> jsonschema.Required(list of string{"text"})
+
+    mcp.ToolWithOpts of searchObservationsArgs(
+        server,
+        "search_observations",
+        "Search observation texts by literal substring, newest first. This is the lookup that yields the id to pass as supersedes when correcting an earlier observation. Each row carries id, text, source, at, supersedes, superseded_by (null when absent).",
+        schema,
+        mcp.ToolOpts{ReadOnly: true},
+        handleSearchObservations,
+    )
+
+func handleSearchObservations(args: searchObservationsArgs) (any, error)
+    if args.Text is empty
+        return mcp.ErrorResult("text is required"), empty
+
+    limit := args.Limit
+    if limit <= 0
+        limit = 10
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    rows := searchObservations(pool, args.Text, args.EntityId, limit) onerr return mcp.ErrorResult("search failed: {error}"), empty
+
+    data := jsonpkg.PrettyBytes(rows) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Tool: archive_entity ---
+
+func registerArchiveEntity(server: reference mcp.Server)
+    schema := jsonschema.Schema(list of jsonschema.Property{
+        jsonschema.Prop("id", jsonschema.String, "Entity to archive or unarchive"),
+        jsonschema.Prop(
+            "archived",
+            jsonschema.Boolean,
+            "true to archive (hide from search, similar, list, drift, suggestions, neighbor lists, and get_context); false to restore",
+        ),
+    })
+        |> jsonschema.Required(list of string{"id", "archived"})
+
+    mcp.ToolWithOpts of archiveEntityArgs(
+        server,
+        "archive_entity",
+        "Archive or unarchive an entity (soft delete). Archiving hides the entity from every read path — search, similar, list, drift, suggestions, neighbor lists, and get_context all refuse or skip it — while keeping the row, its observations, relations, and history. Writes to an archived entity are still allowed. Unarchive with archived=false. updated_at is not bumped and no history row is appended.",
+        schema,
+        mcp.ToolOpts{Idempotent: true},
+        handleArchiveEntity,
+    )
+
+func handleArchiveEntity(args: archiveEntityArgs) (any, error)
+    if args.Id is empty
+        return mcp.ErrorResult("id is required"), empty
+
+    pool := openMCPPool() onerr return mcp.ErrorResult("cannot open database: {error}"), empty
+    defer
+        db.Close(pool) onerr discard
+
+    setEntityArchived(pool, args.Id, args.Archived) onerr return mcp.ErrorResult("{error}"), empty
+
+    status := "archived"
+    if not args.Archived
+        status = "unarchived"
+    payload := ToolArgs{
+        "status": status,
+        "id": args.Id,
+    }
+    data := jsonpkg.PrettyBytes(payload) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
+
+# --- Helpers ---
+
+# mcpTypeFilter normalizes and validates an MCP-supplied entity type
+# argument against the enum (lowercased; empty means "no type given").
+# An error return names the bad value and the valid set — the closed-set
+# contract at the tool boundary, same as the CLI flag.
+func mcpTypeFilter(raw: string) (string, error)
+    t := strpkg.ToLower(strpkg.TrimSpace(raw))
+    if t is empty
+        return "", empty
+    if _, perr := ParseEntityType(t); perr isnt empty
+        return "", error "invalid type {raw} (valid: {validEntityTypes()})"
+    return t, empty
+
+# mcpDateFilter validates optional YYYY-MM-DD bounds as real calendar
+# dates. Empty bounds are unbounded.
+func mcpDateFilter(since: string, until: string) error
+    if since isnt empty and not validDate(since)
+        return error "since must be YYYY-MM-DD, got {since}"
+    if until isnt empty and not validDate(until)
+        return error "until must be YYYY-MM-DD, got {until}"
+    return empty
+
+# openMCPPool opens the database, registers the SQLite extensions
+# referenced at runtime (vec1 for embeddings, uuid for observation
+# id defaults), and runs initDB.
+func openMCPPool() (db.Pool, error)
+    pool := sqlite.OpenWithExtensions(
+        mcpDBPath,
+        map of string to string{"journal_mode": "WAL"},
+        fts5ext.Register,
+        statsext.Register,
+        unicodeext.Register,
+        vec1ext.Register,
+        uuidext.Register,
+        spellfixext.Register,
+        regexpext.Register,
+    ) onerr return
+    # initDB also re-populates the spellfix vtab, so no separate
+    # refreshFuzzyIds call is needed here.
+    initDB(pool) onerr return
+    return pool, empty
+
+# reEmbed recomputes and stores the embedding for an entity when its
+# corpus has changed since the last pass. The hash short-circuit
+# matters most for the openai/ollama providers — repeated upserts of
+# the same entity stop turning into network calls.
+func reEmbed(pool: db.Pool, id: string) error
+    reEmbedIfChanged(pool, id) onerr return
+    return empty
+
+# entityJSON marshals an entity for MCP tool results.
+func entityJSON(e: Entity) any
+    data := jsonpkg.PrettyBytes(e) onerr return mcp.ErrorResult("json error: {error}")
+    return mcp.TextResult(data as string)

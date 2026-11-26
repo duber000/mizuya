@@ -23,7 +23,7 @@
 petiole main
 
 skill Mizuya
-    description: "SQLite-backed knowledge graph with full-text search (FTS5) and cosine-similarity vector search. Use when an agent needs persistent memory for entities, relations, and observations — e.g. tracking projects, tools, people, concepts and how they connect. Subcommands: init, upsert, relate, observe, search, context, similar, import-okf, mcp."
+    description: "Persistent memory for AI agents: a SQLite-backed knowledge graph (FTS5 + cosine-vector search) for entities, typed relations, and append-only observations. Use it to remember projects, tools, people, concepts and their connections across sessions. Access via MCP (mizuya mcp) with 10 tools: upsert_entity, add_observation (returns observation_id; pass supersedes to correct), relate, search, search_observations, get_context, similar, attach_media, similar_media, archive_entity — or the CLI (mizuya <subcommand>). Conventions: observations are append-only — correct with supersedes; superseded observations are hidden by default (hide_superseded: false to include). Free text passes a fail-closed secret gate (redacted in place; echoes are post-redaction). Deletion is soft (archive_entity): archived entities are invisible to reads and get_context refuses them. Tags over MCP are a JSON array of strings; the CLI takes comma-separated tags. source labels are normalized to lowercase. Timestamps are ISO 8601 UTC."
     version: "0.3.1"
 
 import "os"
@@ -109,6 +109,9 @@ func main()
             makeDriftCmd(),
             makePruneHistoryCmd(),
             makeReembedCmd(),
+            makeArchiveCmd(),
+            makeUnarchiveCmd(),
+            makeSearchObservationsCmd(),
         )
         |> cli.Run()
 
@@ -129,7 +132,11 @@ func makeObserveCmd() reference cli.Command
     return cli.NewCommand("observe", "Append an observation to an entity")
         |> .RequiredFlag("id", "Entity id")
         |> .RequiredFlag("text", "Observation text")
-        |> .StringFlag("source", "Observation source", "conversation")
+        |> .StringFlag(
+            "source",
+            "Observation source (trimmed, lowercased; conventional: user, session, retro, conversation)",
+            "conversation",
+        )
         |> .StringFlag("supersedes", "Id of an observation on this entity that this one corrects", "")
         |> .ActionE(doObserve)
 
@@ -192,7 +199,12 @@ func makeContextCmd() reference cli.Command
         |> .StringFlag("as-of", "Show the entity's state as of this YYYY-MM-DD instead of current", "")
         |> .BoolFlag(
             "hide-superseded",
-            "Omit observations that a newer observation explicitly supersedes (they stay flagged via superseded_by otherwise)",
+            "Omit observations that a newer observation explicitly supersedes (default true; they stay flagged via superseded_by otherwise)",
+            true,
+        )
+        |> .BoolFlag(
+            "show-superseded",
+            "Include observations that a newer observation supersedes (overrides --hide-superseded)",
             false,
         )
         |> .ActionE(doContext)
@@ -346,15 +358,14 @@ func resolveEmbedding(pool: db.Pool, args: cli.Args, id: string) (list of float6
 
 # observeResolved adds an observation for id; on a miss with an interactive
 # TTY (outside JSON mode), offers fuzzy matches and retries with the pick.
-# Returns the number of secrets the gate redacted from the stored text and
-# the stored (redacted) text itself.
-func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) (int, string, error)
-    n, stored, aerr := addObservation(pool, id, text, source, supersedes)
+# Returns the committed row's receipt (id, stored text, redaction count).
+func observeResolved(pool: db.Pool, args: cli.Args, id: string, text: string, source: string, supersedes: string) (ObsWrite, error)
+    res, aerr := addObservation(pool, id, text, source, supersedes)
     if aerr equals empty
-        return n, stored, empty
+        return res, empty
     picked := pickSuggestion(pool, args, id)
     if picked is empty
-        return 0, "", aerr
+        return ObsWrite{}, aerr
     return addObservation(pool, picked, text, source, supersedes)
 
 # openPool opens the database named by --db.
@@ -479,7 +490,7 @@ func doObserve(args: cli.Args) error
     defer
         db.Close(pool) onerr discard
 
-    redacted, storedText, oerr := observeResolved(pool, args, id, text, source, supersedes)
+    obs, oerr := observeResolved(pool, args, id, text, source, supersedes)
     if oerr isnt empty
         return error "cannot add observation: {oerr:w}{suggestionsFor(pool, id)}"
 
@@ -503,19 +514,22 @@ func doObserve(args: cli.Args) error
         payload := map of string to any{
             "status": "observed",
             "id": id,
-            "text": storedText,
-            "redacted": redacted,
+            "observation_id": obs.Id,
+            "entity_id": id,
+            "text": obs.Text,
+            "source": obs.Source,
+            "at": obs.At,
+            "supersedes": obs.Supersedes,
+            "redacted": obs.Redacted,
         }
         if embedErr isnt empty
             payload["embedding"] = "deferred"
             payload["embedding_error"] = "{embedErr}"
         printJSON(payload)
     else
-        note := if redacted > 0 then "  {color.Yellow("(redacted {redacted} secret(s))")}" else ""
+        note := if obs.Redacted > 0 then "  {color.Yellow("(redacted {obs.Redacted} secret(s))")}" else ""
         embedNote := if embedErr isnt empty then "  {color.Yellow("(embedding deferred)")}" else ""
-        print(
-            "{color.Green("observed")} {color.Bold(id)}  {color.Dim(storedText)}{note}{embedNote}",
-        )
+        print("{color.Green("observed")} {color.Bold(id)}  {color.Dim(obs.Text)}{note}{embedNote}")
     return empty
 
 # doReembed recomputes every entity (and media, when a provider is
@@ -681,8 +695,16 @@ func doContext(args: cli.Args) error
         depth = 1
     showHistory := cli.GetBool(args, "history")
     hideSuperseded := cli.GetBool(args, "hide-superseded")
+    if cli.GetBool(args, "show-superseded")
+        hideSuperseded = false
 
     e := resolveEntity(pool, args, id) onerr error "{error:w}{suggestionsFor(pool, id)}"
+
+    arch, archErr := isArchived(pool, id)
+    if archErr isnt empty
+        return error "cannot check archive state: {archErr:w}"
+    if arch
+        return error "entity {id} is archived — `mizuya unarchive --id {id}` restores it"
 
     obs := listObservationsRange(pool, id, since, until, hideSuperseded) onerr explain "cannot read observations"
     atts := listMedia(pool, id) onerr explain "cannot read media attachments"
@@ -1218,3 +1240,71 @@ func extractMarkdownLinks(body: string) list of string
     for groups in markdownLinkPattern.FindAllGroups(body)
         links = append(links, groups[2])
     return links
+
+func makeArchiveCmd() reference cli.Command
+    return cli.NewCommand(
+        "archive",
+        "Archive an entity (soft delete — hidden from search/context/list/drift, restorable; row and history kept)",
+    )
+        |> .RequiredFlag("id", "Entity id to archive")
+        |> .ActionE(doArchive)
+
+func makeUnarchiveCmd() reference cli.Command
+    return cli.NewCommand("unarchive", "Restore an archived entity")
+        |> .RequiredFlag("id", "Entity id to restore")
+        |> .ActionE(doUnarchive)
+
+func makeSearchObservationsCmd() reference cli.Command
+    return cli.NewCommand(
+        "search-observations",
+        "Search observation text (literal substring, case-insensitive, newest first)",
+    )
+        |> .RequiredFlag("query", "Literal substring to find in observation text")
+        |> .StringFlag("id", "Restrict to this entity", "")
+        |> .IntFlag("limit", "Max results", 10)
+        |> .ActionE(doSearchObservations)
+
+func doArchive(args: cli.Args) error
+    return setArchived(args, true)
+
+func doUnarchive(args: cli.Args) error
+    return setArchived(args, false)
+
+func setArchived(args: cli.Args, archived: bool) error
+    id := cli.GetString(args, "id")
+    if id is empty
+        return cli.UsageFail("--id is required")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    setEntityArchived(pool, id, archived) onerr explain "cannot update archive state"
+    status := "archived"
+    if not archived
+        status = "unarchived"
+    if cli.IsJSON(args)
+        printJSON(map of string to any{"status": status, "id": id})
+    else
+        print("{color.Green(status)} {color.Bold(id)}")
+    return empty
+
+func doSearchObservations(args: cli.Args) error
+    query := cli.GetString(args, "query")
+    if query is empty
+        return cli.UsageFail("--query is required")
+    limit := cli.GetIntOr(args, "limit", 10)
+    entityId := cli.GetString(args, "id")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    obs, err := searchObservations(pool, query, entityId, limit) onerr explain "search failed"
+    if cli.IsJSON(args)
+        printJSON(obs)
+    else
+        printObservationRows(obs)
+    return empty

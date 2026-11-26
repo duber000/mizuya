@@ -61,14 +61,30 @@ func TestObsRowContract(t: reference testing.T)
         Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
         Text: "t",
         Source: "conversation",
-        At: "2026-11-05 17:04:18.647",
-        Supersedes: "",
-        SupersededBy: "",
+        At: "2026-11-05T17:04:18.647Z",
+        Supersedes: empty,
+        SupersededBy: empty,
     }
     assertJSONKeys(
         t,
         o,
         list of string{"id", "text", "source", "at", "supersedes", "superseded_by"},
+    )
+
+func TestObsWriteContract(t: reference testing.T)
+    o := ObsWrite{
+        Id: "01a1aca5-6b55-737e-950b-be8cb6be1bed",
+        EntityId: "duck",
+        Text: "t",
+        Source: "conversation",
+        At: "2026-11-05T17:04:18.647Z",
+        Supersedes: empty,
+        Redacted: 0,
+    }
+    assertJSONKeys(
+        t,
+        o,
+        list of string{"id", "entity_id", "text", "source", "at", "supersedes", "redacted"},
     )
 
 func TestHistoryRowContract(t: reference testing.T)

@@ -1,0 +1,252 @@
+# mizuya — display formatting helpers
+
+petiole main
+
+import "stdlib/cli"
+import "stdlib/color"
+import "stdlib/db"
+import "stdlib/json" as jsonpkg
+import "stdlib/slice"
+import "stdlib/string" as strpkg
+import "stdlib/table"
+
+# --- Entity / search printing ---
+
+func printEntityHeader(e: Entity)
+    print("{color.Bold(e.Id)}  {color.Dim("({e.Type})")} {e.Name}")
+
+# printEntityList renders a list of entities as a plain-style table.
+func printEntityList(rows: list of Entity)
+    if rows is empty
+        print(color.Dim("  No entities."))
+        return
+    t := table.New({"id", "type", "name", "updated_at"})
+    for e in rows
+        t = t |> table.AddRowValues(e.Id, e.Type, strpkg.Truncate(e.Name, 40), e.UpdatedAt)
+    t |> table.Print()
+
+# drillHint returns the ready-to-run drill-down line for a hit, funes-style:
+# the hit's id is the stable coordinate — `context`/`get_context` on it shows
+# the observations (each with its own id) and, with --history, the version log.
+func drillHint(id: string) string
+    return "context --id {id} --history"
+
+func printSearchHits(hits: list of SearchHit)
+    if hits is empty
+        print(color.Dim("  No matches."))
+        return
+    t := table.New({"id", "type", "score", "updated", "name", "summary"})
+    for h in hits
+        score := "{h.Score:.4f}"
+        t = t
+            |> table.AddRowValues(
+                h.Id,
+                h.Type,
+                score,
+                h.UpdatedAt,
+                strpkg.Truncate(h.Name, 40),
+                strpkg.Truncate(h.Summary, 60),
+            )
+    t |> table.Print()
+    # One ready-to-run drill-down line per hit, funes' `→ get ...` convention.
+    for h in hits
+        print("  {color.Dim("→")} {drillHint(h.Id)}")
+
+func printSimilarHits(hits: list of SimilarHit)
+    if hits is empty
+        print(color.Dim("  No embeddings available."))
+        return
+    t := table.New({"id", "type", "distance", "updated", "name", "summary"})
+    for h in hits
+        dist := "{h.Distance:.4f}"
+        t = t
+            |> table.AddRowValues(
+                h.Id,
+                h.Type,
+                dist,
+                h.UpdatedAt,
+                strpkg.Truncate(h.Name, 40),
+                strpkg.Truncate(h.Summary, 60),
+            )
+    t |> table.Print()
+    for h in hits
+        print("  {color.Dim("→")} {drillHint(h.Id)}")
+
+# printSimilarMediaHits renders media-index hits, with the same
+# drill-down hint style as printSimilarHits (the owning entity is the
+# drill-down coordinate, so the hint points at its context).
+func printSimilarMediaHits(hits: list of MediaHit)
+    if hits is empty
+        print(color.Dim("  No media indexed yet."))
+        return
+    t := table.New({"id", "entity", "kind", "distance", "at", "caption"})
+    for h in hits
+        dist := "{h.Distance:.4f}"
+        t = t
+            |> table.AddRowValues(
+                strpkg.Truncate(h.Id, 26),
+                h.EntityId,
+                h.Kind,
+                dist,
+                h.At,
+                strpkg.Truncate(h.Caption, 60),
+            )
+    t |> table.Print()
+    for h in hits
+        print("  {color.Dim("→")} {drillHint(h.EntityId)}")
+
+# printHistory renders the append-only version log of an entity, newest
+# first. No-op when the caller did not request history.
+func printHistory(hist: list of HistoryRow)
+    if hist is empty
+        return
+    print("")
+    print(color.Bold("history: (append-only version log, newest first)"))
+    for h in hist
+        print("  {color.Dim(h.ChangedAt)}  {color.Bold(h.Name)} {color.Dim("({h.Type})")}")
+        print("    {color.Dim(strpkg.Truncate(h.Data, 100))}")
+
+func printContext(e: Entity, outgoing: list of ContextRow, incoming: list of ContextRow, obs: list of ObsRow, atts: list of MediaRow)
+    printEntityHeader(e)
+    print("")
+    print(color.Bold("data:"))
+    print("  {e.Data}")
+    print("")
+
+    if outgoing isnt empty
+        print(color.Bold("outgoing:"))
+        for r in outgoing
+            print(
+                "  {color.Green("--{r.Rel}->")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
+            if r.Summary isnt empty
+                print("     {color.Dim(r.Summary)}")
+    if incoming isnt empty
+        if outgoing isnt empty
+            print("")
+        print(color.Bold("incoming:"))
+        for r in incoming
+            print(
+                "  {color.Blue("<-{r.Rel}--")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
+            if r.Summary isnt empty
+                print("     {color.Dim(r.Summary)}")
+
+    if obs isnt empty
+        if outgoing isnt empty or incoming isnt empty
+            print("")
+        print(color.Bold("observations:"))
+        for o in obs
+            src := o.Source
+            if src is empty
+                src = "conversation"
+            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {optStr(o.SupersededBy)})")}" else ""
+            print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
+    printAttachments(atts)
+
+func printReachableContext(e: Entity, depth: int, outgoing: list of ReachableRow, incoming: list of ReachableRow, obs: list of ObsRow, atts: list of MediaRow)
+    printEntityHeader(e)
+    print(color.Dim("  reachable within {depth} hops"))
+    print("")
+    print(color.Bold("data:"))
+    print("  {e.Data}")
+    print("")
+
+    if outgoing isnt empty
+        print(color.Bold("outgoing:"))
+        for r in outgoing
+            print(
+                "  {color.Green("[+{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
+            if r.Summary isnt empty
+                print("     {color.Dim(r.Summary)}")
+    if incoming isnt empty
+        if outgoing isnt empty
+            print("")
+        print(color.Bold("incoming:"))
+        for r in incoming
+            print(
+                "  {color.Blue("[-{r.Depth}]")} {color.Cyan(r.Other)} {color.Dim("({r.Type}) {r.Name}")}",
+            )
+            if r.Summary isnt empty
+                print("     {color.Dim(r.Summary)}")
+
+    if obs isnt empty
+        if outgoing isnt empty or incoming isnt empty
+            print("")
+        print(color.Bold("observations:"))
+        for o in obs
+            src := o.Source
+            if src is empty
+                src = "conversation"
+            mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {optStr(o.SupersededBy)})")}" else ""
+            print("  {color.Dim("[{o.At} {src}]")} {o.Text}{mark}")
+    printAttachments(atts)
+
+# printAttachments renders an entity's media attachments. The bytes are
+# never secret-scanned, so every attachment line carries the
+# [bytes unscanned] marker — the same honest-visibility rule as the
+# regex gate (nothing claims a scan happened).
+func printAttachments(atts: list of MediaRow)
+    if atts is empty
+        return
+    print("")
+    print(color.Bold("attachments:"))
+    for a in atts
+        print(
+            "  {a.Kind} {color.Cyan(a.Path)} {color.Dim("({a.Bytes} B)")} {color.Yellow("[bytes unscanned]")}",
+        )
+        if a.Caption isnt empty
+            print("     {color.Dim(a.Caption)}")
+
+func printJSON(v: any)
+    data := jsonpkg.PrettyBytes(v) onerr
+        cli.Error("json error: {error}")
+        return
+
+    print(data as string)
+
+# didYouMean formats a fuzzy-suggestion list for tacking onto error
+# messages. Returns an empty string when there are no suggestions so
+# callers can append unconditionally without leading punctuation drift.
+func didYouMean(ids: list of string) string
+    if ids is empty
+        return ""
+    return ". did you mean: " + strpkg.Join(ids, ", ") + "?"
+
+# suggestionsFor wraps suggestIds + didYouMean for use inside an outer
+# onerr block. Encapsulating the fuzzy lookup in its own function
+# avoids `error` shadow warnings when callers append the hint to an
+# error message.
+func suggestionsFor(pool: db.Pool, id: string) string
+    ids, err := suggestIds(pool, id, 3)
+    if err isnt empty
+        return ""
+    return didYouMean(ids)
+
+# optStr renders an optional reference string as "" when nil — for
+# display and interpolation, where a pointer printout would be noise.
+func optStr(s: optional reference string) string
+    if s is empty
+        return ""
+    return dereference s
+
+# parseTags splits a comma-separated tag string into a trimmed slice,
+# dropping empty entries.
+func parseTags(raw: string) list of string
+    if raw is empty
+        return empty list of string
+    return strpkg.Split(raw, ",")
+        |> slice.Map(s => strpkg.TrimSpace(s))
+        |> slice.Filter(s => s isnt empty)
+
+# printObservationRows renders search-observations hits: one line per
+# observation with its id (the handle to pass as supersedes on a
+# correction), newest first.
+func printObservationRows(obs: list of ObsRow)
+    if obs is empty
+        print(color.Dim("no matching observations"))
+        return
+    for o in obs
+        mark := if o.SupersededBy isnt empty then " {color.Yellow("(superseded by {optStr(o.SupersededBy)})")}" else ""
+        print("  {color.Cyan(o.Id)} {color.Dim("[{o.At} {o.Source}]")} {o.Text}{mark}")

@@ -1,0 +1,228 @@
+# mizuya — model types
+# A SQLite-backed knowledge graph with JSON columns, FTS5 keyword search,
+# N-hop graph traversal (recursive CTEs over relations), and vector
+# cosine similarity (vec1 extension).
+
+petiole main
+
+# EntityType is the closed set of entity classifications.
+# Stored lowercase in the entities.type column; ParseEntityType validates
+# at the boundaries (CLI flags, MCP tool arguments) — anything outside
+# the set is rejected rather than stored. AllEntityType() serves
+# the valid-types list for flag help and tool schemas.
+enum EntityType
+    Project = "project"
+    Tool = "tool"
+    Person = "person"
+    Concept = "concept"
+    Config = "config"
+    Org = "org"
+    Media = "media"
+
+# Entity is a node in the knowledge graph.
+# The Data field holds a JSON object: {summary, tags}. Observations live
+# in their own table and are joined in at read time.
+type Entity
+    Id: string as "id"
+    Type: string as "type"
+    Name: string as "name"
+    Data: string as "data"
+    CreatedAt: string as "created_at"
+    UpdatedAt: string as "updated_at"
+
+# Relation is a typed edge between two entities.
+type Relation
+    Src: string as "src"
+    Rel: string as "rel"
+    Dst: string as "dst"
+    Data: string as "data"
+    CreatedAt: string as "created_at"
+
+# SearchHit is a single row from an FTS5 / hybrid search. Score is the
+# RRF fusion score for hybrid results (0 for plain FTS rows); UpdatedAt
+# is the entity's last-change timestamp, so callers can reason about
+# recency instead of trusting rank alone.
+type SearchHit
+    Id: string as "id"
+    Type: string as "type"
+    Name: string as "name"
+    Summary: string as "summary"
+    UpdatedAt: string as "updated_at"
+    Score: float64 as "score"
+
+# SearchFilter narrows search results. Since/Until are YYYY-MM-DD dates
+# (inclusive, applied to the entity's updated_at); empty means unbounded.
+type SearchFilter
+    Type: string as "type"
+    Tag: string as "tag"
+    Since: string as "since"
+    Until: string as "until"
+
+# ContextRow describes one end of a 1-hop neighbor edge.
+type ContextRow
+    Rel: string as "rel"
+    Other: string as "other"
+    Name: string as "name"
+    Type: string as "type"
+    Summary: string as "summary"
+
+# ReachableRow describes an entity reached via N-hop graph traversal
+# through a recursive CTE over the relations table (the upstream closure
+# extension is hardcoded to integer ids). Depth is the minimum hop count
+# from the root; the relation label isn't carried (the walk counts any
+# edge, regardless of `rel`).
+type ReachableRow
+    Depth: int as "depth"
+    Other: string as "other"
+    Name: string as "name"
+    Type: string as "type"
+    Summary: string as "summary"
+
+# ObsRow is a single observation row from the observations table.
+# Id is a uuid7 string assigned by SQLite at INSERT time. Supersedes
+# names the observation this one corrects (null when it corrects none).
+# SupersededBy is the inverse link: the id of the observation that
+# corrects this one (null when nothing supersedes it) — so readers can
+# see a stale fact is stale without acting on it. Both are null (not
+# "") when absent, so consumers never special-case a sentinel.
+type ObsRow
+    Id: string as "id"
+    Text: string as "text"
+    Source: string as "source"
+    At: string as "at"
+    Supersedes: optional reference string as "supersedes"
+    SupersededBy: optional reference string as "superseded_by"
+
+# ObsWrite is the receipt for a committed addObservation: the stored
+# (redacted) values plus the row's id and timestamp, so callers can
+# capture the observation's id programmatically (e.g. to pass as
+# supersedes on a later correction). Supersedes is null when the
+# observation corrects nothing.
+type ObsWrite
+    Id: string as "id"
+    EntityId: string as "entity_id"
+    Text: string as "text"
+    Source: string as "source"
+    At: string as "at"
+    Supersedes: optional reference string as "supersedes"
+    Redacted: int as "redacted"
+
+# obsInsertRow scans the RETURNING clause of the observations INSERT.
+type obsInsertRow
+    Id: string as "id"
+    At: string as "at"
+    Supersedes: optional reference string as "supersedes"
+
+# HistoryRow is one version of an entity from the append-only
+# entity_history log. ChangedAt is when that state became current.
+type HistoryRow
+    Id: string as "id"
+    EntityId: string as "entity_id"
+    Type: string as "type"
+    Name: string as "name"
+    Data: string as "data"
+    ChangedAt: string as "changed_at"
+
+# SimilarHit is a single row from a vector similarity search.
+type SimilarHit
+    Id: string as "id"
+    Name: string as "name"
+    Type: string as "type"
+    Summary: string as "summary"
+    UpdatedAt: string as "updated_at"
+    Distance: float64 as "distance"
+
+# DriftRow is one observation whose entity's conception changed after the
+# observation was recorded (used by the drift command / listDrift).
+type DriftRow
+    ObsId: string as "obs_id"
+    EntityId: string as "entity_id"
+    EntityName: string as "entity_name"
+    ObsText: string as "obs_text"
+    ObsAt: string as "obs_at"
+    EntityUpdated: string as "entity_updated"
+
+# hashRow scans the content_hash column for change detection.
+type hashRow
+    Hash: string as "hash"
+
+# dimRow scans the stored embedding dimension (used to refuse cross-modal
+# queries against a store built with a different provider/dim).
+type dimRow
+    Dim: int as "dim"
+
+# MediaHit is a single row from a media-index similarity search —
+# the attachment dimension of the graph ("which screenshot/audio is
+# this most like?"), as opposed to SimilarHit over entities. Distance is
+# cosine distance, lower = closer, same convention.
+type MediaHit
+    Id: string as "id"
+    EntityId: string as "entity_id"
+    Kind: string as "kind"
+    Caption: string as "caption"
+    Path: string as "path"
+    At: string as "at"
+    Distance: float64 as "distance"
+
+# MediaRow is one stored media attachment on an entity. The entity can be
+# media-native (type = media, auto-created by `attach` when no --id is
+# given — id = media-<sha256[:12]>, content-addressed so re-attaching the
+# same file twice is idempotent). Path is the deduplicated asset path
+# under the database's assets/ directory (the filename IS the sha256 hex,
+# so identical bytes are stored once). Scanned is ALWAYS 0 today: the
+# regex secret gate covers text only, and media bytes are not scanned —
+# this field exists so every reader can see that honestly. The caption
+# passes the same fail-closed gate as observations; a scanner error
+# refuses the write.
+type MediaRow
+    Id: string as "id"
+    EntityId: string as "entity_id"
+    Kind: string as "kind"
+    Mime: string as "mime"
+    Path: string as "path"
+    Sha256: string as "sha256"
+    Bytes: int as "bytes"
+    Caption: string as "caption"
+    Scanned: int as "scanned"
+    Source: string as "source"
+    At: string as "at"
+
+# AttachResult is the payload of the attach command / attach_media tool.
+# Status is one of: "media-native" (a media-native entity was auto-created),
+# "attached", or "already-attached" (same bytes already on this entity; the
+# write was a no-op). BytesScanned is always false — see MediaRow.
+type AttachResult
+    Status: string as "status"
+    EntityId: string as "entity_id"
+    MediaId: string as "media_id"
+    Kind: string as "kind"
+    Mime: string as "mime"
+    Path: string as "path"
+    Sha256: string as "sha256"
+    Bytes: int as "bytes"
+    Redacted: int as "redacted"
+    BytesScanned: bool as "bytes_scanned"
+    EmbedDeferred: bool as "embed_deferred"
+
+# suggestRow is a single fuzzy-match suggestion from the spellfix1
+# vtab. Word is the matched id; we don't currently surface rank or
+# distance.
+type suggestRow
+    Word: string as "word"
+
+# entityData is the typed view of the JSON stored in the entities.data
+# column. Unknown fields (like observations) are ignored on unmarshal.
+type entityData
+    Summary: string as "summary"
+    Tags: list of string as "tags"
+
+# vecRow scans a stored float32 LE BLOB from the vec1 virtual table.
+type vecRow
+    Vec: list of byte as "vec"
+
+# EmbedDim is the dimensionality of the fallback hash embedding.
+# Real providers (ollama, openai) determine dim from the model output.
+const EmbedDim: int = 64
+
+# EmbedModel is the fallback model tag when no provider is configured.
+const EmbedModel: string = "hash-demo-64"
