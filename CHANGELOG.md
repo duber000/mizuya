@@ -5,6 +5,8 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-26
+
 ### Breaking
 - **MCP `add_observation` and `relate` now return structured JSON objects**
   instead of `observed: ...` / `related: ...` confirmation text.
