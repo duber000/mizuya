@@ -1,0 +1,327 @@
+# mizuya — snapshot & verify subcommands.
+#
+# `mizuya snapshot --out <file.tar.gz>` takes an online, consistent snapshot
+# of the live database and bundles it with the media assets directory
+# (<db dir>/assets/, when it exists) into a single .tar.gz. The database is
+# copied with VACUUM INTO through the normal connection pool, which handles
+# WAL correctly: no service stop, no -wal/-shm side files, and the copy is
+# compacted for free. The archive is written to a temp file in the
+# destination directory and renamed into place on success, so a failed run
+# never leaves a partial archive behind. The archive path and its sha256
+# are printed on one line (sha256sum-compatible).
+#
+# `mizuya verify <file.tar.gz>` unpacks the archive to a temp dir (refusing
+# members with absolute paths or `..` segments), opens the snapshot
+# READ-ONLY with the same extension set the live database uses (vec1, FTS5,
+# spellfix1, ...), runs PRAGMA integrity_check, prints sanity counts
+# (entities, observations, relations, embeddings_vec), probes the vec
+# tables, and fails non-zero on any problem. A backup that restores to an
+# empty database is not a backup: verify fails when the snapshot holds
+# zero entities.
+#
+# Encryption, upload and scheduling are deliberately NOT here — those are
+# ops policy (see docs/BACKUP.md); this file is the product surface the
+# infra side consumes.
+
+petiole main
+
+import "os"
+import "path/filepath"
+import "stdlib/archive"
+import "stdlib/cli"
+import "stdlib/color"
+import "stdlib/crypto"
+import "stdlib/db"
+import "stdlib/files"
+import "stdlib/sqlite"
+import "stdlib/string" as strpkg
+
+import "github.com/ncruces/go-sqlite3/ext/fts5" as fts5ext
+import "github.com/ncruces/go-sqlite3/ext/regexp" as regexpext
+import "github.com/ncruces/go-sqlite3/ext/spellfix1" as spellfixext
+import "github.com/ncruces/go-sqlite3/ext/stats" as statsext
+import "github.com/ncruces/go-sqlite3/ext/unicode" as unicodeext
+import "github.com/ncruces/go-sqlite3/ext/uuid" as uuidext
+import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
+
+# verifyMaxExtractBytes caps the total uncompressed bytes verify will
+# unpack, so a decompression bomb cannot fill the disk. mizuya's own
+# archives hold a ~250 KB database plus ≤10 MB media attachments, so
+# 10 GiB is generous while still bounded.
+const verifyMaxExtractBytes: int64 = 10737418240
+
+type SnapshotResult
+    Path: string
+    Sha256: string
+    Bytes: int64
+
+type VerifyReport
+    Entities: int64
+    Observations: int64
+    Relations: int64
+    EmbeddingsVec: int64
+
+func makeSnapshotCmd() reference cli.Command
+    return cli.NewCommand(
+        "snapshot",
+        "Online, consistent snapshot of the database (VACUUM INTO) bundled with the media assets into a single .tar.gz; prints the archive sha256 and path",
+    )
+        |> .RequiredFlag("out", "Destination .tar.gz path (must not already exist; created mode 0600)")
+        |> .ActionE(doSnapshot)
+
+func makeVerifyCmd() reference cli.Command
+    return cli.NewCommand(
+        "verify",
+        "Verify a snapshot archive: safe extract, read-only open with mizuya's extensions, integrity_check, sanity counts, vec-table probes",
+    )
+        |> .RestArg("archive", "Path to the .tar.gz snapshot to verify")
+        |> .ActionE(doVerify)
+
+func doSnapshot(args: cli.Args) error
+    outPath := cli.GetString(args, "out")
+    if not strpkg.HasSuffix(outPath, ".tar.gz") and not strpkg.HasSuffix(outPath, ".tgz")
+        return cli.UsageFail("--out must end in .tar.gz (or .tgz), got {outPath}")
+    dbPath := cli.GetString(args, "db")
+
+    pool := openPool(args) onerr explain "cannot open database"
+
+    defer
+        db.Close(pool) onerr discard
+
+    res, err := createSnapshot(pool, dbPath, outPath)
+    if err isnt empty
+        return err
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{
+            "path": res.Path,
+            "sha256": res.Sha256,
+            "bytes": res.Bytes,
+        })
+        return empty
+
+    # sha256sum-compatible: `<hex>  <path>` — pipe to `sha256sum -c`.
+    print("{res.Sha256}  {res.Path}")
+    return empty
+
+func doVerify(args: cli.Args) error
+    rest := cli.GetRest(args, "archive")
+    if rest is empty
+        return cli.UsageFail("verify requires a <file.tar.gz> path argument")
+    if len(rest) > 1
+        return cli.UsageFail("verify takes exactly one archive path, got {len(rest)}")
+
+    report, err := verifySnapshot(rest[0])
+    if err isnt empty
+        return err
+
+    if cli.IsJSON(args)
+        printJSON(map of string to any{
+            "status": "ok",
+            "archive": rest[0],
+            "entities": report.Entities,
+            "observations": report.Observations,
+            "relations": report.Relations,
+            "embeddings_vec": report.EmbeddingsVec,
+        })
+        return empty
+
+    print("{color.Green("verify ok")} {rest[0]}")
+    print("  entities:       {report.Entities}")
+    print("  observations:   {report.Observations}")
+    print("  relations:      {report.Relations}")
+    print("  embeddings_vec: {report.EmbeddingsVec}")
+    return empty
+
+# createSnapshot writes the snapshot archive to outPath and returns its
+# path, sha256 (hex) and size. outPath must not already exist. All work
+# happens in a staging dir that is removed on return; the archive itself
+# is built in a temp file next to outPath and renamed into place, so
+# outPath never holds a partial archive.
+func createSnapshot(pool: db.Pool, dbPath: string, outPath: string) (SnapshotResult, error)
+    if files.Exists(outPath)
+        return SnapshotResult{}, error "refusing to overwrite existing file: {outPath}"
+
+    staging, sErr := files.TempDir("mizuya-snapshot-")
+    if sErr isnt empty
+        return SnapshotResult{}, error "cannot create staging dir: {sErr:w}"
+    defer
+        os.RemoveAll(staging) onerr discard
+
+    # VACUUM INTO refuses a pre-existing target; snapPath is fresh.
+    snapPath := filepath.Join(staging, "mizuya.db")
+    if _, vErr := db.Exec(pool, "VACUUM INTO ?", snapPath); vErr isnt empty
+        return SnapshotResult{}, error "snapshot failed (VACUUM INTO): {vErr:w}"
+
+    # Media bytes live outside the database; they must ride along or
+    # attachments restore broken. Absent assets/ is fine (no media yet).
+    assetsDir := filepath.Join(files.Dirname(dbPath), "assets")
+    if files.IsDir(assetsDir)
+        if cErr := copyAssets(assetsDir, filepath.Join(staging, "assets")); cErr isnt empty
+            return SnapshotResult{}, cErr
+
+    # Build the archive in the destination directory so the final rename
+    # is atomic (same filesystem). 0600: a backup of private memory data.
+    destDir := files.Dirname(outPath)
+    if destDir is empty
+        destDir = "."
+    tmp, tErr := os.CreateTemp(destDir, ".{files.Basename(outPath)}.tmp-*")
+    if tErr isnt empty
+        return SnapshotResult{}, error "cannot create temp archive in {destDir}: {tErr:w}"
+    tmpPath := tmp.Name()
+    tmp.Close() onerr discard
+
+    if wErr := archive.WriteTarGz(tmpPath, staging); wErr isnt empty
+        os.Remove(tmpPath) onerr discard
+        return SnapshotResult{}, error "cannot write archive: {wErr:w}"
+
+    data, rErr := files.Read(tmpPath)
+    if rErr isnt empty
+        os.Remove(tmpPath) onerr discard
+        return SnapshotResult{}, error "cannot read archive for hashing: {rErr:w}"
+    sha := crypto.SHA256Hex(data)
+
+    if mErr := files.Move(tmpPath, outPath); mErr isnt empty
+        os.Remove(tmpPath) onerr discard
+        return SnapshotResult{}, error "cannot move archive into place: {mErr:w}"
+
+    return SnapshotResult{Path: outPath, Sha256: sha, Bytes: len(data) as int64}, empty
+
+# copyAssets copies the assets tree at src into dst, preserving relative
+# paths (assets are sha256-addressed flat files today; the walk keeps
+# working if subdirectories ever appear).
+func copyAssets(src: string, dst: string) error
+    files.MkDirAll(dst) onerr return error "cannot create {dst}: {error:w}"
+    paths, wErr := files.ListRecursive(src)
+    if wErr isnt empty
+        return error "cannot walk assets directory: {wErr:w}"
+    for path in paths
+        rel, rErr := filepath.Rel(src, path)
+        if rErr isnt empty
+            return error "cannot relativize {path}: {rErr:w}"
+        target := filepath.Join(dst, rel)
+        files.MkDirAll(files.Dirname(target)) onerr return error "cannot create asset directory for {target}: {error:w}"
+        files.Copy(path, target) onerr return error "cannot copy asset {path}: {error:w}"
+    return empty
+
+# verifySnapshot unpacks archivePath to a temp dir, opens the snapshot
+# read-only, and checks its integrity and basic sanity. Any failure —
+# unsafe member, missing mizuya.db, integrity_check, unreadable vec
+# tables, an empty database — returns an error.
+func verifySnapshot(archivePath: string) (VerifyReport, error)
+    if not files.Exists(archivePath)
+        return VerifyReport{}, error "archive not found: {archivePath}"
+
+    # Validate member names before extracting anything. The stdlib
+    # extractor is also safe-by-default (it rejects escapes); this check
+    # exists to fail with a clear message before a single byte is written.
+    entries, lErr := archive.List(archivePath)
+    if lErr isnt empty
+        return VerifyReport{}, error "cannot read archive: {lErr:w}"
+    if entries is empty
+        return VerifyReport{}, error "archive is empty: {archivePath}"
+    for entry in entries
+        if not isLocalArchiveName(entry.Name)
+            return VerifyReport{}, error "archive contains unsafe member: {entry.Name}"
+
+    dest, tErr := files.TempDir("mizuya-verify-")
+    if tErr isnt empty
+        return VerifyReport{}, error "cannot create temp dir: {tErr:w}"
+    defer
+        os.RemoveAll(dest) onerr discard
+
+    if xErr := archive.ExtractLimit(archivePath, dest, verifyMaxExtractBytes); xErr isnt empty
+        return VerifyReport{}, error "cannot extract archive: {xErr:w}"
+
+    dbPath := filepath.Join(dest, "mizuya.db")
+    if not files.IsFile(dbPath)
+        return VerifyReport{}, error "archive does not contain mizuya.db at its root"
+
+    pool, pErr := openVerifyPool(dbPath)
+    if pErr isnt empty
+        return VerifyReport{}, pErr
+    defer
+        db.Close(pool) onerr discard
+
+    if iErr := sqlite.IntegrityCheck(pool); iErr isnt empty
+        return VerifyReport{}, error "integrity_check failed: {iErr:w}"
+
+    entities, cErr := db.Count(pool, "SELECT count(*) FROM entities")
+    if cErr isnt empty
+        return VerifyReport{}, error "cannot count entities: {cErr:w}"
+    observations, cErr := db.Count(pool, "SELECT count(*) FROM observations")
+    if cErr isnt empty
+        return VerifyReport{}, error "cannot count observations: {cErr:w}"
+    relations, cErr := db.Count(pool, "SELECT count(*) FROM relations")
+    if cErr isnt empty
+        return VerifyReport{}, error "cannot count relations: {cErr:w}"
+    embeddings, cErr := db.Count(pool, "SELECT count(*) FROM embeddings_vec")
+    if cErr isnt empty
+        return VerifyReport{}, error "cannot count embeddings_vec: {cErr:w}"
+
+    if entities equals 0
+        return VerifyReport{}, error "snapshot restores to an empty database (0 entities) — not a usable backup"
+
+    # Probe the vec tables: a corrupt or missing vec1 index must fail
+    # here, not at the first similarity query after a restore.
+    if _, eErr := db.Exists(pool, "SELECT 1 FROM embeddings_vec LIMIT 1"); eErr isnt empty
+        return VerifyReport{}, error "embeddings_vec probe failed: {eErr:w}"
+    if _, eErr := db.Exists(pool, "SELECT 1 FROM media_vec LIMIT 1"); eErr isnt empty
+        return VerifyReport{}, error "media_vec probe failed: {eErr:w}"
+
+    return VerifyReport{
+        Entities: entities,
+        Observations: observations,
+        Relations: relations,
+        EmbeddingsVec: embeddings,
+    }, empty
+
+# isLocalArchiveName reports whether an archive member name is safe to
+# extract: no absolute paths, no `..` segments, no backslashes. Archive
+# member names are slash-separated; this is the platform-independent
+# equivalent of filepath.IsLocal.
+func isLocalArchiveName(name: string) bool
+    if name is empty
+        return false
+    if strpkg.HasPrefix(name, "/")
+        return false
+    if strpkg.Contains(name, "\\")
+        return false
+    for segment in strpkg.Split(name, "/")
+        if segment equals ".."
+            return false
+    return true
+
+# verifyExtRegistered guards the one-shot process-global extension
+# registration the verify path performs. Registrars are append-only and
+# process-global (ncruces AutoExtension) and OpenExisting takes no
+# registrar list, so the read-only path registers them by opening (and
+# discarding) an in-memory database first. Re-registering is harmless —
+# the extension init functions overwrite their modules — but there is no
+# reason to do it more than once per process.
+var verifyExtRegistered: bool
+
+# openVerifyPool opens the snapshot READ-ONLY with the same extensions
+# the live database uses. It deliberately does NOT run initDB: verify
+# must report the snapshot as it is, never migrate it forward.
+func openVerifyPool(path: string) (db.Pool, error)
+    if not verifyExtRegistered
+        mem, mErr := sqlite.OpenWithExtensions(
+            ":memory:",
+            empty map of string to string,
+            vec1ext.Register,
+            regexpext.Register,
+            fts5ext.Register,
+            uuidext.Register,
+            statsext.Register,
+            spellfixext.Register,
+            unicodeext.Register,
+        )
+        if mErr isnt empty
+            return db.Pool{}, error "cannot register extensions: {mErr:w}"
+        db.Close(mem) onerr discard
+        verifyExtRegistered = true
+    pool, oErr := sqlite.OpenExisting(path)
+    if oErr isnt empty
+        return db.Pool{}, error "cannot open snapshot read-only: {oErr:w}"
+    return pool, empty

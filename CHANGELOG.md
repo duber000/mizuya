@@ -5,6 +5,26 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+### Added
+- **`snapshot` and `verify` subcommands** for backups. `mizuya snapshot
+  --out <file.tar.gz>` takes an online, consistent snapshot of the live
+  database (`VACUUM INTO` through the normal connection pool — no service
+  stop, no `-wal`/`-shm` copying, compacted for free) and bundles it with
+  `<db dir>/assets/` (media bytes) into a single `.tar.gz` containing
+  `mizuya.db` at its root. The archive is built in a temp file next to
+  `--out` and renamed into place (never a partial archive), created
+  mode 0600, and `--out` must not already exist. The printed line is
+  sha256sum-compatible (`<sha256>  <path>`); `--json` prints
+  `{"path","sha256","bytes"}`. `mizuya verify <file.tar.gz>` unpacks the
+  archive to a temp dir (rejecting absolute paths and `..` members),
+  opens the snapshot read-only with mizuya's extension set (vec1/FTS5/
+  spellfix1; no `initDB` — the snapshot is never migrated by verify),
+  runs `PRAGMA integrity_check`, prints sanity counts (entities,
+  observations, relations, embeddings_vec), probes the vec tables, and
+  fails non-zero on any problem — including a snapshot that restores to
+  an empty database. See `docs/BACKUP.md` for the snapshot → encrypt +
+  upload → restore procedure.
+
 ## 0.4.0 — 2026-11-26
 
 ### Breaking

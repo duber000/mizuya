@@ -1,0 +1,172 @@
+# mizuya — tests for snapshot & verify.
+#
+# Round-trip: snapshot a live (WAL-mode) test database, verify passes.
+# Failure modes: tampered archive, traversal member, empty database,
+# existing --out. Assets ride along in the archive.
+
+petiole main
+
+import "archive/tar"
+import "compress/gzip"
+import "os"
+import "path/filepath"
+import "stdlib/archive"
+import "stdlib/crypto"
+import "stdlib/db"
+import "stdlib/files"
+import "stdlib/sqlite"
+import "stdlib/string" as strpkg
+import "stdlib/test"
+import "testing"
+
+func seedSnapshotDB(t: reference testing.T, pool: db.Pool)
+    _, uerr := upsertEntity(pool, "duck", "concept", "Donald Duck", "v1", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, uerr2 := upsertEntity(pool, "sqlite", "tool", "SQLite", "embedded db", empty list of string)
+    test.AssertNoError(t, uerr2)
+    _, rerr := relate(pool, "duck", "uses", "sqlite")
+    test.AssertNoError(t, rerr)
+    _, aerr := addObservation(pool, "duck", "first belief", "conversation")
+    test.AssertNoError(t, aerr)
+
+func TestSnapshotVerifyRoundTrip(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    # The source database is in WAL mode — the normal case, and the one
+    # VACUUM INTO must handle without a service stop or -wal copying.
+    mode, mErr := sqlite.Pragma(pool, "journal_mode")
+    test.AssertNoError(t, mErr)
+    test.AssertEqual(t, mode, "wal")
+
+    seedSnapshotDB(t, pool)
+
+    out := filepath.Join(dir, "snap.tar.gz")
+    res, sErr := createSnapshot(pool, filepath.Join(dir, "test.db"), out)
+    test.AssertNoError(t, sErr)
+    test.AssertTrue(t, files.Exists(out))
+    test.AssertTrue(t, res.Bytes > 0)
+
+    # The printed sha256 is the archive's real digest.
+    data, rErr := files.Read(out)
+    test.AssertNoError(t, rErr)
+    test.AssertEqual(t, res.Sha256, crypto.SHA256Hex(data))
+
+    # Verify passes while the source pool is still open.
+    report, vErr := verifySnapshot(out)
+    test.AssertNoError(t, vErr)
+    test.AssertEqual(t, report.Entities, 2 as int64)
+    test.AssertEqual(t, report.Observations, 1 as int64)
+    test.AssertEqual(t, report.Relations, 1 as int64)
+
+    # The source pool stays usable after the snapshot (VACUUM INTO is online).
+    _, uerr := upsertEntity(pool, "goose", "concept", "Goose", "v1", empty list of string)
+    test.AssertNoError(t, uerr)
+
+func TestSnapshotIncludesAssets(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    file := writeTempPng(t, dir)
+    _, aerr := attachMediaFile(pool, filepath.Join(dir, "test.db"), attachArgs(file))
+    test.AssertNoError(t, aerr)
+
+    out := filepath.Join(dir, "snap.tar.gz")
+    _, sErr := createSnapshot(pool, filepath.Join(dir, "test.db"), out)
+    test.AssertNoError(t, sErr)
+
+    entries, lErr := archive.List(out)
+    test.AssertNoError(t, lErr)
+    foundDB := false
+    foundAsset := false
+    for entry in entries
+        if entry.Name equals "mizuya.db"
+            foundDB = true
+        if strpkg.HasPrefix(entry.Name, "assets/")
+            foundAsset = true
+    test.AssertTrue(t, foundDB)
+    test.AssertTrue(t, foundAsset)
+
+    report, vErr := verifySnapshot(out)
+    test.AssertNoError(t, vErr)
+    test.AssertTrue(t, report.Entities >= 1)
+
+func TestVerifyTamperedArchiveFails(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    seedSnapshotDB(t, pool)
+
+    out := filepath.Join(dir, "snap.tar.gz")
+    _, sErr := createSnapshot(pool, filepath.Join(dir, "test.db"), out)
+    test.AssertNoError(t, sErr)
+
+    data, rErr := files.Read(out)
+    test.AssertNoError(t, rErr)
+    mid := len(data) / 2
+    if data[mid] equals 0
+        data[mid] = 1
+    else
+        data[mid] = 0
+    wErr := files.WriteBytes(data, out)
+    test.AssertNoError(t, wErr)
+
+    _, vErr := verifySnapshot(out)
+    test.AssertError(t, vErr)
+
+func TestVerifyRejectsTraversalMember(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    seedSnapshotDB(t, pool)
+
+    # Hand-craft a tar.gz whose member escapes the destination directory.
+    evil := filepath.Join(dir, "evil.tar.gz")
+    f, ferr := os.Create(evil)
+    test.AssertNoError(t, ferr)
+    gw := gzip.NewWriter(f)
+    tw := tar.NewWriter(gw)
+    payload := list of byte{112, 119, 110, 101, 100}
+    hdr := tar.Header{
+        Name: "../evil.txt",
+        Mode: 420,
+        Size: len(payload) as int64,
+        Typeflag: tar.TypeReg,
+    }
+    werr := tw.WriteHeader(reference of hdr)
+    test.AssertNoError(t, werr)
+    _, werr2 := tw.Write(payload)
+    test.AssertNoError(t, werr2)
+    tw.Close() onerr discard
+    gw.Close() onerr discard
+    f.Close() onerr discard
+
+    _, vErr := verifySnapshot(evil)
+    test.AssertError(t, vErr)
+    test.AssertContains(t, "{vErr}", "../evil.txt")
+
+func TestVerifyFailsOnEmptyDatabase(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    out := filepath.Join(dir, "empty.tar.gz")
+    _, sErr := createSnapshot(pool, filepath.Join(dir, "test.db"), out)
+    test.AssertNoError(t, sErr)
+
+    _, vErr := verifySnapshot(out)
+    test.AssertError(t, vErr)
+
+func TestSnapshotRefusesExistingOut(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    seedSnapshotDB(t, pool)
+
+    out := filepath.Join(dir, "snap.tar.gz")
+    wErr := files.WriteBytes(list of byte{1, 2, 3}, out)
+    test.AssertNoError(t, wErr)
+
+    _, sErr := createSnapshot(pool, filepath.Join(dir, "test.db"), out)
+    test.AssertError(t, sErr)
