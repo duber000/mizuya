@@ -16,6 +16,14 @@ workflow builds images on tag push.
   candidate text. See `docs/output-contract.md` (contract notes).
 
 ### Fixed
+- **New rows no longer carry legacy pre-ISO timestamps in upgraded
+  databases.** `CREATE TABLE IF NOT EXISTS` never rewrote the legacy
+  column DEFAULTs (entities/relations: `datetime('now')`;
+  observations/entity_history/media: space-separated `strftime`), so rows
+  written between service opens were stored in the legacy shape —
+  violating the ISO 8601 contract and sorting *older* than any `T`-stamped
+  row in newest-first reads. The INSERTs now set ISO 8601 stamps
+  explicitly; `migrateTimestamps` still rewrites legacy rows on open.
 - **Hybrid search no longer hard-fails on invalid FTS5 queries.** Callers
   pass arbitrary natural language (e.g. `town-builder`, `kibigia.org`),
   which is not always valid FTS5; a `MATCH` error used to abort the whole

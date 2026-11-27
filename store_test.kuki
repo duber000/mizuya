@@ -10,6 +10,7 @@ import "os"
 import "path/filepath"
 import "stdlib/db"
 import "stdlib/slice"
+import "stdlib/string" as strpkg
 import "stdlib/test"
 import "testing"
 
@@ -722,6 +723,47 @@ func TestAddObservationReturnsWrite(t: reference testing.T)
     second, aerr2 := addObservation(pool, "duck", "two", "conversation", first.Id)
     test.AssertNoError(t, aerr2)
     test.AssertEqual(t, obsRefStr(second.Supersedes), first.Id)
+
+# assertISO8601 pins the output contract: every stored stamp is ISO 8601
+# UTC ('...T...Z'), never the legacy 'YYYY-MM-DD HH:MM:SS.SSS' shape.
+# Existing databases keep their legacy column DEFAULTs (CREATE TABLE IF
+# NOT EXISTS never alters them), so this can only be guaranteed by the
+# INSERTs setting the stamp explicitly.
+func assertISO8601(t: reference testing.T, stamp: string)
+    test.AssertTrue(t, strpkg.Contains(stamp, "T"), "stamp must contain 'T': {stamp}")
+    test.AssertTrue(t, strpkg.HasSuffix(stamp, "Z"), "stamp must end with 'Z': {stamp}")
+    test.AssertFalse(t, strpkg.Contains(stamp, " "), "stamp must not contain a space: {stamp}")
+
+func TestWritesUseISOTimestamps(t: reference testing.T)
+    pool, dir := openLegacyTestPool(t)
+    defer closeTestPool(pool, dir)
+
+    _, uerr := upsertEntity(pool, "iso-check", "concept", "ISO Check", "v1", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, uerr = upsertEntity(pool, "iso-check", "concept", "ISO Check", "v2", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, uerr = upsertEntity(pool, "iso-peer", "concept", "ISO Peer", "s", empty list of string)
+    test.AssertNoError(t, uerr)
+    _, oerr := addObservation(pool, "iso-check", "belief", "session")
+    test.AssertNoError(t, oerr)
+    _, rerr := relate(pool, "iso-check", "related_to", "iso-peer")
+    test.AssertNoError(t, rerr)
+
+    createdAt := db.QueryRow(pool, "SELECT created_at FROM entities WHERE id = 'iso-check'")
+        |> db.ScanRow of string onerr return
+    assertISO8601(t, createdAt)
+    updatedAt := db.QueryRow(pool, "SELECT updated_at FROM entities WHERE id = 'iso-check'")
+        |> db.ScanRow of string onerr return
+    assertISO8601(t, updatedAt)
+    changedAt := db.QueryRow(pool, "SELECT changed_at FROM entity_history WHERE entity_id = 'iso-check'")
+        |> db.ScanRow of string onerr return
+    assertISO8601(t, changedAt)
+    obsAt := db.QueryRow(pool, "SELECT at FROM observations WHERE entity_id = 'iso-check'")
+        |> db.ScanRow of string onerr return
+    assertISO8601(t, obsAt)
+    relAt := db.QueryRow(pool, "SELECT created_at FROM relations WHERE src = 'iso-check'")
+        |> db.ScanRow of string onerr return
+    assertISO8601(t, relAt)
 
 # --- hide_superseded ---
 

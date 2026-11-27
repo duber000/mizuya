@@ -179,7 +179,7 @@ func attachMediaBytes(pool: db.Pool, dbPath: string, args: AttachArgs, bytes: li
 
     db.Exec(
         pool,
-        "INSERT INTO media (entity_id, kind, mime, path, sha256, bytes, caption, scanned, source) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+        "INSERT INTO media (entity_id, kind, mime, path, sha256, bytes, caption, scanned, source, at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
         entityId,
         kind,
         mime,
