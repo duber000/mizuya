@@ -4,15 +4,34 @@
 
 petiole main
 
+import "regexp"
 import "stdlib/db"
-import "stdlib/errors" as errs
 import "stdlib/maps"
 import "stdlib/sort"
+import "stdlib/string" as strpkg
 
 # rrfK is the Reciprocal Rank Fusion constant. The standard value of 60
 # balances contributions so that a #1 hit from either ranker scores ~0.016
 # while a #10 hit scores ~0.014 — keeping both rankers competitive.
 const rrfK: int = 60
+
+# ftsTokenPattern matches runs of characters that are always safe to
+# embed in an FTS5 MATCH expression (quoted, they can never parse as
+# column filters, operators, or syntax errors).
+var ftsTokenPattern = regexp.MustCompile(`[A-Za-z0-9_]+`)
+
+# ftsSanitize rewrites arbitrary text into a safe FTS5 MATCH expression:
+# each alphanumeric/underscore run becomes a double-quoted token, joined
+# by OR so BM25 can rank documents matching any of them. Returns empty
+# when the text carries no tokenizable characters.
+func ftsSanitize(query: string) string
+    tokens := ftsTokenPattern.FindAllString(query, -1)
+    if len(tokens) equals 0
+        return ""
+    quoted := make(list of string, 0, len(tokens))
+    for _, tok in tokens
+        quoted = append(quoted, "\"" + tok + "\"")
+    return strpkg.Join(quoted, " OR ")
 
 # hybridSearch runs FTS5 keyword search and vector similarity search in
 # parallel, then merges results using Reciprocal Rank Fusion. If vector
@@ -24,14 +43,34 @@ func hybridSearch(pool: db.Pool, query: string, limit: int, filter: SearchFilter
     if limit <= 0
         limit = 10
 
+    # Invalid filters are caller errors — reject them before either
+    # ranker so the FTS fallback below can never swallow them.
+    _, _, ferr := entityFilterClauses(filter)
+    if ferr isnt empty
+        return empty list of SearchHit, ferr
+
     # Fetch more candidates than needed from each ranker so RRF has
     # enough signal to re-rank effectively.
     fetchLimit := limit * 3
 
-    # 1. FTS5 keyword search
+    # 1. FTS5 keyword search. Callers pass arbitrary natural language,
+    # which is not always valid FTS5 (e.g. "town-builder", "kibigia.org").
+    # On a MATCH error, retry with a sanitized token query; if that also
+    # fails, degrade to vector-only rather than failing the whole search.
     ftsHits, ftsErr := ftsSearch(pool, query, fetchLimit, filter)
     if ftsErr isnt empty
-        return empty, errs.Wrap(ftsErr, "FTS search failed")
+        sanitized := ftsSanitize(query)
+        if sanitized is empty
+            # No tokenizable characters: skip the FTS leg, not an error.
+            ftsHits = empty list of SearchHit
+            ftsErr = empty
+        else
+            # The sanitized query is always valid FTS5; if it still
+            # fails, the index/database itself is unhappy. Degrade to
+            # vector-only; the error surfaces only if it fails too.
+            ftsHits, ftsErr = ftsSearch(pool, sanitized, fetchLimit, filter)
+    if ftsErr isnt empty
+        ftsHits = empty list of SearchHit
 
     # 2. Vector similarity search — embed the query text and compare.
     vec, embedErr := embedText(query)
@@ -41,9 +80,13 @@ func hybridSearch(pool: db.Pool, query: string, limit: int, filter: SearchFilter
         vecHits, vecErr = similar(pool, vec, fetchLimit, filter)
 
     # If vector search fails (no embeddings, etc.), just return FTS results.
+    # Both rankers failing means the database itself is broken — surface
+    # the FTS error rather than report a silent empty success.
     if vecErr isnt empty or (vecHits is empty)
         if len(ftsHits) > limit
             return ftsHits[:limit], empty
+        if (ftsHits is empty) and ftsErr isnt empty and vecErr isnt empty
+            return empty list of SearchHit, ftsErr
         return ftsHits, empty
 
     # 3. Build per-entity RRF scores from both ranked lists.

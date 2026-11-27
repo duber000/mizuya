@@ -249,6 +249,40 @@ func TestHybridSearchHitShape(t: reference testing.T)
     test.AssertNoError(t, err)
     test.AssertEqual(t, len(hits), 0)
 
+func TestFTSSanitize(t: reference testing.T)
+    test.AssertEqual(t, ftsSanitize("town-builder"), "\"town\" OR \"builder\"")
+    test.AssertEqual(t, ftsSanitize("kibigia.org"), "\"kibigia\" OR \"org\"")
+    test.AssertEqual(t, ftsSanitize(`say "hi" (now)`), "\"say\" OR \"hi\" OR \"now\"")
+    test.AssertEqual(t, ftsSanitize("!!!"), "")
+    test.AssertEqual(t, ftsSanitize(""), "")
+
+func TestHybridSearchToleratesBadFTSSyntax(t: reference testing.T)
+    pool, dir := openTestPool(t)
+    defer closeTestPool(pool, dir)
+    seedSearchEntities(t, pool)
+    _, rerr := reEmbedIfChanged(pool, "sqlite")
+    test.AssertNoError(t, rerr)
+    _, rerr = reEmbedIfChanged(pool, "kukicha")
+    test.AssertNoError(t, rerr)
+    _, rerr = reEmbedIfChanged(pool, "vec1")
+    test.AssertNoError(t, rerr)
+
+    # Raw text that is invalid FTS5 must not kill the whole search.
+    _, err := hybridSearch(pool, "town-builder", 10)
+    test.AssertNoError(t, err)
+    _, err = hybridSearch(pool, "kibigia.org", 10)
+    test.AssertNoError(t, err)
+
+    # No tokenizable characters at all: FTS leg is skipped, no error.
+    _, err = hybridSearch(pool, "!!!", 10)
+    test.AssertNoError(t, err)
+
+    # The sanitized retry must still surface FTS signal: "embedded-database"
+    # is invalid FTS5 raw, but its tokens match the sqlite entity.
+    hits, err := hybridSearch(pool, "embedded-database", 10)
+    test.AssertNoError(t, err)
+    test.AssertTrue(t, hits isnt empty, "expected sanitized FTS or vector leg to return hits")
+
 func TestListDrift(t: reference testing.T)
     pool, dir := openTestPool(t)
     defer closeTestPool(pool, dir)

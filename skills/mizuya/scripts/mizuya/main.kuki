@@ -112,6 +112,8 @@ func main()
             makeArchiveCmd(),
             makeUnarchiveCmd(),
             makeSearchObservationsCmd(),
+            makeSnapshotCmd(),
+            makeVerifyCmd(),
         )
         |> cli.Run()
 

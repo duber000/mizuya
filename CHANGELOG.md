@@ -5,6 +5,19 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+### Fixed
+- **Hybrid search no longer hard-fails on invalid FTS5 queries.** Callers
+  pass arbitrary natural language (e.g. `town-builder`, `kibigia.org`),
+  which is not always valid FTS5; a `MATCH` error used to abort the whole
+  search even though the vector leg could have answered. `hybridSearch`
+  now retries a failed MATCH with a sanitized token query (alphanumeric
+  runs, double-quoted, OR-joined — always valid FTS5), and if that also
+  fails, degrades to vector-only results instead of erroring. Queries
+  with no tokenizable characters skip the FTS leg entirely. Invalid
+  `--since`/`--until` filters are still errors (now validated up front,
+  before either ranker), and if both rankers fail the error is surfaced
+  rather than reported as an empty success.
+
 ### Added
 - **`snapshot` and `verify` subcommands** for backups. `mizuya snapshot
   --out <file.tar.gz>` takes an online, consistent snapshot of the live
