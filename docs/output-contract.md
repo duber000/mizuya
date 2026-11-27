@@ -14,6 +14,13 @@ old shapes must adjust:
   instead of `observed: ...` / `related: ...` confirmation text (see the MCP
   tools section). `add_observation` returns `observation_id` — the handle to
   pass as `supersedes`.
+- **MCP `attach_media` now returns the `AttachResult` JSON object** (the same
+  shape as `attach --json`: `status`, `entity_id`, `media_id`, `kind`,
+  `mime`, `path`, `sha256`, `bytes`, `redacted`, `bytes_scanned`,
+  `embed_deferred`) instead of short confirmation text. The `[bytes unscanned]`
+  honesty marker lives on as `bytes_scanned: false` (always). On
+  `already-attached`, nothing was stored and `redacted` refers to the
+  discarded candidate text, not to stored data.
 - **`hide_superseded` now defaults to true** on both surfaces: the CLI gained
   `--show-superseded` to include them, and the MCP `hide_superseded` argument
   is optional (omit or `true` to hide; `false` to include).
@@ -170,12 +177,15 @@ Write tools return structured JSON objects (never raw input echoes):
   "dst": string}` — `rel` is the stored (possibly redacted) label.
 - `archive_entity` → `{"status": "archived" | "unarchived", "id": string}` —
   soft delete; see the `archive` CLI row above for exact semantics.
+- `attach_media` → `AttachResult` — the same object `attach --json` prints
+  (see the `attach` CLI row and the paragraph below).
 
 `attach_media` takes either `file` (a host-local path —
 the preferred, stdio-safe form) or `data_base64` (with `mime` required), plus optional
 `id` (omit for a media-native `type=media` entity), `kind`, `caption`, `name`, and
-`source`. It returns short confirmation text (`attached: ...` / `already-attached: ...`)
-always ending with the `[bytes unscanned]` honesty marker — never raw input echoes;
+`source`. It returns the `AttachResult` JSON object (see the `attach` CLI row
+above — identical shape, including `bytes_scanned: false` as the permanent
+"bytes never secret-scanned" honesty marker; never raw input echoes);
 `similar_media` takes the same `file` / `data_base64` (+ `mime`) query pair, accepts a
 `kind` filter and `limit`, and returns `MediaHit[]` as JSON text (same `dist` guard as
 `similar --media`: query dim must match the stored index dim).

@@ -5,6 +5,16 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+### Breaking
+- **MCP `attach_media` now returns the `AttachResult` JSON object** (the
+  same shape as `attach --json`: `status`, `entity_id`, `media_id`, `kind`,
+  `mime`, `path`, `sha256`, `bytes`, `redacted`, `bytes_scanned`,
+  `embed_deferred`) instead of short confirmation text — completing the
+  structured-JSON-everywhere contract for MCP tools. The `[bytes unscanned]`
+  honesty marker lives on as `bytes_scanned: false` (always). On
+  `already-attached`, nothing was stored; `redacted` refers to the discarded
+  candidate text. See `docs/output-contract.md` (contract notes).
+
 ### Fixed
 - **Hybrid search no longer hard-fails on invalid FTS5 queries.** Callers
   pass arbitrary natural language (e.g. `town-builder`, `kibigia.org`),

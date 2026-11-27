@@ -32,6 +32,19 @@ type obsPayload
     At: string as "at"
     Redacted: int as "redacted"
 
+# attachPayload is the typed shape of the attach_media tool result.
+type attachPayload
+    Status: string as "status"
+    EntityId: string as "entity_id"
+    MediaId: string as "media_id"
+    Kind: string as "kind"
+    Mime: string as "mime"
+    Sha256: string as "sha256"
+    Bytes: int as "bytes"
+    Redacted: int as "redacted"
+    BytesScanned: bool as "bytes_scanned"
+    EmbedDeferred: bool as "embed_deferred"
+
 # handlerResult unwraps the CallToolResult a handler returns and fails the
 # test otherwise.
 func handlerResult(t: reference testing.T, res: any, err: error) reference gomcp.CallToolResult
@@ -99,6 +112,38 @@ func TestAddObservationReturnsStructuredPayload(t: reference testing.T)
         "observation_id must be present and non-empty",
     )
     test.AssertEqual(t, payload.Redacted, 0)
+
+func TestAttachMediaReturnsStructuredPayload(t: reference testing.T)
+    t.Setenv("MIZUYA_EMBED_PROVIDER", "hash")
+    t.Setenv("MIZUYA_EMBED_MODEL", "hash-demo-64")
+    dir, err := os.MkdirTemp("", "mizuya-mcp-test-")
+    test.AssertNoError(t, err)
+    defer
+        os.RemoveAll(dir) onerr discard
+    saved := mcpDBPath
+    mcpDBPath = filepath.Join(dir, "test.db")
+    defer
+        mcpDBPath = saved
+
+    # 1x1 PNG; bytes are hashed and embedded blindly, never decoded.
+    png := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    res, aerr := handleAttachMedia(attachMediaArgs{
+        DataBase64: png,
+        Mime: "image/png",
+    })
+    ctr := handlerResult(t, res, aerr)
+    test.AssertFalse(t, ctr.IsError, "attach_media must succeed")
+    body := handlerText(t, ctr)
+    payload, perr := jsonpkg.Parse of attachPayload from body
+    test.AssertNoError(t, perr)
+    test.AssertEqual(t, payload.Status, "media-native")
+    test.AssertEqual(t, payload.Kind, "image")
+    test.AssertEqual(t, payload.Mime, "image/png")
+    test.AssertEqual(t, payload.BytesScanned, false)
+    test.AssertEqual(t, payload.Redacted, 0)
+    test.AssertTrue(t, payload.MediaId isnt empty, "media_id must be present")
+    test.AssertTrue(t, payload.EntityId isnt empty, "entity_id must be present")
+    test.AssertTrue(t, payload.Bytes > 0)
 
 func TestGetContextRefusesArchived(t: reference testing.T)
     dir, err := os.MkdirTemp("", "mizuya-mcp-test-")

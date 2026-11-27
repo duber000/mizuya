@@ -698,7 +698,7 @@ func registerAttachMedia(server: reference mcp.Server)
     mcp.ToolWithOpts of attachMediaArgs(
         server,
         "attach_media",
-        "Attach a media file (image, audio, or video) to the knowledge graph — to an existing entity, or as a new media-native entity when id is omitted. Bytes are stored sha256-addressed and embedded via the configured provider; the bytes are never secret-scanned and the caption gate is the only text-redaction path. Video is frame-sampled with ffmpeg and mean-pooled into one vector. Returns confirmation text; get_context lists attachments.",
+        "Attach a media file (image, audio, or video) to the knowledge graph — to an existing entity, or as a new media-native entity when id is omitted. Bytes are stored sha256-addressed and embedded via the configured provider; the bytes are never secret-scanned and the caption gate is the only text-redaction path. Video is frame-sampled with ffmpeg and mean-pooled into one vector. Returns the AttachResult JSON object (status, entity_id, media_id, kind, mime, path, sha256, bytes, redacted, bytes_scanned, embed_deferred); get_context lists attachments.",
         schema,
         mcp.ToolOpts{Idempotent: true, Destructive: true},
         handleAttachMedia,
@@ -730,7 +730,7 @@ func handleAttachMedia(args: attachMediaArgs) (any, error)
         res, aerr := attachMediaFile(pool, mcpDBPath, aa)
         if aerr isnt empty
             return mcp.ErrorResult("attach failed: {aerr}"), empty
-        return attachMediaText(res)
+        return attachMediaJSON(res)
 
     if args.Mime is empty
         return mcp.ErrorResult("mime is required with data_base64"), empty
@@ -740,7 +740,7 @@ func handleAttachMedia(args: attachMediaArgs) (any, error)
     res, aerr := attachMediaBytes(pool, mcpDBPath, aa, raw, "")
     if aerr isnt empty
         return mcp.ErrorResult("attach failed: {aerr}"), empty
-    return attachMediaText(res)
+    return attachMediaJSON(res)
 
 # queryMediaVector computes the query vector for the similar_media tool:
 # file input goes through the shared query path (image/audio embed
@@ -764,23 +764,14 @@ func queryMediaVector(args: similarMediaArgs) (list of float64, error)
         return empty list of float64, error "video via data_base64 is not supported yet; pass a host-local file path instead"
     return embedMedia(kind, raw)
 
-# attachMediaText renders the attach_media confirmation. A no-op
-# (already-attached) says so explicitly instead of crediting a redaction
-# of text that was never stored.
-func attachMediaText(res: AttachResult) (any, error)
-    if res.Status equals "already-attached"
-        return mcp.TextResult(
-            "already-attached: media {res.MediaId} already on entity {res.EntityId}; nothing stored. [bytes unscanned]",
-        ), empty
-    redactNote := ""
-    if res.Redacted > 0
-        redactNote = " (redacted {res.Redacted} secret(s) before storing)"
-    embedNote := ""
-    if res.EmbedDeferred
-        embedNote = " (embedding deferred)"
-    return mcp.TextResult(
-        "{res.Status}: media {res.MediaId} on entity {res.EntityId} ({res.Kind}, {res.Bytes} B){redactNote}{embedNote} [bytes unscanned]",
-    ), empty
+# attachMediaJSON renders the attach_media result as the same AttachResult
+# object `attach --json` prints. Status "already-attached" means nothing
+# was stored — the candidate text was discarded, so its `redacted` count
+# refers to it, not to stored data. bytes_scanned is always false: media
+# bytes are never secret-scanned.
+func attachMediaJSON(res: AttachResult) (any, error)
+    data := jsonpkg.PrettyBytes(res) onerr return mcp.ErrorResult("json error: {error}"), empty
+    return mcp.TextResult(data as string), empty
 
 # --- Tool: similar_media ---
 
