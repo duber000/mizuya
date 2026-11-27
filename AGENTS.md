@@ -4,7 +4,7 @@ title: AGENTS.md — mizuya repository guide
 description: Guidelines, verification commands, and architecture notes for agents working in mizuya.
 tags: [agents, conventions, kukicha, mcp, memory, vector, sqlite]
 generated: { by: antigravity/gemini-3.8-flash, at: 2026-09-26T12:51:00-04:00 }
-verified: 2026-11-23T00:00:00Z
+verified: 2026-11-27T00:00:00Z
 stale_after: 2026-12-26T00:00:00Z
 status: stable
 sources:
@@ -63,6 +63,7 @@ These are pinned in `docs/output-contract.md` and guarded by `contract_test.kuki
 - Every `ObsRow` carries `supersedes` and `superseded_by` as `null` when absent; superseded observations are hidden by default (`hide_superseded` defaults true; CLI `--show-superseded`, MCP `hide_superseded: false` include them, flagged).
 - `prune-history` is the ONLY deliberate deletion from `entity_history` (retention policy in `docs/STORAGE.md`); it always keeps the newest version per entity and fails closed with neither `--keep` nor `--before`.
 - Secret redaction must stay visible in every mode: observe `--json` `redacted` count and text-mode note, and a stderr `WARN` for *every* redacted field on any write (name, summary, tags, observation text/source, relation labels; detector names only — never log `SecretFinding.Raw`). Upsert echoes the redacted `Entity` it stored.
+- `mizuya snapshot` prints exactly one line, `<sha256>  <path>` (sha256sum-compatible; `--json` prints `{"path","sha256","bytes"}`). The archive carries `mizuya.db` at its root plus `assets/`, is created mode 0600, and `--out` must not pre-exist. `mizuya verify` exits non-zero on any failure — unsafe member, missing `mizuya.db`, `integrity_check`, vec-table probe, or an empty database. The infra backup job consumes both; see `docs/BACKUP.md`. `verify` opens the snapshot read-only and must never run `initDB` (it reports the snapshot as it is, never migrates it).
 
 ### 5. Entity vector storage
 - `embeddings_vec` is the authoritative entity vector store: one vec1 row carries `vector`, `entity_id`, `model`, and `dim`. Do not reintroduce `embeddings_raw` or another duplicate vector table.

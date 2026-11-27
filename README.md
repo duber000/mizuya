@@ -56,6 +56,8 @@ binary at ./mizuya
 | `reembed` | All-or-nothing rebuild of the vector store with the configured provider — required after switching embedding models/dimensions (`--json` for the structured result) |
 | `import-okf` | Import an OKF knowledge bundle (`--bundle docs`, default: `docs/` with `index.md`/`log.md` skipped per SPEC §8/§9) into entities + `references` edges; idempotent |
 | `import-openwiki` | Deprecated alias for `import-okf --bundle openwiki` |
+| `snapshot` | Online, consistent snapshot of the database + media assets into a single `.tar.gz` (`--out`, must not already exist; prints `<sha256>  <path>`, sha256sum-compatible; `--json` for `{"path","sha256","bytes"}`) |
+| `verify` | Verify a snapshot archive (`<file.tar.gz>`): safe extract, read-only open with mizuya's extensions, `integrity_check`, sanity counts, vec-table probes; non-zero exit on any failure, including an empty database |
 | `mcp`     | Start the MCP server for AI agent access — stdio, or `--http` (bearer-authed) |
 
 All commands accept the global `--db <path>` (default `.mizuya/mizuya.db`)
@@ -64,6 +66,16 @@ command are a stable, parseable contract — see
 [docs/output-contract.md](docs/output-contract.md). In text mode, search and
 similar print a ready-to-run drill-down line per hit (`→ context --id <id>
 --history`).
+
+## Backups
+
+`mizuya snapshot --out backup.tar.gz` writes a single, self-contained
+archive (`mizuya.db` + `assets/`) that is safe to take while the server is
+running — no stop, no `-wal` copying, and the copy is compacted by
+`VACUUM INTO`. `mizuya verify backup.tar.gz` checks it before you trust it
+(integrity_check, sanity counts, vec-table probes). Encryption and upload
+are deliberately out of scope — see [docs/BACKUP.md](docs/BACKUP.md) for
+the full snapshot → encrypt + upload → restore procedure.
 
 ## Secret gate
 
@@ -420,8 +432,9 @@ embed.kuki        — Embedding provider abstraction (default ollama+embeddingge
 scanner.kuki      — Fail-closed secret scanner (pluggable SecretScanner, regex default)
 mcp_server.kuki   — MCP server: tool registrations + stdio entry point
 mcp_http.kuki     — MCP streamable HTTP transport + bearer-token gate
+snapshot.kuki     — snapshot & verify subcommands (backups; see docs/BACKUP.md)
 format.kuki       — Terminal display formatting
 *_test.kuki       — store_test, bench_test (labeled recall + benchmarks),
                     contract_test (output contract), phase3_test (scanner/import)
-docs/             — output-contract.md (stable --json shapes), STORAGE.md (cost model + retention)
+docs/             — output-contract.md (stable --json shapes), STORAGE.md (cost model + retention), BACKUP.md (snapshot/verify + restore)
 ```
