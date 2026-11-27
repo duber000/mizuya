@@ -78,12 +78,12 @@ func upsertEntity(pool: db.Pool, id: string, etype: string, name: string, summar
         "tags": tags,
     })
 
-    insertSQL := "INSERT INTO entities (id, type, name, data) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET type = excluded.type, name = excluded.name, data = json_set(json_set(entities.data, '$.summary', ?), '$.tags', json(?)), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    insertSQL := "INSERT INTO entities (id, type, name, data, created_at, updated_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ON CONFLICT(id) DO UPDATE SET type = excluded.type, name = excluded.name, data = json_set(json_set(entities.data, '$.summary', ?), '$.tags', json(?)), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
 
     # Copy the post-update state into the version log, unless it is
     # identical to the latest logged version (latest = newest changed_at,
     # tie-broken by uuid7 id).
-    historySQL := "INSERT INTO entity_history (entity_id, type, name, data) SELECT e.id, e.type, e.name, e.data FROM entities e WHERE e.id = ? AND NOT EXISTS (SELECT 1 FROM entity_history h WHERE h.entity_id = e.id AND h.id = (SELECT h2.id FROM entity_history h2 WHERE h2.entity_id = e.id ORDER BY h2.changed_at DESC, h2.id DESC LIMIT 1) AND h.type = e.type AND h.name = e.name AND h.data = e.data)"
+    historySQL := "INSERT INTO entity_history (entity_id, type, name, data, changed_at) SELECT e.id, e.type, e.name, e.data, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM entities e WHERE e.id = ? AND NOT EXISTS (SELECT 1 FROM entity_history h WHERE h.entity_id = e.id AND h.id = (SELECT h2.id FROM entity_history h2 WHERE h2.entity_id = e.id ORDER BY h2.changed_at DESC, h2.id DESC LIMIT 1) AND h.type = e.type AND h.name = e.name AND h.data = e.data)"
 
     err := db.Transaction(pool, tx =>
         db.TxExec(
@@ -175,7 +175,7 @@ func addObservation(pool: db.Pool, id: string, text: string, source: string, sup
 
     rows, qerr := db.Query(
         pool,
-        "INSERT INTO observations (entity_id, text, source, supersedes) VALUES (?, ?, ?, NULLIF(?, '')) RETURNING id, at, supersedes",
+        "INSERT INTO observations (entity_id, text, source, supersedes, at) VALUES (?, ?, ?, NULLIF(?, ''), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) RETURNING id, at, supersedes",
         id,
         clean,
         source,
@@ -415,7 +415,7 @@ func relate(pool: db.Pool, src: string, rel: string, dst: string) (string, error
         return "", rerr
     db.Exec(
         pool,
-        "INSERT OR IGNORE INTO relations (src, rel, dst) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO relations (src, rel, dst, created_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
         src,
         cleanRel,
         dst,

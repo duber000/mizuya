@@ -24,7 +24,7 @@ petiole main
 
 skill Mizuya
     description: "Persistent memory for AI agents: a SQLite-backed knowledge graph (FTS5 + cosine-vector search) for entities, typed relations, and append-only observations. Use it to remember projects, tools, people, concepts and their connections across sessions. Access via MCP (mizuya mcp) with 10 tools: upsert_entity, add_observation (returns observation_id; pass supersedes to correct), relate, search, search_observations, get_context, similar, attach_media, similar_media, archive_entity — or the CLI (mizuya <subcommand>). Conventions: observations are append-only — correct with supersedes; superseded observations are hidden by default (hide_superseded: false to include). Free text passes a fail-closed secret gate (redacted in place; echoes are post-redaction). Deletion is soft (archive_entity): archived entities are invisible to reads and get_context refuses them. Tags over MCP are a JSON array of strings; the CLI takes comma-separated tags. source labels are normalized to lowercase. Timestamps are ISO 8601 UTC."
-    version: "0.4.0"
+    version: "0.5.0"
 
 import "os"
 import "path/filepath"
@@ -52,7 +52,7 @@ import "github.com/ncruces/go-sqlite3/ext/vec1" as vec1ext
 # Version is what the CLI and the MCP server report. The `skill` block's
 # `version` above is declarative and must be kept in sync by hand — the
 # 0.3.0 release shipped reporting 0.2.0 when the literals drifted.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 # validEntityTypes is surfaced in CLI flag help and MCP tool schemas — the
 # wire values (lowercase), since those are what --type accepts and what is

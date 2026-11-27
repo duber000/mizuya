@@ -5,6 +5,8 @@ workflow builds images on tag push.
 
 ## Unreleased
 
+## 0.5.0 — 2026-11-27
+
 ### Breaking
 - **MCP `attach_media` now returns the `AttachResult` JSON object** (the
   same shape as `attach --json`: `status`, `entity_id`, `media_id`, `kind`,
